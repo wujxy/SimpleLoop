@@ -1,0 +1,54 @@
+"""SimpleLoop CLI entry point.
+
+  simpleloop run --config task.yaml --run-dir ./run-001
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from . import loop
+from . import config as config_mod
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="SimpleLoop: minimal serial LLM optimization loop.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", help="Run the loop.")
+    run.add_argument("--config", required=True, help="Task config (YAML/JSON).")
+    run.add_argument("--run-dir", required=True, help="Directory for this run's repo + artifacts.")
+
+    validate = sub.add_parser("validate", help="Validate a config without running.")
+    validate.add_argument("--config", required=True, help="Task config (YAML/JSON).")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "validate":
+        try:
+            cfg = config_mod.load(args.config)
+        except config_mod.ConfigError as exc:
+            print(f"Config error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Valid config: {args.config}")
+        print(f"  goal: {cfg['goal']}")
+        print(f"  max_rounds: {cfg['max_rounds']}")
+        print(f"  eval commands: {len(cfg['eval_commands'])}")
+        print(f"  repo: {cfg['repo_path']} @ {cfg['baseline_ref']}")
+        return
+
+    if args.command == "run":
+        try:
+            summary = loop.run(args.config, args.run_dir)
+        except config_mod.ConfigError as exc:
+            print(f"Config error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"\nBest: {summary['best_sha']} (score {summary['best_score']:.2f}) "
+              f"over {summary['rounds']} rounds")
+        print(f"Working repo: {summary['repo']}")
+        return
+
+
+if __name__ == "__main__":
+    main()

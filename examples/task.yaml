@@ -1,0 +1,26 @@
+kind: task
+
+task:
+  goal: >
+    Optimize the speed of the algorithm under src/. Reduce ms/event while keeping
+    results numerically equivalent. Edit only the admitted source files.
+
+safety:
+  editable_paths:
+    - "src/**/*.cc"
+    - "src/**/*.h"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "CMakeLists.txt"
+
+loop:
+  max_rounds: 4
+
+eval:
+  commands:
+    - "python -m pytest -q tests/"        # optional; omit to judge on diff alone
+
+source:
+  path: /path/to/your/repo               # the git repo to optimize
+  baseline_ref: HEAD
