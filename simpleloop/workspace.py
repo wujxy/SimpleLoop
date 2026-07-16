@@ -56,15 +56,23 @@ class Workspace:
         return self._baseline_sha
 
     def _git_clone_local(self, src: Path, dst: Path, env: dict) -> None:
-        # --local hardlinks the object store (fast, no re-compression). --no-hardlinks
-        # would fully copy; --local is fine because we never delete the source repo.
-        completed = subprocess.run(
+        # Prefer --local (hardlinks the object store: fast, no re-compression) but
+        # hardlinks only work within one filesystem. A run_dir commonly lives on a
+        # different mount than the source repo, so fall back to a full copy there.
+        for args in (
             ["git", "clone", "--local", "--no-checkout", str(src), str(dst)],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env, check=False,
+            ["git", "clone", "--no-checkout", str(src), str(dst)],
+        ):
+            completed = subprocess.run(
+                args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, check=False,
+            )
+            if completed.returncode == 0:
+                return
+        raise WorkspaceError(
+            f"git clone failed: {completed.stderr.strip()}\n"
+            "(both --local hardlink and full copy failed)"
         )
-        if completed.returncode != 0:
-            raise WorkspaceError(f"git clone --local failed: {completed.stderr.strip()}")
 
     # ---- per-round worktree ----
 

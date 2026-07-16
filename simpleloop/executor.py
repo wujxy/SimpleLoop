@@ -41,11 +41,16 @@ Direction to implement:
 
 Safety (hard rules):
 - You may only edit files under: {editable}
-- You must NOT touch files under: {frozen}  (touching them makes the gate reject this round)
-- Do NOT run `git commit` yourself — the harness will commit your changes.
-- Make sure the code still builds/runs after your edits.
+- You must NOT touch files under: {frozen}  (touching them makes the gate reject this round, voiding it)
+- Do NOT run `git commit` / `git add` yourself — the harness stages and commits your edits.
+- Do NOT edit files outside the working tree you are in.
 
-Edit the files now. When done, simply stop; no JSON output is needed."""
+Guidance:
+- Implement the direction with the smallest correct change you can.
+- Make sure the code still runs after your edits — run the build/tests/benchmark yourself if they are available, and fix anything you break.
+- Keep the change focused; do not reformat or refactor unrelated code.
+
+When you are done, simply stop. No JSON output is needed — the harness will inspect your file changes."""
     agent.run_text(prompt, cwd=worktree, label=f"executor r{round_id}")
 
     changed = workspace.changed_paths(worktree)

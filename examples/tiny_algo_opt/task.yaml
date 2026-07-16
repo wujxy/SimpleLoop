@@ -1,0 +1,32 @@
+kind: task
+
+task:
+  goal: >
+    Optimize the tinyalgo pair-counting implementation in tinyalgo/__init__.py for
+    speed (lower ms_per_call) while keeping results exactly correct: the pytest
+    suite and scripts/check_drift.py must still pass. Edit only tinyalgo source.
+
+safety:
+  editable_paths:
+    - "tinyalgo/**/*.py"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "benchmarks/**"
+    - "README.md"
+    - "pyproject.toml"
+
+loop:
+  max_rounds: 3
+
+# The harness runs these after each commit and feeds the stdout to the judger.
+# correctness + drift are hard gates (must pass); bench is the speed signal.
+eval:
+  commands:
+    - "PYTHONPATH=. python -m pytest tests/ -q"
+    - "PYTHONPATH=. python scripts/check_drift.py"
+    - "PYTHONPATH=. python scripts/bench.py"
+
+source:
+  path: repo
+  baseline_ref: HEAD

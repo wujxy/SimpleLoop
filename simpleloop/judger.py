@@ -44,9 +44,19 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
 
 
 def _build_prompt(goal: str, proposal: str, diff: str, eval_block: str) -> str:
+    has_eval = bool(eval_block)
     eval_section = f"""Eval command output:
 {eval_block}
-""" if eval_block else ""
+""" if has_eval else ""
+    eval_guidance = (
+        "- The eval output above is the ground truth. If any eval command failed (non-zero exit), "
+        "cap the score at 0.50 and say so in feedback.\n"
+        "- Reward a real, measured improvement in the eval output; do not credit an improvement that is "
+        "only asserted in the diff without eval evidence.\n"
+    ) if has_eval else (
+        "- There is no eval output this round; judge on the diff alone. Do not claim a measured speedup "
+        "you cannot see — cap the score at 0.70 unless the diff clearly shows a correct, low-risk improvement.\n"
+    )
     return f"""You are the JUDGER in a serial optimization loop. Grade this round's change.
 
 Task goal:
@@ -59,10 +69,24 @@ Change (git diff vs the previous round's result):
 ```diff
 {diff}
 ```
-{eval_section}
-Judge whether the change: moves in the right direction, achieves real improvement (use the eval output if present), introduces risk, and is good-quality code. Give a score from 0.0 to 1.0 and concrete feedback for the next proposer.
+{eval_section}Scoring rubric (score 0.0 to 1.0):
+- 0.90-1.00: clearly exceeds the goal — real measured improvement (from eval) with no regressions and clean code.
+- 0.70-0.90: solid improvement in the right direction, low risk, code still correct.
+- 0.50-0.70: directionally useful but modest — small gain, or gain without eval proof, or minor risk.
+- 0.30-0.50: weak / inconclusive — change happened but unclear benefit, or validation incomplete.
+- 0.10-0.30: poor — wrong direction, introduced risk, broke correctness, or mostly duplicate work.
+- 0.00-0.10: failed — no real change, broken code, or touched something it shouldn't.
 
-Return exactly one JSON object: {{"score": 0.0, "feedback": "<feedback>"}}"""
+Judging guidance:
+- Judge whether the change moves toward the goal, achieves real improvement, introduces risk, and is good-quality code.
+{eval_guidance}- Penalize unsupported claims, regressions, and changes that break correctness.
+- Give concrete, actionable feedback for the next proposer (what to try next, or what to fix).
+
+Final delivery contract (mandatory):
+- Your final response MUST be exactly one parseable JSON object: {{"score": 0.0, "feedback": "<feedback>"}}
+- A ```json code fence is acceptable; any prose, heading, commentary, or natural-language summary outside the JSON is forbidden.
+- If evidence is incomplete or contradictory, still return the JSON object with a low score and feedback explaining the uncertainty.
+- Do not ask for more data and do not emit a wrap-up."""
 
 
 def _parse(data: dict) -> Judgment:

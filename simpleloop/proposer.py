@@ -45,9 +45,18 @@ Safety:
 Prior rounds (proposal / judger score / feedback):
 {hist_block}
 
-Propose exactly one direction for the next round. Keep it short — a rough direction, not a long plan. Point at specific functions/modules/files when you can. Do not repeat directions that prior feedback says failed.
+Guidance:
+- Propose exactly one direction for the next round.
+- Keep it short — a rough direction, not a long plan. Point at specific functions/modules/files when you can.
+- Do not repeat directions that prior feedback says failed; mutate from the best-scoring round's idea when there is one.
+- Keep the change small enough to implement and verify in one round.
+- Do not assume task facts that are not visible in the source code or prior feedback.
 
-Return exactly one JSON object: {{"proposal": "<your direction>"}}"""
+Final delivery contract (mandatory):
+- Your final response MUST be exactly one parseable JSON object: {{"proposal": "<your direction>"}}
+- A ```json code fence is acceptable; any prose, heading, commentary, or natural-language wrap-up outside the JSON is forbidden.
+- If you are uncertain or blocked, still return the JSON object with a conservative, specific direction.
+- Do not ask for more data and do not emit a summary."""
     data = agent.run_json(prompt, cwd=cwd, label="proposer")
     proposal = data.get("proposal")
     if not isinstance(proposal, str) or not proposal.strip():

@@ -1,0 +1,50 @@
+# tiny_algo_opt — SimpleLoop example
+
+A small, self-contained optimization task for exercising SimpleLoop end-to-end.
+The target is a deliberately-slow-but-correct 2-D Manhattan pair-counting
+function; the loop should make it faster without breaking correctness.
+
+## Layout
+```
+tiny_algo_opt/
+  task.yaml          # SimpleLoop task config (goal, safety, eval, source)
+  repo/              # the git repo to optimize (real working tree)
+    tinyalgo/__init__.py   # count_pairs — the optimization target
+    tests/test_correctness.py
+    scripts/check_drift.py # numerical-equivalence gate
+    scripts/bench.py       # speed benchmark (writes benchmarks/speed.csv)
+```
+
+## Run
+
+The target `repo/` must be a real git repo (SimpleLoop clones it with
+`git clone --local`). Initialize it once:
+
+```bash
+bash examples/tiny_algo_opt/setup.sh
+# or, by hand:
+cd examples/tiny_algo_opt/repo && git init -q && git add -A && git commit -qm init
+```
+
+Then:
+
+```bash
+# from the SimpleLoop checkout
+simpleloop validate --config examples/tiny_algo_opt/task.yaml
+simpleloop run      --config examples/tiny_algo_opt/task.yaml \
+                    --run-dir   examples/tiny_algo_opt/runs/run-001
+```
+
+## What the loop does on this task
+- **proposer** reads `repo/tinyalgo/` and proposes a speedup direction.
+- **executor** edits `tinyalgo/__init__.py` in a worktree; the harness commits.
+- **harness** runs the three eval commands (pytest, drift, bench) and feeds their
+  stdout to the judger.
+- **judger** grades the diff + eval output: a change that breaks correctness or
+  drift should score low; a change that lowers `ms_per_call` with all gates green
+  should score high.
+
+## Trace the result
+```bash
+git -C examples/tiny_algo_opt/runs/run-001/repo log --oneline
+```
