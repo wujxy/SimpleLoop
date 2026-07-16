@@ -1,0 +1,66 @@
+kind: task
+
+# SimpleLoop task config for optimizing OMILRECV2 speed, against the UNOPTIMIZED
+# v1.0.0 baseline (~514 ms/evt, 1x). This is the widest optimization space.
+#
+# Source repo: ../../omilrec-v100  (real git repo at v1.0.0 / b51f3b8; the
+#               reference/ref_10evt.root baseline is a real blob — no LFS, so
+#               `git clone --local` gets it directly).
+# Eval runs in the round's worktree (the committed candidate) BEFORE the worktree
+# is removed, so the speed measurement reflects the candidate, not the baseline.
+#
+# The single eval command (scripts/sl_eval.sh) does the whole chain in one shot —
+# source JUNO env, build the lib, run the e2e bit-identical gate, run quick_bench —
+# because SimpleLoop gives each eval command a 600s budget and a fresh worktree
+# (no build artifacts). It prints CORRECTNESS=/SPEED_MS=/EVAL_RESULT= lines the
+# judger reads. Default --evtmax 10 fits the 600s budget.
+#
+# IMPORTANT: v1.0.0's correctness gate is BIT-IDENTICAL (tolerance 0, all 15
+# RecVertex fields vs reference/ref_10evt.root). This is far stricter than
+# v1.11.0's 4mm/7keV gate. Any arithmetic change inside the FCN (log->log1p,
+# pow->cube, Kahan summation, float<->double) breaks it — Minuit amplifies
+# sub-ULP differences into multi-mm vertex drift. Safe optimizations here are
+# bit-identical refactors: hoisting loop-invariant work, caching, SoA data
+# layout, precompute, index partitioning. The FCN is inlined in
+# OMILRECV2/src/OMILRECV2.cc::execute(); likelihood helpers live alongside it.
+
+task:
+  goal: >
+    Optimize the speed of the OMILRECV2 reconstruction algorithm under
+    OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the e2e output
+    BIT-IDENTICAL to the frozen baseline (reference/ref_10evt.root, tolerance 0,
+    all 15 RecVertex fields). This is the UNOPTIMIZED v1.0.0 baseline (~514 ms/evt);
+    the FCN is inlined in OMILRECV2.cc::execute() and the likelihood helpers.
+    Prefer bit-identical refactors (hoisting, caching, SoA, precompute, index
+    partitioning) — any arithmetic change breaks the bit-identical gate.
+    Edit only the admitted source files.
+
+safety:
+  editable_paths:
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "benchmarks/**"
+    - "reference/**"          # the bit-identical baseline — must never be touched
+    - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
+    - "pyproject.toml"
+    - "docs/**"
+    - "CLAUDE.md"
+    - "README.md"
+    - ".gitignore"
+
+loop:
+  max_rounds: 4
+
+eval:
+  commands:
+    # One self-contained command: env + build + e2e bit-identical gate + speed bench.
+    # Prints CORRECTNESS=, SPEED_MS=, EVAL_RESULT= for the judger.
+    - "bash scripts/sl_eval.sh --evtmax 10"
+
+source:
+  path: ../../omilrec-v100    # relative to this task.yaml; real git repo
+  baseline_ref: main          # b51f3b8 (v1.0.0)
