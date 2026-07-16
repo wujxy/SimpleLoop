@@ -15,7 +15,7 @@ safety:
     - "CMakeLists.txt"
 
 loop:
-  max_rounds: 4
+  max_rounds: 10
 
 eval:
   commands:
