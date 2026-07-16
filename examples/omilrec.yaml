@@ -1,0 +1,59 @@
+kind: task
+
+# SimpleLoop task config for optimizing OMILRECV2 speed.
+#
+# Source repo: ../../omilrec  (a real git repo at baseline ff71809 / v1.11.0,
+#               fixtures de-LFS'd so `git clone --local` gets real binaries).
+# Eval runs in the round's worktree (the committed candidate) BEFORE the worktree
+# is removed, so the speed measurement reflects the candidate, not the baseline.
+#
+# The single eval command (scripts/sl_eval.sh) does the whole chain in one shot —
+# source JUNO env, build lib + test_fcn, run the FCN drift gate, run quick_bench —
+# because SimpleLoop gives each eval command a 600s budget and a fresh worktree
+# (no build artifacts). It prints FCN=/SPEED_MS=/EVAL_RESULT= lines the judger reads.
+# Default --evtmax 10 fits the 600s budget; raise the SimpleLoop eval timeout or
+# use --evtmax 100 for a less noisy delta.
+
+task:
+  goal: >
+    Optimize the speed of the OMILRECV2 reconstruction algorithm under
+    OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the FCN numerical
+    drift <= 1e-13 (test_fcn must stay 16/16 PASS) and the e2e reconstruction
+    within 4 mm / 7 keV. Edit only the admitted source files. The hot code is
+    OMILRECV2/src/omilrec_fcn.cc (Calculate_EVLikelihood, the Minuit objective)
+    and OMILRECV2/src/omilrec_likelihood.cc (qmle_unfired_ll / qmle_fired_ll /
+    tmle_ll). Any arithmetic change inside the FCN is amplified by Minuit — a
+    sub-ULP difference can flip a degenerate event's basin — so prefer bit-
+    identical refactors (hoisting, caching, index partitioning) over precision
+    changes. See CLAUDE.md "FCN Idempotency" for the rules.
+
+safety:
+  editable_paths:
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "benchmarks/**"
+    - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
+    - "tests/unit/CMakeLists.txt"
+    - "pyproject.toml"
+    - "docs/**"
+    - "CLAUDE.md"
+    - "README.md"
+    - ".gitattributes"
+    - ".gitignore"
+
+loop:
+  max_rounds: 4
+
+eval:
+  commands:
+    # One self-contained command: env + build + FCN gate + speed bench.
+    # Prints FCN=, SPEED_MS=, EVAL_RESULT= for the judger.
+    - "bash scripts/sl_eval.sh --evtmax 10"
+
+source:
+  path: ../../omilrec       # relative to this task.yaml; real git repo
+  baseline_ref: main        # ff71809 (v1.11.0)
