@@ -46,9 +46,12 @@ Safety (hard rules):
 - Do NOT edit files outside the working tree you are in.
 
 Guidance:
-- Implement the direction with the smallest correct change you can.
+- Implement the direction IN FULL. Every change the direction describes must actually be made — if it says "change all call sites that use X", find and change every one, even when there are many. Do not stop after the easy half (e.g. adding a cache/array but never rewiring the call sites that should read it): a half-done change adds cost with no benefit and will be scored low.
+- Be bit-faithful, not minimal. Two separate rules, do not trade one for the other:
+  (1) COMPLETENESS — make every change the direction asks for, regardless of how many call sites / files it spans. Scale is not a cost you are being penalized for.
+  (2) FIDELITY — change data paths, structure, and layout, but do NOT change arithmetic: keep the same operators, the same evaluation order, the same parentheses, the same float/double types. Do not reassociate, do not replace log with log1p, do not fuse two sqrt into one unless the direction explicitly says so. A bit-identical refactor changes HOW values are fetched/hoisted, not WHAT is computed.
 - Make sure the code still runs after your edits — run the build/tests/benchmark yourself if they are available, and fix anything you break.
-- Keep the change focused; do not reformat or refactor unrelated code.
+- Stay focused on the direction: do not reformat or refactor code the direction does not touch. (This is about scope of WHAT you touch, not about doing less of what the direction asks.)
 
 When you are done, simply stop. No JSON output is needed — the harness will inspect your file changes."""
     agent.run_text(prompt, cwd=worktree, label=f"executor r{round_id}")

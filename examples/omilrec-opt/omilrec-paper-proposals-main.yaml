@@ -1,0 +1,43 @@
+# Static proposal main batch for SimpleLoop's --proposals mode.
+#
+# Contains proposals 1-12 from the total paper-reproduction set. This is the
+# recommended primary test version: it covers the conservative layout,
+# precompute, loop-splitting, indexing, and dominant-case fast-path work before
+# the explicitly arithmetic-changing unfired-charge algebra proposal.
+
+proposals:
+  - |
+    Reproduce the paper's first "data-layout flattening" step in OMILRECV2/src/OMILRECV2.{cc,h}: cache per-LPMT constants into contiguous member arrays during initialization or calibration load, including pmt x/y/z/R, isDyn, LPDE, LGain, LQ1, LQRes, timeOffset, and any stable dark-rate inputs. In Calculate_EVLikelihood, replace repeated ALL_LPMT_pos[i].X()/Y()/Z() and m_pmtpara_tool virtual getter calls with direct array reads. Preserve the exact arithmetic order inside likelihood terms and keep the change local to OMILRECV2/src.
+
+  - |
+    Cache raw ROOT histogram arrays once in Load_ExpectedPEQTime instead of repeatedly calling histogram accessors in the FCN. Add member arrays for nPE maps, average charge PDFs, and time-PDF arrays where available, then change Calculate_EVLikelihood and RecHelper call sites to pass/read raw arrays directly. Target the calls to InterpolateNPEMapTH1D/TH2F, InterpolateQPDFTH1D, InterpolateTimePDFTH1F/TH2F. Do not change interpolation formulas or binning rules.
+
+  - |
+    Split the geometry work in Calculate_EVLikelihood into bulk passes over contiguous scratch arrays. Add scratch arrays for cos_theta, theta_deg, dstn, and Rsp, then compute pmt dot products, acos(theta), and PMT-vertex distance in separate simple loops before the likelihood accumulation. The goal is to expose vectorizable homogeneous loops while keeping the same per-PMT values consumed by the original charge/time code.
+
+  - |
+    Hoist Minuit-invariant per-event quantities out of Calculate_EVLikelihood. After event input and dark-noise removal are complete, compute and cache PMT_Hit=charge/gain, hitTime, hitNPE, dmu, fdmu, LPDE-scaled constants, and reusable QPDF parameters once per event. Replace the corresponding recomputation inside every FCN call with reads from these event arrays. Keep stage-dependent behavior unchanged, especially after RemoveDN.
+
+  - |
+    Share the PMT-vertex distance already computed by the geometry pass with the time-of-flight calculation. Replace CalLTOF calls inside Calculate_EVLikelihood with an inline/bulk LTOF calculation that reuses scratch.Rsp and the same PMT_R/LS_R/RfrIndxLS/RfrIndxWR formula. Avoid a second sqrt for the same PMT distance. Keep CalLTOF itself available for non-FCN code paths.
+
+  - |
+    Precompute the expected nPE map values for all 1440 angular bins for the current trial vertex state before the PMT loop. In Calculate_EVLikelihood, compute the expensive 1D/2D map interpolation once per angular bin for the current RVar and m_Theta, then let each PMT do only the theta-bin linear blend. Cache the table only when the vertex map coordinates change. Preserve the original Use3DMap and isMixingPhase branches.
+
+  - |
+    Hoist charge-PDF bin finding out of the fired-PMT Poisson k loop. For each fired PMT, compute the uniform QPDF bin index and interpolation weight for PMT_Hit once, then inside k=1..AvgQPdfMaxPE use direct raw-array loads and a two-point lerp. Keep the Poisson recurrence, break condition, floor/clamp behavior, and TMath::Gaus fallback for k>AvgQPdfMaxPE unchanged.
+
+  - |
+    Hoist time-PDF x/y bin finding in the time likelihood path. For each time-eligible PMT, compute the VVar0 and tres grid indices/weights once and reuse them for all TIdA/TIdB and direct/integral time PDF interpolations. Replace repeated InterpolateTimePDFTH1F/TH2F calls with inline raw-array interpolation that matches RecHelper's uniform-grid formulas exactly.
+
+  - |
+    Split the Calculate_EVLikelihood PMT loop by fit phase. When enableQInfo && !enableTimeInfo, run only the charge likelihood work; when enableTimeInfo && !enableQInfo, run only the time likelihood work; when both are enabled, run the combined path. Remove phase branches from the inner per-PMT loop where possible, while preserving Qndf/Tndf/m_NPE/m_UfrmScale semantics.
+
+  - |
+    Build per-event index lists for fired, unfired, and time-eligible LPMTs after event data is loaded. Use unfired_idx/fired_idx for QMLE and QTMLE charge likelihood, and use time_eligible_idx for TMLE/QTMLE time likelihood. Time-eligible means the same condition currently guarded by enableTimeInfo, RecNpe in [1, UsedTnPENum], TimeLHMode, and Z_threshold. Preserve the IsLost behavior.
+
+  - |
+    During TMLE-only calls, compute geometry, nPE interpolation, expected PE, and LTOF only for time_eligible_idx instead of all LPMTs. Also skip m_UfrmScale accumulation in TMLE-only mode if it is not read until QTMLE recomputes it. This should target the paper's "TMLE-indexed geometry" optimization without changing QMLE or QTMLE arithmetic.
+
+  - |
+    Add a RecNpe==1 fast path in the time likelihood. For RecNpe==1 and enableQTimePdf==false, compute only the two required Ge time-PDF interpolations for TIdA/TIdB and the final probability; avoid integral time PDFs and the RecNpe==2/general-path work. Keep calculations in double precision first, and only consider float intermediates if the FCN drift gate remains below 1e-13.

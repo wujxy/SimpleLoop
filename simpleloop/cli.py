@@ -19,6 +19,12 @@ def main(argv: list[str] | None = None) -> None:
     run = sub.add_parser("run", help="Run the loop.")
     run.add_argument("--config", required=True, help="Task config (YAML/JSON).")
     run.add_argument("--run-dir", required=True, help="Directory for this run's repo + artifacts.")
+    run.add_argument(
+        "--proposals",
+        help="YAML/JSON file holding a list of proposal strings. When given, the "
+             "claude proposer is SKIPPED and round i uses proposals[i] (controlled-"
+             "experiment mode); runs for len(proposals) rounds, ignoring max_rounds.",
+    )
 
     validate = sub.add_parser("validate", help="Validate a config without running.")
     validate.add_argument("--config", required=True, help="Task config (YAML/JSON).")
@@ -40,9 +46,14 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "run":
         try:
-            summary = loop.run(args.config, args.run_dir)
+            summary = loop.run(args.config, args.run_dir, proposals=args.proposals)
         except config_mod.ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except ValueError as exc:
+            # bad --proposals file (wrong shape / empty entry) or a static batch
+            # that is empty — surface it clearly, do not start a half-run.
+            print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         print(f"\nBest: {summary['best_sha']} (score {summary['best_score']:.2f}) "
               f"over {summary['rounds']} rounds")
