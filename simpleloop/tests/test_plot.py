@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from simpleloop import loop as loop_mod
 from simpleloop import plot as plot_mod
 from simpleloop.plot import build_series
+from simpleloop.store import Store
 
 
 SCHEMA = {
@@ -155,3 +157,52 @@ def test_render_failure_preserves_previous_png(monkeypatch, tmp_path):
     assert result is None
     assert output.read_bytes() == b"previous image"
     assert not (tmp_path / ".progress.tmp.png").exists()
+
+
+def test_refresh_progress_plot_uses_persisted_history(monkeypatch, tmp_path):
+    store = Store(tmp_path, metrics_schema=SCHEMA)
+    store.append(
+        0,
+        "proposal",
+        "sha",
+        0.8,
+        "feedback",
+        eval_metrics={"SPEED_MS": 90.0, "CORRECTNESS": True},
+        risk="low",
+        accepted=True,
+        base_sha="sha",
+    )
+    captured = {}
+
+    def capture(run_dir, history, metrics_schema):
+        captured["run_dir"] = run_dir
+        captured["history"] = history
+        captured["metrics_schema"] = metrics_schema
+        return tmp_path / "progress.png"
+
+    monkeypatch.setattr(loop_mod.plot_mod, "write_progress_png", capture)
+
+    loop_mod._refresh_progress_plot(store)
+
+    assert captured == {
+        "run_dir": tmp_path,
+        "history": store.history(),
+        "metrics_schema": SCHEMA,
+    }
+
+
+def test_record_failure_refreshes_progress_plot(monkeypatch, tmp_path):
+    store = Store(tmp_path, metrics_schema=SCHEMA)
+    refreshed = []
+    monkeypatch.setattr(loop_mod, "_refresh_progress_plot", refreshed.append)
+
+    loop_mod._record_failure(
+        store,
+        round_id=0,
+        proposal="proposal",
+        reason="executor failed",
+        base_sha="base",
+    )
+
+    assert refreshed == [store]
+    assert len(store.history()) == 1

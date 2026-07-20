@@ -30,6 +30,7 @@ from .agent import Agent, AgentError
 from . import config as config_mod
 from . import executor as executor_mod
 from . import judger as judger_mod
+from . import plot as plot_mod
 from . import proposer as proposer_mod
 from .store import Store
 from .workspace import Workspace
@@ -225,6 +226,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                 selected_candidate=selected_candidate, selected_sha=selected_sha,
                 candidates=candidates, reflection=reflection,
             )
+            _refresh_progress_plot(store)
             parent_sha = next_base_sha
             continue
 
@@ -323,6 +325,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                      changed_paths=result.changed_paths,
                      reflection=reflection, decision=decision,
                      accepted=accepted, base_sha=next_base_sha)
+        _refresh_progress_plot(store)
         if accepted:
             prior_eval_block = eval_block or prior_eval_block
             prior_metrics = eval_metrics or prior_metrics
@@ -346,6 +349,14 @@ def _summary(store: Store, workspace: Workspace, run_dir_path: Path) -> dict:
     }
 
 
+def _refresh_progress_plot(store: Store) -> None:
+    plot_mod.write_progress_png(
+        store.run_dir,
+        store.history(),
+        store.metrics_schema,
+    )
+
+
 def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
                     sha: str | None = None, eval_block: str = "",
                     eval_metrics: dict | None = None,
@@ -365,6 +376,7 @@ def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
                  changed_paths=changed_paths or [],
                  reflection=reflection, decision=decision,
                  accepted=accepted, base_sha=base_sha)
+    _refresh_progress_plot(store)
 
 
 def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,

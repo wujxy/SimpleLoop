@@ -313,6 +313,7 @@ def test_final_report_uses_feedback_for_report(tmp_path: Path):
     # narrative is carried on its own line so humans get the rich version.
     assert "- feedback: tight signal" in text
     assert "- narrative: the long narrative" in text
+    assert "![Run progress](progress.png)" in text
 
 
 def test_final_report_falls_back_for_old_records(tmp_path: Path):

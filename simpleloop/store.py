@@ -257,7 +257,14 @@ class Store:
     def write_final_report(self, goal: str) -> Path:
         """Write a human-readable markdown summary. Returns its path."""
         rounds = self.history()
-        lines = [f"# SimpleLoop Run Report", "", f"**Goal:** {goal}", ""]
+        lines = [
+            "# SimpleLoop Run Report",
+            "",
+            f"**Goal:** {goal}",
+            "",
+            "![Run progress](progress.png)",
+            "",
+        ]
         if self.best_sha:
             cand = (f", candidate {self.best_candidate}"
                     if self.best_candidate is not None else "")
