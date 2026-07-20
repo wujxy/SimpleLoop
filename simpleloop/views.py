@@ -13,15 +13,26 @@ flat — one record per round, serial single-parent chain. A Context pool class
 would wrap a list[dict] with no added structure. Three pure functions are enough
 and leave explicit, auditable seams for future mechanisms.
 
-Extension points NOT yet implemented (intentionally — see plan):
-  for_proposer is the natural home for (a) periodic exploration rounds — hide the
-  best round's proposal every K rounds to fight basin collapse; (b) a sliding
-  window — keep the last W rounds full, degrade older rounds to a one-line score
-  row. Neither is wired now: Step 2+3 already keep history tiny (~700B/round),
-  so neither is justified until evidence demands it. Adding them later means
-  editing for_proposer's internals; callers (proposer prompt builder) stay fixed.
+The proposer projection keeps recent proposals complete and compacts older
+proposal text. The persisted history remains complete, so other roles and final
+reports are unaffected.
 """
 from __future__ import annotations
+
+
+_PROPOSER_FULL_PROPOSAL_ROUNDS = 6
+_PROPOSER_OLD_PROPOSAL_CHARS = 300
+
+
+def _proposal_projection(proposal: str, keep_full: bool) -> dict[str, str]:
+    if keep_full:
+        return {"proposal": proposal}
+    normalized = " ".join(proposal.split())
+    suffix = "…" if len(normalized) > _PROPOSER_OLD_PROPOSAL_CHARS else ""
+    return {
+        "proposal_head":
+            normalized[:_PROPOSER_OLD_PROPOSAL_CHARS] + suffix,
+    }
 
 
 def for_proposer(history: list[dict]) -> list[dict]:
@@ -50,7 +61,11 @@ def for_proposer(history: list[dict]) -> list[dict]:
     Still excludes eval_block: raw eval text, too noisy, hallucination risk.
     """
     out = []
-    for r in history:
+    full_proposal_start = max(
+        0, len(history) - _PROPOSER_FULL_PROPOSAL_ROUNDS
+    )
+    for record_index, r in enumerate(history):
+        keep_full_proposal = record_index >= full_proposal_start
         if "candidates" in r:
             out.append({
                 "round": r["round"],
@@ -63,7 +78,10 @@ def for_proposer(history: list[dict]) -> list[dict]:
                     {
                         "candidate": c.get("candidate"),
                         "family": c.get("family"),
-                        "proposal": c.get("proposal"),
+                        **_proposal_projection(
+                            c.get("proposal") or "",
+                            keep_full_proposal,
+                        ),
                         "sha": c.get("sha") or None,
                         "selected": bool(c.get("selected")),
                         "accepted": c.get("accepted"),
@@ -80,7 +98,10 @@ def for_proposer(history: list[dict]) -> list[dict]:
             continue
         out.append({
             "round": r["round"],
-            "proposal": r["proposal"],
+            **_proposal_projection(
+                r.get("proposal") or "",
+                keep_full_proposal,
+            ),
             "sha": r.get("sha") or None,
             "accepted": r.get("accepted"),
             "base_sha": r.get("base_sha"),

@@ -13,6 +13,7 @@ Run: python -m pytest simpleloop/tests/   (from SimpleLoop/)
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -77,6 +78,133 @@ def test_for_proposer_preserves_order():
                for r in range(5)]
     out = views.for_proposer(history)
     assert [row["round"] for row in out] == [0, 1, 2, 3, 4]
+
+
+def _serial_history_record(round_id: int, proposal: str) -> dict:
+    return {
+        "round": round_id,
+        "proposal": proposal,
+        "sha": f"sha-{round_id}",
+        "accepted": True,
+        "base_sha": f"sha-{round_id}",
+        "score": 0.5,
+        "risk": "low",
+        "metrics": {"SPEED_MS": 500.0 + round_id},
+        "changed_paths": ["src/a.cc"],
+        "feedback": f"feedback-{round_id}",
+        "feedback_for_report": f"diagnostic-{round_id}",
+        "eval_block": "raw output",
+    }
+
+
+def _parallel_history_record(round_id: int, proposals: list[str]) -> dict:
+    return {
+        "round": round_id,
+        "parent_sha": f"parent-{round_id}",
+        "selected_candidate": 1,
+        "selected_sha": f"candidate-{round_id}-1",
+        "base_sha": f"candidate-{round_id}-1",
+        "reflection": "reflection",
+        "candidates": [
+            {
+                "candidate": candidate_id,
+                "family": f"family-{candidate_id}",
+                "proposal": proposal,
+                "sha": f"candidate-{round_id}-{candidate_id}",
+                "selected": candidate_id == 1,
+                "accepted": True,
+                "score": 0.4 + candidate_id / 10,
+                "risk": "low",
+                "metrics": {"SPEED_MS": 600.0 - candidate_id},
+                "changed_paths": [f"src/c{candidate_id}.cc"],
+                "feedback": f"feedback-{candidate_id}",
+                "feedback_for_report": f"diagnostic-{candidate_id}",
+                "eval_block": "raw output",
+            }
+            for candidate_id, proposal in enumerate(proposals)
+        ],
+    }
+
+
+def test_for_proposer_keeps_last_six_records_full_by_position():
+    round_ids = [3, 5, 12, 20, 21, 40, 99]
+    history = [
+        _serial_history_record(round_id, f"proposal-{round_id}")
+        for round_id in round_ids
+    ]
+
+    projected = views.for_proposer(history)
+
+    assert projected[0]["round"] == 3
+    assert projected[0]["proposal_head"] == "proposal-3"
+    assert "proposal" not in projected[0]
+    assert [row["round"] for row in projected[1:]] == round_ids[1:]
+    assert [row["proposal"] for row in projected[1:]] == [
+        f"proposal-{round_id}" for round_id in round_ids[1:]
+    ]
+    assert all("proposal_head" not in row for row in projected[1:])
+
+
+def test_for_proposer_compacts_old_proposal_without_mutating_history():
+    long_proposal = "  Compact\n\tthe   live list  " + ("x" * 320)
+    history = [_serial_history_record(0, long_proposal)]
+    history.extend(
+        _serial_history_record(round_id, f"recent-{round_id}")
+        for round_id in range(1, 7)
+    )
+    original = deepcopy(history)
+    normalized = " ".join(long_proposal.split())
+
+    projected = views.for_proposer(history)
+
+    assert projected[0]["proposal_head"] == normalized[:300] + "…"
+    assert len(projected[0]["proposal_head"]) == 301
+    assert projected[0]["sha"] == "sha-0"
+    assert projected[0]["metrics"] == {"SPEED_MS": 500.0}
+    assert projected[0]["score"] == 0.5
+    assert projected[0]["risk"] == "low"
+    assert projected[0]["changed_paths"] == ["src/a.cc"]
+    assert projected[0]["feedback"] == "feedback-0"
+    assert projected[0]["feedback_for_report"] == "diagnostic-0"
+    assert "eval_block" not in projected[0]
+    assert history == original
+
+
+def test_for_proposer_applies_one_window_state_to_all_generation_candidates():
+    old_generation = _parallel_history_record(
+        10,
+        ["  old\n candidate zero  ", "old candidate one"],
+    )
+    recent_generation = _parallel_history_record(
+        100,
+        ["recent candidate zero", "recent candidate one"],
+    )
+    history = [old_generation]
+    history.extend(
+        _serial_history_record(round_id, f"recent-{round_id}")
+        for round_id in [20, 30, 40, 50, 60]
+    )
+    history.append(recent_generation)
+
+    projected = views.for_proposer(history)
+
+    old_candidates = projected[0]["candidates"]
+    assert [c["proposal_head"] for c in old_candidates] == [
+        "old candidate zero",
+        "old candidate one",
+    ]
+    assert all("proposal" not in c for c in old_candidates)
+    assert old_candidates[1]["sha"] == "candidate-10-1"
+    assert old_candidates[1]["selected"] is True
+    assert old_candidates[1]["feedback_for_report"] == "diagnostic-1"
+    assert all("eval_block" not in c for c in old_candidates)
+
+    recent_candidates = projected[-1]["candidates"]
+    assert [c["proposal"] for c in recent_candidates] == [
+        "recent candidate zero",
+        "recent candidate one",
+    ]
+    assert all("proposal_head" not in c for c in recent_candidates)
 
 
 # --- views.for_executor / for_judger: role isolation ---
