@@ -29,8 +29,9 @@ def test_for_proposer_projects_landing_state():
     """The proposer sees full candidate/base SHAs + acceptance state so it can
     self-audit whether a direction is already landed (git diff) and whether its
     payoff is exhausted (metric trend), and tell "sound but didn't land" (low
-    risk + empty) from "latent bug" (high risk). It still must NOT see eval_block
-    (raw, noisy, hallucination risk) or feedback_for_report (human detail)."""
+    risk + empty) from "latent bug" (high risk). It now sees the concise
+    feedback_for_report diagnostic, but still must NOT see eval_block (raw,
+    noisy, hallucination risk)."""
     history = [
         {"round": 0, "proposal": "p0", "sha": "aaaa1111bbbb2222", "score": 0.7,
          "accepted": True, "base_sha": "aaaa1111bbbb2222",
@@ -51,18 +52,18 @@ def test_for_proposer_projects_landing_state():
          "score": 0.7, "risk": "low",
          "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
-         "feedback": "f0"},
+         "feedback": "f0", "feedback_for_report": "r0"},
         {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444",
          "accepted": False, "base_sha": "aaaa1111bbbb2222",
          "score": 0.05, "risk": "low",
          "metrics": {"CORRECTNESS": False},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
-         "feedback": "LANDED_STATE: not-implemented correctness FAIL"},
+         "feedback": "LANDED_STATE: not-implemented correctness FAIL",
+         "feedback_for_report": "r1"},
     ]
     # belt-and-braces: the noisy/raw fields never leak
     for row in out:
         assert "eval_block" not in row
-        assert "feedback_for_report" not in row
 
 
 def test_for_proposer_empty_history():
@@ -287,7 +288,7 @@ def test_judger_prompt_has_no_direction_advice_and_requires_landed_state():
     assert "what to fix" not in prompt
     # the judger is told the next direction is NOT its job (wording may shift,
     # so check the intent not a fixed phrase):
-    assert "proposer's job" in prompt
+    assert "Do not choose the next direction" in prompt
     # and the LANDED_STATE prefix is in the delivery contract:
     assert "LANDED_STATE:" in prompt
     assert "already-implemented" in prompt
@@ -322,8 +323,10 @@ def test_proposer_prompt_must_stays_only_for_hard_limits():
     assert "PROPOSER (you)" in src
     assert "EXECUTOR" in src
     assert "JUDGER" in src
-    # the hard delivery contract is now a THREE-field JSON (reflection/decision/proposal):
-    assert "MUST be exactly one parseable JSON object with THREE keys" in src
+    # the hard delivery contract is now a parseable JSON object that supports
+    # batch proposals and legacy single-proposal shape:
+    assert "MUST be exactly one parseable JSON object" in src
+    assert '"proposals"' in src
     assert "reflection" in src and "decision" in src and "proposal" in src
     # the forcing function: continue decision binds to a stated mechanism difference
     assert "If `decision` is `continue`" in src
@@ -366,8 +369,7 @@ def test_proposer_prompt_makes_proposal_the_primary_output():
     src = inspect.getsource(prop_mod)
     normalized = " ".join(src.split())
     assert "at most 1–2 sentences" in normalized
-    assert "`proposal` (the primary output)" in normalized
-    assert "Spend most of your investigation and reasoning here" in normalized
+    assert "`proposal`: each proposal is a concrete candidate direction" in normalized
     assert "target bottleneck / optimization hypothesis" in normalized
     assert "Ground it in the current accepted base" in normalized
 

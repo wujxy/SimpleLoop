@@ -29,7 +29,7 @@ class ExecResult:
 
 def execute(agent: Agent, *, proposal: str, goal: str, editable: list[str],
             frozen: list[str], workspace: Workspace, worktree: Path,
-            round_id: int) -> ExecResult:
+            round_id: int | str) -> ExecResult:
     """Run the executor agent and produce (or fail to produce) a commit."""
     prompt = f"""You are the EXECUTOR in a serial optimization loop. Implement the proposed direction by editing source files.
 

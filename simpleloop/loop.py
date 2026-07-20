@@ -20,6 +20,7 @@ still runs and scores each, but its feedback no longer chooses the next proposal
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -181,6 +182,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                     proposer_agent, goal=cfg["goal"], editable=cfg["editable_paths"],
                     frozen=cfg["frozen_paths"], history=store.history(),
                     base_sha=parent_sha, cwd=workspace.repo,
+                    candidates_per_round=cfg.get("candidates_per_round", 1),
                 )
             except (AgentError, ValueError) as exc:
                 # AgentError = claude call failed/unparseable; ValueError = empty
@@ -189,9 +191,38 @@ def run(config_path: str | Path, run_dir: str | Path,
                 _record_failure(store, round_id, "", "proposer failed: " + str(exc)[:200],
                                 base_sha=parent_sha)
                 continue
-            proposal = proposal_obj.proposal
-            reflection, decision = proposal_obj.reflection, proposal_obj.decision
-            print(f"[{stamp()}] proposal (decision={decision}): {proposal[:150]}", flush=True)
+            proposals_batch = proposal_obj.proposals
+            reflection = proposal_obj.reflection
+            print(f"[{stamp()}] proposals: {len(proposals_batch)} candidate(s)",
+                  flush=True)
+
+        if static_proposals is None:
+            candidates = _run_candidates(
+                proposals_batch, round_id, parent_sha, cfg, workspace,
+                executor_agent, judger_agent, prior_metrics, baseline_metrics,
+                metrics_schema,
+            )
+            winner = _select_winner(candidates, metrics_schema)
+            selected_candidate = winner.get("candidate") if winner else None
+            selected_sha = winner.get("sha") if winner else None
+            for candidate in candidates:
+                candidate["selected"] = candidate.get("candidate") == selected_candidate
+            next_base_sha = selected_sha or parent_sha
+            if winner:
+                print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
+                      f"{selected_sha[:10]}", flush=True)
+                prior_metrics = winner.get("metrics") or prior_metrics
+                prior_eval_block = winner.get("eval_block") or prior_eval_block
+            else:
+                print(f"[{stamp()}] no eligible candidate selected; accepted base stays "
+                      f"{parent_sha[:10]}", flush=True)
+            store.append_generation(
+                round_id, parent_sha=parent_sha,
+                selected_candidate=selected_candidate, selected_sha=selected_sha,
+                candidates=candidates, reflection=reflection,
+            )
+            parent_sha = next_base_sha
+            continue
 
         # 2. executor (+ gate + harness commit)
         worktree = workspace.add_worktree(round_id, parent_sha)
@@ -332,6 +363,181 @@ def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
                  accepted=accepted, base_sha=base_sha)
 
 
+def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
+                    parent_sha: str, cfg: dict, workspace: Workspace,
+                    executor_agent: Agent, judger_agent: Agent,
+                    prior_metrics: dict, baseline_metrics: dict,
+                    metrics_schema: dict | None) -> list[dict]:
+    """Run one generation's candidates, possibly concurrently."""
+    max_workers = min(cfg.get("max_workers", 1), max(1, len(proposals)))
+    if max_workers <= 1 or len(proposals) <= 1:
+        return [
+            _run_one_candidate(i, proposal, round_id, parent_sha, cfg, workspace,
+                               executor_agent, judger_agent, prior_metrics,
+                               baseline_metrics, metrics_schema)
+            for i, proposal in enumerate(proposals)
+        ]
+    results: list[dict | None] = [None] * len(proposals)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_run_one_candidate, i, proposal, round_id, parent_sha, cfg,
+                        workspace, executor_agent, judger_agent, prior_metrics,
+                        baseline_metrics, metrics_schema): i
+            for i, proposal in enumerate(proposals)
+        }
+        for future in as_completed(futures):
+            i = futures[future]
+            try:
+                results[i] = future.result()
+            except Exception as exc:
+                # Last-resort guard: candidate failures should stay local and not
+                # kill the whole generation.
+                p = proposals[i]
+                results[i] = _candidate_failure(
+                    i, p, f"candidate worker failed: {exc}", parent_sha)
+    return [r for r in results if r is not None]
+
+
+def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
+                       round_id: int, parent_sha: str, cfg: dict,
+                       workspace: Workspace, executor_agent: Agent,
+                       judger_agent: Agent, prior_metrics: dict,
+                       baseline_metrics: dict,
+                       metrics_schema: dict | None) -> dict:
+    """Executor + eval + judger for one candidate."""
+    worktree_id = f"{round_id}-c{candidate_id}"
+    worktree = None
+    result = None
+    eval_block = ""
+    eval_metrics: dict = {}
+    accepted = False
+    try:
+        print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
+              f"(family={proposal.family}, decision={proposal.decision}): "
+              f"{proposal.proposal[:120]}", flush=True)
+        worktree = workspace.add_worktree(worktree_id, parent_sha)
+        result = executor_mod.execute(
+            executor_agent, proposal=proposal.proposal, goal=cfg["goal"],
+            editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
+            workspace=workspace, worktree=worktree, round_id=worktree_id,
+        )
+        if result.sha:
+            print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} committed: "
+                  f"{result.sha} ({len(result.changed_paths)} files)", flush=True)
+        else:
+            print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} no commit: "
+                  f"{result.reason}", flush=True)
+        if result.sha and cfg["eval_commands"]:
+            try:
+                eval_block, eval_metrics = judger_mod.run_eval(
+                    cfg["eval_commands"], cwd=worktree,
+                    metrics_schema=metrics_schema)
+            except Exception as exc:
+                eval_block = f"(eval failed to run: {exc})"
+                print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
+                      f"eval error: {exc}", flush=True)
+        accepted = _candidate_accepted(result.sha, eval_metrics, metrics_schema)
+        judgment = judger_mod.judge(
+            judger_agent, goal=cfg["goal"], proposal=proposal.proposal,
+            sha=result.sha, reason=result.reason, parent_sha=parent_sha,
+            workspace=workspace, eval_block=eval_block, cwd=worktree,
+            metrics=eval_metrics, prior_metrics=prior_metrics,
+            baseline_metrics=baseline_metrics, metrics_schema=metrics_schema,
+        )
+        print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
+              f"score={judgment.score:.2f} risk={judgment.risk} "
+              f"feedback: {judgment.feedback[:120]}", flush=True)
+        _print_objective(eval_metrics, prior_metrics, baseline_metrics, metrics_schema)
+        return {
+            "candidate": candidate_id,
+            "family": proposal.family,
+            "decision": proposal.decision,
+            "proposal": proposal.proposal,
+            "sha": result.sha,
+            "score": judgment.score,
+            "risk": judgment.risk,
+            "feedback": judgment.feedback,
+            "feedback_for_report": judgment.feedback_for_report,
+            "eval_block": eval_block,
+            "metrics": eval_metrics,
+            "changed_paths": result.changed_paths,
+            "accepted": accepted,
+            "selected": False,
+        }
+    except (AgentError, ValueError) as exc:
+        changed_paths = result.changed_paths if result else []
+        sha = result.sha if result else None
+        return _candidate_failure(candidate_id, proposal, str(exc), parent_sha,
+                                  sha=sha, eval_block=eval_block,
+                                  eval_metrics=eval_metrics,
+                                  changed_paths=changed_paths,
+                                  accepted=accepted)
+    finally:
+        if worktree is not None:
+            workspace.remove_worktree(worktree_id)
+
+
+def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
+                       reason: str, parent_sha: str, sha: str | None = None,
+                       eval_block: str = "", eval_metrics: dict | None = None,
+                       changed_paths: list[str] | None = None,
+                       accepted: bool = False) -> dict:
+    return {
+        "candidate": candidate_id,
+        "family": proposal.family,
+        "decision": proposal.decision,
+        "proposal": proposal.proposal,
+        "sha": sha,
+        "score": 0.0,
+        "risk": "high",
+        "feedback": f"[loop failure] {reason[:200]}",
+        "feedback_for_report": f"[loop failure] {reason[:200]}",
+        "eval_block": eval_block,
+        "metrics": eval_metrics or {},
+        "changed_paths": changed_paths or [],
+        "accepted": accepted,
+        "selected": False,
+        "base_sha": parent_sha,
+    }
+
+
+def _select_winner(candidates: list[dict],
+                   metrics_schema: dict | None) -> dict | None:
+    """Select the candidate that advances the lineage."""
+    eligible = []
+    if metrics_schema:
+        obj = metrics_schema["objective"]
+        key = obj["key"]
+        gate_keys = [g["key"] for g in metrics_schema.get("gates", [])]
+        for c in candidates:
+            metrics = c.get("metrics") or {}
+            if not c.get("sha"):
+                continue
+            if str(c.get("risk", "high")).lower() == "high":
+                continue
+            if not all(metrics.get(gk) is True for gk in gate_keys):
+                continue
+            if not isinstance(metrics.get(key), (int, float)):
+                continue
+            eligible.append(c)
+        if not eligible:
+            return None
+        lower = obj["lower_is_better"]
+        direction = 1 if lower else -1
+        return min(eligible, key=lambda c: (
+            direction * c["metrics"][key],
+            -(c.get("score") or 0.0),
+            c.get("candidate") or 0,
+        ))
+    for c in candidates:
+        if c.get("sha") and str(c.get("risk", "high")).lower() != "high":
+            eligible.append(c)
+    if not eligible:
+        return None
+    return max(eligible, key=lambda c: (c.get("score") or 0.0,
+                                       -(c.get("candidate") or 0)))
+
+
 def _candidate_accepted(candidate_sha: str | None, metrics: dict | None,
                         metrics_schema: dict | None) -> bool:
     """Whether a candidate becomes the next cumulative base.
@@ -357,6 +563,13 @@ def _resume_chain(history: list[dict], baseline_sha: str,
     is not accidentally resumed. Without gates, legacy SHA behavior is preserved.
     """
     for record in reversed(history):
+        if "candidates" in record:
+            selected_sha = record.get("selected_sha")
+            if selected_sha:
+                selected = next((c for c in record.get("candidates", [])
+                                 if c.get("selected")), None)
+                return selected_sha, selected or record
+            continue
         sha = record.get("sha")
         if "accepted" in record:
             accepted = bool(sha) and record.get("accepted") is True

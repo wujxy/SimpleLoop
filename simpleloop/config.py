@@ -7,6 +7,8 @@ Minimal schema:
   safety.frozen_paths: [glob]        (optional, default [])
   loop.max_rounds: int                (required)
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
+  loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
+  loop.max_workers: int              (optional, default 1; candidate concurrency)
   eval.commands: [str]                (optional; omit -> judger is diff-only)
   eval.metrics: {objective, gates}    (optional; omit -> judger reads prose, best by score)
   source.path: path                   (required; the repo to optimize)
@@ -74,6 +76,12 @@ def _resolve(raw: dict, path: Path) -> dict:
     agent_timeout = loop.get("agent_timeout_seconds", 3600)
     if not isinstance(agent_timeout, int) or agent_timeout < 60:
         raise ConfigError("loop.agent_timeout_seconds: must be an integer >= 60 (seconds)")
+    candidates_per_round = loop.get("candidates_per_round", 1)
+    if not isinstance(candidates_per_round, int) or candidates_per_round < 1:
+        raise ConfigError("loop.candidates_per_round: must be a positive integer")
+    max_workers = loop.get("max_workers", 1)
+    if not isinstance(max_workers, int) or max_workers < 1:
+        raise ConfigError("loop.max_workers: must be a positive integer")
 
     src_path = source.get("path")
     if not src_path:
@@ -112,6 +120,8 @@ def _resolve(raw: dict, path: Path) -> dict:
         "frozen_paths": [str(g) for g in frozen],
         "max_rounds": int(max_rounds),
         "agent_timeout_seconds": int(agent_timeout),
+        "candidates_per_round": int(candidates_per_round),
+        "max_workers": int(max_workers),
         "eval_commands": eval_commands,
         "metrics": metrics,
         "repo_path": str(repo),

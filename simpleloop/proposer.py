@@ -22,7 +22,7 @@ back into the next round's prompt.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agent import Agent, AgentError
@@ -48,11 +48,25 @@ class Proposal:
     proposal: str
     decision: str = "switch"   # default switch (conservative) if the judger omitted it
     reflection: str = ""
+    family: str = "single"
+
+
+@dataclass
+class ProposalBatch:
+    """One round's candidate directions.
+
+    `reflection` is shared search-context reasoning for the round. Each
+    candidate has its own family/decision/proposal triple.
+    """
+    reflection: str
+    proposals: list[Proposal]
+    warnings: list[str] = field(default_factory=list)
 
 
 def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
-            history: list[dict], base_sha: str, cwd: Path) -> Proposal:
-    """Return the Proposal(proposal, decision, reflection) for the next round."""
+            history: list[dict], base_sha: str, cwd: Path,
+            candidates_per_round: int = 1) -> ProposalBatch:
+    """Return ProposalBatch for the next round."""
     # Project history through the proposer's view: this strips eval_block (the
     # judger's axis — the judger summarizes it into `feedback` for us) and
     # feedback_for_report (human-facing detail). The proposer only sees each
@@ -71,22 +85,46 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             metrics_str = " ".join(m_parts)
             paths = r.get("changed_paths") or []
             paths_str = ",".join(paths) if paths else "(none)"
-            hist_lines.append(
-                f"  round {r['round']}: candidate_sha={sha_str} | "
-                f"accepted={accepted_str} | base_sha={round_base} | {metrics_str} | "
-                f"changed: {paths_str} | score={r['score']} | risk={r.get('risk','?')} | "
-                f"feedback=\"{r['feedback']}\" | proposal=\"{r['proposal']}\""
-            )
+            if "candidates" in r:
+                cand_lines = []
+                for c in r.get("candidates") or []:
+                    cm = c.get("metrics") or {}
+                    cm_parts = [f"{k}={v}" for k, v in cm.items()] if cm else ["(no metrics)"]
+                    c_paths = c.get("changed_paths") or []
+                    cand_lines.append(
+                        f"    candidate {c.get('candidate')}: selected={bool(c.get('selected'))} | "
+                        f"family={c.get('family','?')} | candidate_sha={c.get('sha') or '(no commit)'} | "
+                        f"{' '.join(cm_parts)} | changed: {','.join(c_paths) if c_paths else '(none)'} | "
+                        f"score={c.get('score')} | risk={c.get('risk','?')} | "
+                        f"feedback=\"{c.get('feedback','')}\" | "
+                        f"diagnostic=\"{c.get('feedback_for_report','')}\" | "
+                        f"proposal=\"{c.get('proposal','')}\""
+                    )
+                hist_lines.append(
+                    f"  round {r['round']}: parent_sha={r.get('parent_sha') or round_base} | "
+                    f"selected_candidate={r.get('selected_candidate')} | "
+                    f"selected_sha={r.get('selected_sha') or r.get('base_sha')}\n" +
+                    "\n".join(cand_lines)
+                )
+            else:
+                hist_lines.append(
+                    f"  round {r['round']}: candidate_sha={sha_str} | "
+                    f"accepted={accepted_str} | base_sha={round_base} | {metrics_str} | "
+                    f"changed: {paths_str} | score={r['score']} | risk={r.get('risk','?')} | "
+                    f"feedback=\"{r['feedback']}\" | "
+                    f"diagnostic=\"{r.get('feedback_for_report','')}\" | "
+                    f"proposal=\"{r['proposal']}\""
+                )
         hist_block = "\n".join(hist_lines)
     else:
         hist_block = "  (none yet — this is the first round)"
 
-    prompt = f"""You are the PROPOSER in a serial optimization loop. Propose the next round's direction.
+    prompt = f"""You are the PROPOSER in an optimization loop. Choose candidate directions for the next round.
 
 Roles in this loop (so you know what your input/output is and is not):
-- PROPOSER (you): read the per-run repo + prior-round history, choose the next direction. The direction decision is yours.
-- EXECUTOR: takes your direction, edits code (in a per-round worktree), runs the gate, commits. It does not choose or question the direction.
-- JUDGER: looks at ONE round's diff + metrics, grades the effect, tags a landing state. It sees a single round (not the whole direction space) and does not profile — so its feedback is a reference for you, not a direction command.
+- PROPOSER (you): read the per-run repo + prior-round history, choose candidate directions. The search decision is yours.
+- EXECUTOR: takes one candidate direction, edits code in an isolated worktree, runs the gate, and commits. It does not choose or question the direction.
+- JUDGER: looks at one candidate's diff + metrics, grades the effect, tags a landing state, and writes objective diagnostic feedback. It does not choose the next direction.
 
 Task goal:
 {goal}
@@ -103,11 +141,15 @@ exists to edit); do NOT read other runs' repos.
 
 Current accepted source:
 - base_sha: {base_sha}
-- This is the exact commit from which the next executor attempt will start.
+- Every candidate in this round starts from this exact commit.
+- Only the selected candidate becomes part of the future source state.
 - A history row with a candidate SHA and accepted=false still represents a real implementation
   performed by the executor. It failed a hard gate and is not part of the current accepted base;
   do not mistake it for the executor making no changes. You may inspect that candidate when
   deciding whether to correct the attempt, continue the mechanism, or switch direction.
+
+This round:
+- candidates_per_round: {candidates_per_round}
 
 Safety (hard rules):
 - editable_paths (only these may be changed by the executor): {editable}
@@ -119,8 +161,17 @@ Hard rules on what you may propose (mandatory — violating these wastes a round
 - Do NOT propose a direction that requires editing files under frozen_paths — the gate will reject it and void the round. If a prior round was tagged `LANDED_STATE: gate-rejected`, you may retry the direction (decision=continue is fine here), but narrow its scope/mechanism so it stays within editable_paths (the rejection reason names what was touched). gate-rejected is "wrong scope, fix the writing", not "done, switch tracks" — do not confuse it with already-implemented.
 
 Prior rounds (each carries candidate/base SHA, accepted state, metrics, changed_paths,
-score, judger feedback, and the proposal):
+score, judger feedback/diagnostic, and the proposal):
 {hist_block}
+
+How to read the history:
+- A selected candidate is part of the current accepted lineage.
+- A non-selected candidate is not in the current source, but it is still useful evidence:
+  it shows a mechanism that was attempted and how it performed.
+- Use all candidate outcomes as search memory. Do not ignore failed, regressed, no-op,
+  high-risk, or non-selected candidates.
+- The diagnostic feedback states what landed, what the test result was, and why the
+  proposal worked, regressed, failed, or was inconclusive.
 
 Guidance:
 - Before proposing, make a lightweight routing judgement from the prior-round history:
@@ -135,7 +186,10 @@ Guidance:
   mechanism or call site has already landed, you MAY inspect the most relevant prior SHA
   with `git show` or `git diff`. Git inspection is optional and targeted; do not
   systematically re-audit all prior rounds.
-- Propose exactly one direction for the next round — a single change the executor can build and the gate can verify in ONE round.
+- Produce exactly {candidates_per_round} candidate proposal(s).
+- If {candidates_per_round} is 1, behave like the serial loop and choose the single best next direction.
+- If {candidates_per_round} is greater than 1, diversify candidates across meaningfully different mechanism families. Do not submit small wording variants of the same idea.
+- Each candidate proposal must be a single change the executor can build and the gate can verify in ONE round.
 - Size is not a virtue and not a sin: a large systematic refactor (one mechanism, many call sites) is fine and often the highest-value kind; do not shrink a high-payoff direction just to be safe. Point at the specific functions/modules/files and call sites it touches.
 - But the direction must be a self-contained atomic change, not a multi-round plan. Forbidden in `proposal`: sequencing language like "first commit / then stack / step 1 of N / defer X to a later round / the deferred slice that round K sequenced". To eat a big direction over several rounds, propose only THIS round's slice (the slice itself, fully implementable+verifiable this round) and let a later round independently propose the next slice — never write the sequence into the proposal.
 - When a direction has been tried for several rounds without improvement (or with regressions), `switch` is usually the right `decision`.
@@ -148,29 +202,29 @@ Reference:
   candidate commit that was rejected by a hard gate.
 
 Final delivery contract (mandatory):
-- Your final response MUST be exactly one parseable JSON object with THREE keys:
+- Your final response MUST be exactly one parseable JSON object. The preferred shape is:
+  {{"reflection": "<one paragraph>", "proposals": [{{"family": "<mechanism label>", "decision": "<continue|switch>", "proposal": "<candidate direction>"}}]}}
+- When candidates_per_round is 1, this legacy shape is also accepted:
   {{"reflection": "<one paragraph>", "decision": "<continue|switch>", "proposal": "<your direction>"}}
-- These three form a lightweight routing chain, not three equal tasks: `reflection` and
-  `decision` briefly select the search path; `proposal` is the main task.
 - A ```json code fence is acceptable; any prose, heading, commentary, or natural-language wrap-up outside the JSON is forbidden. Your INVESTIGATION (reading code, diffing rounds) goes through tool calls (git show/diff/log); your reasoning CONCLUSIONS go inside the JSON — in `reflection` and `proposal`. Emit ONLY the JSON object (no preamble, no wrap-up around it).
 - `reflection` (mandatory when prior history exists; round 0 may leave it empty):
   at most 1–2 sentences stating only the historical evidence that affects this round's
   choice — whether the current direction still has a concrete next opportunity or has
   stalled/exhausted its headroom, and why. This is a judgement, not a recap of every round.
+- `family`: a short mechanism label, such as `qpdf_bin_hoist`, `data_layout`, `loop_domain`, `control_flow`, or another precise label.
 - `decision`: one of two tokens —
     `continue`  — deepen or extend the same target bottleneck / optimization hypothesis
                   with a substantively distinct next change.
     `switch`    — pursue a different target bottleneck / optimization hypothesis because
                   the current one lacks a worthwhile next change.
-- `proposal` (the primary output): propose the single highest-value concrete change that
-  follows from the decision. Spend most of your investigation and reasoning here. Ground it
-  in the current accepted base, and identify the target code, mechanism, relevant call sites, expected
-  benefit, and one-round implementation scope. Subject to the hard rules above.
+- `proposal`: each proposal is a concrete candidate direction. Ground it in the current
+  accepted base, and identify the target code, mechanism, relevant call sites, expected
+  benefit, bit-faithful constraints, and one-round implementation scope.
 - If you are uncertain or blocked, still return the JSON object with a conservative, specific proposal.
 - Do not ask for more data and do not emit a summary.
 
 Example of the ONLY acceptable final output shape:
-{{"reflection": "r4 landed NPE-map inline+hoist (not-implemented, -24%); r5-8 re-tried it (already-implemented, empty). The QPDF inline is a different mechanism family not yet landed.", "decision": "switch", "proposal": "In Calculate_EVLikelihood's k-loop (OMILRECV2.cc:1257), inline the QPDF charge-PDF interpolation kernel at the 2 call sites, hoisting the PMT_Hit-constant bin search out of the k-loop."}}"""
+{{"reflection": "r4 landed NPE-map inline+hoist (not-implemented, -24%); r5-8 re-tried it (already-implemented, empty). The QPDF inline is a different mechanism family not yet landed.", "proposals": [{{"family": "qpdf_bin_hoist", "decision": "switch", "proposal": "In Calculate_EVLikelihood's k-loop (OMILRECV2.cc:1257), inline the QPDF charge-PDF interpolation kernel at the 2 call sites, hoisting the PMT_Hit-constant bin search out of the k-loop."}}]}}"""
     try:
         data = agent.run_json(prompt, cwd=cwd, label="proposer")
     except AgentError as exc:
@@ -183,25 +237,69 @@ Example of the ONLY acceptable final output shape:
             raise
         print(f"[proposer] JSON parse failed; using prose fallback as proposal "
               f"(reflection/decision lost)", flush=True)
-        return Proposal(proposal=fallback)
-    proposal = data.get("proposal")
-    if not isinstance(proposal, str) or not proposal.strip():
-        raise ValueError(f"proposer did not return a non-empty 'proposal' string: {data}")
-    decision = str(data.get("decision", "switch")).strip().lower()
-    # the contract says continue|switch; accept anything but normalize unknown to
-    # switch (the conservative default — switch is unconstrained, continue requires
-    # the reflection to state a mechanism difference, which we can't enforce here).
-    if decision not in ("continue", "switch"):
-        print(f"[proposer] decision '{decision}' not continue|switch; defaulting to "
-              f"switch", flush=True)
-        decision = "switch"
-    reflection = str(data.get("reflection", "")).strip()
-    if not reflection and visible:
+        return ProposalBatch(reflection="", proposals=[Proposal(proposal=fallback)],
+                             warnings=["JSON parse failed; prose fallback produced one candidate"])
+    batch = _parse_batch(data, candidates_per_round=candidates_per_round)
+    for warning in batch.warnings:
+        print(f"[proposer] {warning}", flush=True)
+    if not batch.reflection and visible:
         # round 0 is allowed to skip reflection (no history to reflect on); later
         # rounds omitting it is a contract lapse but not worth failing a round over.
         print(f"[proposer] reflection empty (history exists) — contract lapse, proceeding",
               flush=True)
-    return Proposal(proposal=proposal.strip(), decision=decision, reflection=reflection)
+    return batch
+
+
+def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
+    """Normalize new batch JSON and legacy single-proposal JSON."""
+    reflection = str(data.get("reflection", "")).strip()
+    warnings: list[str] = []
+    raw_proposals = data.get("proposals")
+    proposals: list[Proposal] = []
+    if isinstance(raw_proposals, list):
+        for i, item in enumerate(raw_proposals):
+            if not isinstance(item, dict):
+                raise ValueError(f"proposals[{i}]: must be an object, got {type(item).__name__}")
+            proposal = item.get("proposal")
+            if not isinstance(proposal, str) or not proposal.strip():
+                raise ValueError(f"proposals[{i}].proposal: must be a non-empty string")
+            decision = _normalize_decision(item.get("decision", "switch"))
+            family = str(item.get("family") or f"candidate_{i}").strip() or f"candidate_{i}"
+            proposals.append(Proposal(proposal=proposal.strip(), decision=decision,
+                                      reflection=reflection, family=family))
+    elif isinstance(data.get("proposal"), str) and data.get("proposal", "").strip():
+        if candidates_per_round > 1:
+            warnings.append(
+                f"returned legacy single-proposal JSON for candidates_per_round="
+                f"{candidates_per_round}; degrading to one candidate"
+            )
+        proposals.append(Proposal(proposal=data["proposal"].strip(),
+                                  decision=_normalize_decision(data.get("decision", "switch")),
+                                  reflection=reflection,
+                                  family=str(data.get("family") or "single").strip() or "single"))
+    else:
+        raise ValueError(f"proposer did not return proposals[] or a non-empty proposal: {data}")
+
+    if not proposals:
+        raise ValueError("proposer returned an empty proposals list")
+    if candidates_per_round == 1 and len(proposals) > 1:
+        warnings.append("returned multiple proposals for candidates_per_round=1; using the first")
+        proposals = proposals[:1]
+    if candidates_per_round > 1 and len(proposals) != candidates_per_round:
+        warnings.append(
+            f"returned {len(proposals)} candidate(s), expected {candidates_per_round}; "
+            "running the returned candidates"
+        )
+    return ProposalBatch(reflection=reflection, proposals=proposals, warnings=warnings)
+
+
+def _normalize_decision(value: object) -> str:
+    decision = str(value or "switch").strip().lower()
+    if decision not in ("continue", "switch"):
+        print(f"[proposer] decision '{decision}' not continue|switch; defaulting to switch",
+              flush=True)
+        return "switch"
+    return decision
 
 
 def _prose_fallback(raw: str) -> str | None:

@@ -27,8 +27,8 @@ from __future__ import annotations
 def for_proposer(history: list[dict]) -> list[dict]:
     """What the proposer sees of each prior round.
 
-    Projects round + proposal + full candidate sha + accepted/base state + score
-    + risk + metrics + changed_paths + feedback.
+    Projects round/generation history with candidate shas, selected state, score,
+    risk, metrics, changed_paths, feedback, and concise diagnostic narrative.
 
     Includes:
       - sha (full candidate commit): so the proposer can self-audit whether a
@@ -47,13 +47,38 @@ def for_proposer(history: list[dict]) -> list[dict]:
         from "direction has a latent bug" (high risk) when reflecting on whether
         to continue an area or switch.
 
-    Still excludes:
-      - eval_block: raw eval text, too noisy, hallucination risk.
-      - feedback_for_report: human-facing narrative; the proposer only needs
-        the tight directional `feedback`.
+    Still excludes eval_block: raw eval text, too noisy, hallucination risk.
     """
-    return [
-        {
+    out = []
+    for r in history:
+        if "candidates" in r:
+            out.append({
+                "round": r["round"],
+                "parent_sha": r.get("parent_sha"),
+                "selected_candidate": r.get("selected_candidate"),
+                "selected_sha": r.get("selected_sha"),
+                "base_sha": r.get("base_sha"),
+                "reflection": r.get("reflection", ""),
+                "candidates": [
+                    {
+                        "candidate": c.get("candidate"),
+                        "family": c.get("family"),
+                        "proposal": c.get("proposal"),
+                        "sha": c.get("sha") or None,
+                        "selected": bool(c.get("selected")),
+                        "accepted": c.get("accepted"),
+                        "score": c.get("score"),
+                        "risk": c.get("risk"),
+                        "metrics": c.get("metrics") or {},
+                        "changed_paths": c.get("changed_paths") or [],
+                        "feedback": c.get("feedback", ""),
+                        "feedback_for_report": c.get("feedback_for_report", ""),
+                    }
+                    for c in (r.get("candidates") or [])
+                ],
+            })
+            continue
+        out.append({
             "round": r["round"],
             "proposal": r["proposal"],
             "sha": r.get("sha") or None,
@@ -64,9 +89,9 @@ def for_proposer(history: list[dict]) -> list[dict]:
             "metrics": r.get("metrics") or {},
             "changed_paths": r.get("changed_paths") or [],
             "feedback": r["feedback"],
-        }
-        for r in history
-    ]
+            "feedback_for_report": r.get("feedback_for_report", r.get("feedback", "")),
+        })
+    return out
 
 
 def for_executor(proposal: str, goal: str, editable: list[str],

@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Valid config: {args.config}")
         print(f"  goal: {cfg['goal']}")
         print(f"  max_rounds: {cfg['max_rounds']}")
+        print(f"  candidates_per_round: {cfg['candidates_per_round']}")
+        print(f"  max_workers: {cfg['max_workers']}")
         print(f"  eval commands: {len(cfg['eval_commands'])}")
         print(f"  repo: {cfg['repo_path']} @ {cfg['baseline_ref']}")
         return

@@ -56,6 +56,7 @@ class Store:
         self.best_score: float = -1.0           # judger quality number (report only)
         self.best_sha: str | None = None        # harness-selected best commit
         self.best_round: int | None = None
+        self.best_candidate: int | None = None
         # For score-based fallback / report divergence:
         self.best_by_score_sha: str | None = None
         self.best_by_score_round: int | None = None
@@ -125,6 +126,55 @@ class Store:
         with self.path.open(encoding="utf-8") as f:
             return [json.loads(line) for line in f if line.strip()]
 
+    def append_generation(self, round_id: int, *, parent_sha: str,
+                          selected_candidate: int | None,
+                          selected_sha: str | None,
+                          candidates: list[dict],
+                          reflection: str = "") -> None:
+        """Record a self-loop generation with multiple candidate attempts."""
+        normalized = []
+        for i, c in enumerate(candidates):
+            report = c.get("feedback_for_report") or c.get("feedback", "")
+            normalized.append({
+                "candidate": c.get("candidate", i),
+                "family": c.get("family") or "single",
+                "proposal": c.get("proposal") or "",
+                "sha": c.get("sha"),
+                "score": c.get("score"),
+                "risk": c.get("risk", "high"),
+                "decision": c.get("decision", ""),
+                "feedback": c.get("feedback", ""),
+                "feedback_for_report": report,
+                "eval_block": (c.get("eval_block") or "")[:_HIST_EVAL_CAP],
+                "metrics": c.get("metrics") or {},
+                "changed_paths": c.get("changed_paths") or [],
+                "accepted": bool(c.get("accepted")),
+                "selected": c.get("candidate", i) == selected_candidate,
+            })
+        selected = next((c for c in normalized if c["selected"]), None)
+        record = {
+            "round": round_id,
+            "parent_sha": parent_sha,
+            "selected_candidate": selected_candidate,
+            "selected_sha": selected_sha,
+            "sha": selected_sha,
+            "proposal": selected.get("proposal", "") if selected else "",
+            "score": selected.get("score") if selected else 0.0,
+            "risk": selected.get("risk", "high") if selected else "high",
+            "feedback": selected.get("feedback", "") if selected else "[no selected candidate]",
+            "feedback_for_report": selected.get("feedback_for_report", "") if selected else "[no selected candidate]",
+            "metrics": selected.get("metrics", {}) if selected else {},
+            "changed_paths": selected.get("changed_paths", []) if selected else [],
+            "accepted": bool(selected_sha),
+            "base_sha": selected_sha or parent_sha,
+            "reflection": reflection,
+            "decision": selected.get("decision", "") if selected else "",
+            "candidates": normalized,
+        }
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._recompute_best()
+
     def last_eval_block(self) -> str | None:
         """The most recent round's eval_block, or None if no rounds yet.
 
@@ -147,15 +197,18 @@ class Store:
         if not rounds:
             return
         # always track the highest-score round (for the report's divergence line)
-        scored = [r for r in rounds if r.get("sha") and isinstance(r.get("score"), (int, float))]
+        candidates = list(_iter_candidates(rounds))
+        scored = [c for c in candidates
+                  if c.get("sha") and isinstance(c.get("score"), (int, float))]
         if scored:
-            top = max(scored, key=lambda r: r["score"])
+            top = max(scored, key=lambda c: c["score"])
             self.best_by_score_sha = top["sha"]
             self.best_by_score_round = top["round"]
             # score-based fallback (and the legacy public field)
             if self.metrics_schema is None:
                 self.best_sha = top["sha"]
                 self.best_round = top["round"]
+                self.best_candidate = top.get("candidate")
                 self.best_score = top["score"]
 
         if self.metrics_schema is None:
@@ -167,7 +220,7 @@ class Store:
         gate_keys = [g["key"] for g in self.metrics_schema.get("gates", [])]
 
         best = None  # (round, sha, obj_value)
-        for r in rounds:
+        for r in candidates:
             sha = r.get("sha")
             if not sha:
                 continue
@@ -183,16 +236,21 @@ class Store:
             if not isinstance(ov, (int, float)):
                 continue
             if best is None:
-                best = (r["round"], sha, ov)
+                best = (r["round"], sha, ov, r.get("candidate"), r.get("score") or -1.0)
                 continue
             better = (ov < best[2]) if lower else (ov > best[2])
+            tied = ov == best[2]
+            if tied:
+                better = (r.get("score") or -1.0) > best[4]
             if better:
-                best = (r["round"], sha, ov)
+                best = (r["round"], sha, ov, r.get("candidate"), r.get("score") or -1.0)
         if best is not None:
             self.best_sha = best[1]
             self.best_round = best[0]
+            self.best_candidate = best[3]
             # keep best_score as the judger score of that round for the report
-            rec = next((r for r in rounds if r["round"] == best[0]), None)
+            rec = next((r for r in candidates
+                        if r["round"] == best[0] and r.get("sha") == best[1]), None)
             if rec and isinstance(rec.get("score"), (int, float)):
                 self.best_score = rec["score"]
 
@@ -201,7 +259,9 @@ class Store:
         rounds = self.history()
         lines = [f"# SimpleLoop Run Report", "", f"**Goal:** {goal}", ""]
         if self.best_sha:
-            lines += [f"- Best commit: `{self.best_sha}` (round {self.best_round}, "
+            cand = (f", candidate {self.best_candidate}"
+                    if self.best_candidate is not None else "")
+            lines += [f"- Best commit: `{self.best_sha}` (round {self.best_round}{cand}, "
                       f"selected by {'objective metric' if self.metrics_schema else 'judger score'}"
                       f", score {self.best_score:.2f})", ""]
         else:
@@ -216,6 +276,30 @@ class Store:
                       ""]
         lines += ["## Round History", ""]
         for r in rounds:
+            if "candidates" in r:
+                lines += [f"### Round {r['round']}",
+                          f"- parent sha: `{r.get('parent_sha')}`",
+                          f"- selected candidate: {r.get('selected_candidate')}  "
+                          f"selected sha: `{r.get('selected_sha')}`",
+                          f"- reflection: {r.get('reflection', '')}", "",
+                          "| candidate | selected | family | sha | metrics | score | risk | feedback |",
+                          "|---|---|---|---|---|---|---|---|"]
+                for c in r.get("candidates") or []:
+                    m = c.get("metrics") or {}
+                    metrics_text = " ".join(f"{k}={v}" for k, v in m.items()) if m else ""
+                    lines.append(
+                        f"| {c.get('candidate')} | {bool(c.get('selected'))} | "
+                        f"{c.get('family', '')} | `{c.get('sha')}` | {metrics_text} | "
+                        f"{c.get('score')} | {c.get('risk')} | {c.get('feedback', '')[:180]} |"
+                    )
+                for c in r.get("candidates") or []:
+                    lines += ["",
+                              f"#### Round {r['round']} candidate {c.get('candidate')}",
+                              f"- proposal: {c.get('proposal', '')[:300]}",
+                              f"- changed paths: {', '.join(c.get('changed_paths') or []) or '(none)'}",
+                              f"- narrative: {c.get('feedback_for_report') or c.get('feedback', '')}"]
+                lines.append("")
+                continue
             m = r.get("metrics") or {}
             metrics_line = ""
             if self.metrics_schema and m:
@@ -244,3 +328,14 @@ class Store:
         out = self.run_dir / "final_report.md"
         out.write_text("\n".join(lines), encoding="utf-8")
         return out
+
+
+def _iter_candidates(rounds: list[dict]):
+    for r in rounds:
+        if "candidates" in r:
+            for c in r.get("candidates") or []:
+                row = dict(c)
+                row["round"] = r.get("round")
+                yield row
+        else:
+            yield r

@@ -76,7 +76,7 @@ class Workspace:
 
     # ---- per-round worktree ----
 
-    def add_worktree(self, round_id: int, parent_sha: str) -> Path:
+    def add_worktree(self, round_id: int | str, parent_sha: str) -> Path:
         """Create a worktree at parent_sha. Returns its path (the agent's cwd)."""
         self.wt_root.mkdir(parents=True, exist_ok=True)
         wt = self.wt_root / f"r{round_id}"
@@ -97,7 +97,7 @@ class Workspace:
         # checks out by default, so files are present)
         return wt
 
-    def remove_worktree(self, round_id: int) -> None:
+    def remove_worktree(self, round_id: int | str) -> None:
         wt = self.wt_root / f"r{round_id}"
         if not wt.exists():
             return
@@ -114,7 +114,7 @@ class Workspace:
         status = self._git(wt, "status", "--porcelain=v1")
         return [p for p in (_status_path(line) for line in status.splitlines() if line.strip()) if p]
 
-    def commit(self, wt: Path, round_id: int, paths: list[str]) -> str:
+    def commit(self, wt: Path, round_id: int | str, paths: list[str]) -> str:
         """Stage exactly `paths` and commit. Returns the new SHA."""
         # reset anything the agent staged so the harness controls the index
         self._git(wt, "restore", "--staged", "--", ".")

@@ -51,7 +51,7 @@ class Judgment:
     score: float
     risk: str                      # low|medium|high — latent-correctness risk of the refactor
     feedback: str                  # ≤ ~300 chars: directional signal for the proposer
-    feedback_for_report: str      # full narrative for final_report / humans
+    feedback_for_report: str      # concise Implemented/Result/Analysis diagnostic
 
 
 def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
@@ -169,7 +169,7 @@ Change (git diff vs the previous round's result):
 Judging guidance:
 - Judge whether the change moves toward the goal, achieves real improvement, introduces risk, and is good-quality code.
 {eval_guidance}{facts_guidance}- Penalize unsupported claims, regressions vs the prior round, and changes that break a gate.
-- Give the proposer the facts it needs (the measured effect, the risk) — not instructions on what to try next. Direction choice is the proposer's job.
+- Give objective facts about what landed, how it measured, and why it behaved that way. Do not choose the next direction.
 - `risk` is your read of the refactor's LATENT correctness risk (not the measured speed — the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-identical move with the same operators/evaluation order/types. Be concrete in feedback_for_report about WHY the risk level.
 
 Final delivery contract (mandatory):
@@ -181,7 +181,10 @@ Final delivery contract (mandatory):
   - `already-implemented` — the executor made no change because there was nothing to do (reason is "executor made no changes"); this is the executor's call, you relay it rather than re-verifying against the source.
   - `gate-rejected` — the executor made changes but the gate rejected them for frozen paths (reason starts with "gate rejected").
   No next-step direction in `feedback`.
-- `feedback_for_report` (any length) is the full judgment for humans: what the change did, why it scored this way, the evidence, the risks, the concrete reason for the risk band. This is the rich version; `feedback` is its distilled signal.
+- `feedback_for_report` is a concise diagnostic with three labeled parts:
+  `Implemented:` say whether the proposed change actually landed and summarize what the executor changed. If it was partial, no-op, gate-rejected, or drifted from the proposal, say that plainly.
+  `Result:` cite the authoritative metrics and gates. Compare against the prior round and baseline when those deltas are present. Keep the comparison factual.
+  `Analysis:` explain why the proposal performed well, regressed, failed, or was inconclusive. Name the concrete mechanism that helped or hurt, and mention any specific correctness risk or validation blind spot. Stay objective; do not choose the next direction.
 - If evidence is incomplete or contradictory, still return the JSON object with a low score and explain the uncertainty in feedback_for_report.
 - Do not ask for more data and do not emit a wrap-up."""
 
