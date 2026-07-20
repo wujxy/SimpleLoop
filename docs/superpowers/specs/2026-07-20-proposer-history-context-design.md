@@ -78,7 +78,7 @@ For earlier records, normalize and truncate:
 normalized = " ".join(full_text.split())
 head = normalized[:_PROPOSER_OLD_PROPOSAL_CHARS]
 if len(normalized) > _PROPOSER_OLD_PROPOSAL_CHARS:
-    head += "..."
+    head += "…"
 ```
 
 Project old records as:
