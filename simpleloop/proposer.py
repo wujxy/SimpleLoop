@@ -63,6 +63,12 @@ class ProposalBatch:
     warnings: list[str] = field(default_factory=list)
 
 
+def _proposal_history_field(record: dict) -> tuple[str, str]:
+    if "proposal" in record:
+        return "proposal", str(record.get("proposal") or "")
+    return "proposal_head", str(record.get("proposal_head") or "")
+
+
 def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             history: list[dict], base_sha: str, cwd: Path,
             candidates_per_round: int = 1) -> ProposalBatch:
@@ -91,6 +97,7 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                     cm = c.get("metrics") or {}
                     cm_parts = [f"{k}={v}" for k, v in cm.items()] if cm else ["(no metrics)"]
                     c_paths = c.get("changed_paths") or []
+                    proposal_label, proposal_text = _proposal_history_field(c)
                     cand_lines.append(
                         f"    candidate {c.get('candidate')}: selected={bool(c.get('selected'))} | "
                         f"family={c.get('family','?')} | candidate_sha={c.get('sha') or '(no commit)'} | "
@@ -98,7 +105,7 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                         f"score={c.get('score')} | risk={c.get('risk','?')} | "
                         f"feedback=\"{c.get('feedback','')}\" | "
                         f"diagnostic=\"{c.get('feedback_for_report','')}\" | "
-                        f"proposal=\"{c.get('proposal','')}\""
+                        f'{proposal_label}="{proposal_text}"'
                     )
                 hist_lines.append(
                     f"  round {r['round']}: parent_sha={r.get('parent_sha') or round_base} | "
@@ -107,13 +114,14 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                     "\n".join(cand_lines)
                 )
             else:
+                proposal_label, proposal_text = _proposal_history_field(r)
                 hist_lines.append(
                     f"  round {r['round']}: candidate_sha={sha_str} | "
                     f"accepted={accepted_str} | base_sha={round_base} | {metrics_str} | "
                     f"changed: {paths_str} | score={r['score']} | risk={r.get('risk','?')} | "
                     f"feedback=\"{r['feedback']}\" | "
                     f"diagnostic=\"{r.get('feedback_for_report','')}\" | "
-                    f"proposal=\"{r['proposal']}\""
+                    f'{proposal_label}="{proposal_text}"'
                 )
         hist_block = "\n".join(hist_lines)
     else:

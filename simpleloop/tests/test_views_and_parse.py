@@ -543,6 +543,49 @@ def test_proposer_prompt_uses_explicit_base_and_explains_rejected_candidate(tmp_
     assert "HEAD" not in agent.prompt
 
 
+def test_proposer_prompt_labels_compact_and_full_history(tmp_path: Path):
+    from simpleloop import proposer as prop_mod
+
+    class CapturingAgent:
+        prompt = ""
+
+        def run_json(self, prompt, **_kwargs):
+            self.prompt = prompt
+            return {
+                "reflection": "brief",
+                "decision": "switch",
+                "proposal": "next",
+            }
+
+    old_generation = _parallel_history_record(
+        3,
+        ["old parallel zero", "old parallel one"],
+    )
+    old_serial = _serial_history_record(8, "old serial proposal")
+    recent = [
+        _serial_history_record(round_id, f"recent proposal {round_id}")
+        for round_id in [20, 30, 40, 50, 60, 70]
+    ]
+    agent = CapturingAgent()
+
+    prop_mod.propose(
+        agent,
+        goal="g",
+        editable=["src/**"],
+        frozen=[],
+        history=[old_generation, old_serial, *recent],
+        base_sha="accepted-full-sha",
+        cwd=tmp_path,
+    )
+
+    assert 'proposal_head="old parallel zero"' in agent.prompt
+    assert 'proposal_head="old parallel one"' in agent.prompt
+    assert 'proposal_head="old serial proposal"' in agent.prompt
+    assert 'proposal="old parallel zero"' not in agent.prompt
+    assert 'proposal="old serial proposal"' not in agent.prompt
+    assert 'proposal="recent proposal 70"' in agent.prompt
+
+
 # --- loop: hard-gate acceptance and resume state ---
 
 def test_candidate_acceptance_requires_every_declared_gate_to_pass():
