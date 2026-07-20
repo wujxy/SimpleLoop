@@ -23,10 +23,14 @@ omilrec-v100.yaml         # this task config (goal, safety, eval, source)
 ## What the loop does on this task
 
 - **proposer** reads `../../omilrec-v100/` (read-only) and proposes a speedup of
-  the OMILRECV2 FCN / likelihood hot path (inlined in `OMILRECV2.cc::execute()`).
-- **executor** edits `OMILRECV2/src/*.{cc,h}` in a fresh worktree; the harness
-  commits. The gate rejects any edit to tests/scripts/CMake/benchmarks/docs and
-  **especially `reference/**`** (the frozen bit-identical baseline).
+  the OMILRECV2 FCN / likelihood hot path (inlined in
+  `OMILRECV2.cc::execute()`). It produces three different candidate families
+  per round.
+- **executor** starts all three candidates from the same accepted `base_sha`,
+  edits `OMILRECV2/src/*.{cc,h}` in isolated worktrees, and runs up to three
+  pipelines concurrently. The gate rejects any edit to
+  tests/scripts/CMake/benchmarks/docs and **especially `reference/**`** (the
+  frozen bit-identical baseline).
 - **harness** runs the single eval command `bash scripts/sl_eval.sh --evtmax 10`
   *in the worktree* (the committed candidate, before the worktree is removed).
   The wrapper sources the JUNO env, builds the lib, runs the e2e bit-identical
@@ -39,6 +43,8 @@ omilrec-v100.yaml         # this task config (goal, safety, eval, source)
 - **judger** grades the diff + that eval output: a candidate that lowers
   `SPEED_MS` with `CORRECTNESS=PASS` scores high; `CORRECTNESS=FAIL` or
   `EVAL_RESULT=correctness_fail` must score low.
+- **selector** chooses the lowest `SPEED_MS` among candidates whose hard gates
+  pass and whose risk is not high. Judger score is only a tie-breaker.
 
 ## The v1.0.0 correctness gate is strict
 
@@ -67,6 +73,11 @@ mid-history version like v1.8.0/v1.10.0 (1e-13 FCN gate, more permissive).
 simpleloop validate --config examples/omilrec-v100.yaml
 simpleloop run      --config examples/omilrec-v100.yaml --run-dir ./runs/omilrec-v100-001
 ```
+
+The example defaults to `candidates_per_round: 3` and `max_workers: 3`. With
+`max_rounds: 40`, one run can execute up to 120 candidates and three concurrent
+Claude/build/eval pipelines, so plan compute and model usage accordingly. Set
+both parallel values to `1` for serial-compatible execution.
 
 Each round's eval builds from scratch in the worktree (600s budget, `--evtmax 10`
 fits it). For a less noisy speed delta, raise SimpleLoop's per-command eval

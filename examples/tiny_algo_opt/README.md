@@ -35,14 +35,20 @@ simpleloop run      --config examples/tiny_algo_opt/task.yaml \
                     --run-dir   examples/tiny_algo_opt/runs/run-001
 ```
 
+The example defaults to `candidates_per_round: 3` and `max_workers: 3`. Set
+both values to `1` for serial-compatible execution.
+
 ## What the loop does on this task
-- **proposer** reads `repo/tinyalgo/` and proposes a speedup direction.
-- **executor** edits `tinyalgo/__init__.py` in a worktree; the harness commits.
+- **proposer** reads `repo/tinyalgo/` and proposes three different speedup
+  families per round.
+- **executor** runs each candidate from the same accepted `base_sha` in its own
+  worktree; up to three candidates execute concurrently.
 - **harness** runs the three eval commands (pytest, drift, bench) and feeds their
-  stdout to the judger.
+  stdout to the judger. It selects the lowest `ms_per_call` candidate among
+  candidates whose `CORRECTNESS` and `DRIFT` gates pass.
 - **judger** grades the diff + eval output: a change that breaks correctness or
   drift should score low; a change that lowers `ms_per_call` with all gates green
-  should score high.
+  should score high. Its score is only a tie-breaker for equal objective values.
 
 ## Trace the result
 ```bash
