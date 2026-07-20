@@ -22,6 +22,7 @@ back into the next round's prompt.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -127,6 +128,21 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
     else:
         hist_block = "  (none yet — this is the first round)"
 
+    output_example = json.dumps(
+        {
+            "reflection": "<1-2 sentence routing judgment>",
+            "proposals": [
+                {
+                    "family": f"<mechanism label {i + 1}>",
+                    "decision": "<continue|switch>",
+                    "proposal": f"<candidate direction {i + 1}>",
+                }
+                for i in range(candidates_per_round)
+            ],
+        },
+        indent=2,
+    )
+
     prompt = f"""You are the PROPOSER in an optimization loop. Choose candidate directions for the next round.
 
 Roles in this loop (so you know what your input/output is and is not):
@@ -209,12 +225,18 @@ Reference:
   already-implemented means the executor found nothing to do; this differs from a real
   candidate commit that was rejected by a hard gate.
 
-Final delivery contract (mandatory):
-- Your final response MUST be exactly one parseable JSON object. The preferred shape is:
-  {{"reflection": "<one paragraph>", "proposals": [{{"family": "<mechanism label>", "decision": "<continue|switch>", "proposal": "<candidate direction>"}}]}}
+Machine-readable final delivery:
+- Your final assistant message is passed directly to json.loads(). No human-facing explanation is needed.
+- Your final response MUST be exactly one parseable JSON object.
+- After completing any repository inspection or tool calls, return one raw JSON object as the final assistant message.
+- The first non-whitespace character must be `{{`.
+- The last non-whitespace character must be `}}`.
+- Do not use Markdown code fences.
+- Do not place prose, headings, commentary, XML tags, or tool-call markup before or after the JSON object.
+- `proposals` must contain exactly {candidates_per_round} items.
 - When candidates_per_round is 1, this legacy shape is also accepted:
   {{"reflection": "<one paragraph>", "decision": "<continue|switch>", "proposal": "<your direction>"}}
-- A ```json code fence is acceptable; any prose, heading, commentary, or natural-language wrap-up outside the JSON is forbidden. Your INVESTIGATION (reading code, diffing rounds) goes through tool calls (git show/diff/log); your reasoning CONCLUSIONS go inside the JSON — in `reflection` and `proposal`. Emit ONLY the JSON object (no preamble, no wrap-up around it).
+- Your investigation goes through tool calls (`git show`, `git diff`, `git log`). Put the conclusions that matter in `reflection` and `proposal`, not outside the JSON.
 - `reflection` (mandatory when prior history exists; round 0 may leave it empty):
   at most 1–2 sentences stating only the historical evidence that affects this round's
   choice — whether the current direction still has a concrete next opportunity or has
@@ -230,9 +252,11 @@ Final delivery contract (mandatory):
   benefit, bit-faithful constraints, and one-round implementation scope.
 - If you are uncertain or blocked, still return the JSON object with a conservative, specific proposal.
 - Do not ask for more data and do not emit a summary.
+- Before sending, check that the complete response itself is one JSON object and that
+  the `proposals` array has exactly {candidates_per_round} items.
 
-Example of the ONLY acceptable final output shape:
-{{"reflection": "r4 landed NPE-map inline+hoist (not-implemented, -24%); r5-8 re-tried it (already-implemented, empty). The QPDF inline is a different mechanism family not yet landed.", "proposals": [{{"family": "qpdf_bin_hoist", "decision": "switch", "proposal": "In Calculate_EVLikelihood's k-loop (OMILRECV2.cc:1257), inline the QPDF charge-PDF interpolation kernel at the 2 call sites, hoisting the PMT_Hit-constant bin search out of the k-loop."}}]}}"""
+Example shape for this round ({candidates_per_round} candidates):
+{output_example}"""
     try:
         data = agent.run_json(prompt, cwd=cwd, label="proposer")
     except AgentError as exc:

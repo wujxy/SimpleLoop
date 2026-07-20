@@ -202,7 +202,11 @@ def run(config_path: str | Path, run_dir: str | Path,
                 executor_agent, judger_agent, prior_metrics, baseline_metrics,
                 metrics_schema,
             )
-            winner = _select_winner(candidates, metrics_schema)
+            winner = _select_winner(
+                candidates,
+                metrics_schema,
+                prior_metrics=prior_metrics,
+            )
             selected_candidate = winner.get("candidate") if winner else None
             selected_sha = winner.get("sha") if winner else None
             for candidate in candidates:
@@ -214,8 +218,8 @@ def run(config_path: str | Path, run_dir: str | Path,
                 prior_metrics = winner.get("metrics") or prior_metrics
                 prior_eval_block = winner.get("eval_block") or prior_eval_block
             else:
-                print(f"[{stamp()}] no eligible candidate selected; accepted base stays "
-                      f"{parent_sha[:10]}", flush=True)
+                print(f"[{stamp()}] no eligible candidate improved the incumbent; "
+                      f"accepted base stays {parent_sha[:10]}", flush=True)
             store.append_generation(
                 round_id, parent_sha=parent_sha,
                 selected_candidate=selected_candidate, selected_sha=selected_sha,
@@ -502,8 +506,9 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
 
 
 def _select_winner(candidates: list[dict],
-                   metrics_schema: dict | None) -> dict | None:
-    """Select the candidate that advances the lineage."""
+                   metrics_schema: dict | None,
+                   prior_metrics: dict | None = None) -> dict | None:
+    """Select an eligible candidate only when it improves the incumbent."""
     eligible = []
     if metrics_schema:
         obj = metrics_schema["objective"]
@@ -524,11 +529,18 @@ def _select_winner(candidates: list[dict],
             return None
         lower = obj["lower_is_better"]
         direction = 1 if lower else -1
-        return min(eligible, key=lambda c: (
+        winner = min(eligible, key=lambda c: (
             direction * c["metrics"][key],
             -(c.get("score") or 0.0),
             c.get("candidate") or 0,
         ))
+        prior_value = (prior_metrics or {}).get(key)
+        if isinstance(prior_value, (int, float)):
+            winner_value = winner["metrics"][key]
+            improved = winner_value < prior_value if lower else winner_value > prior_value
+            if not improved:
+                return None
+        return winner
     for c in candidates:
         if c.get("sha") and str(c.get("risk", "high")).lower() != "high":
             eligible.append(c)

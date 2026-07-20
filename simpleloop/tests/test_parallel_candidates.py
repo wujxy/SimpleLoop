@@ -14,6 +14,7 @@ from simpleloop.judger import Judgment
 from simpleloop.loop import _run_candidates, _select_winner
 from simpleloop.proposer import Proposal
 from simpleloop.proposer import _parse_batch
+from simpleloop.proposer import propose
 from simpleloop.store import Store
 
 
@@ -123,6 +124,44 @@ def test_parse_batch_rejects_empty_batch():
         _parse_batch({"reflection": "r", "proposals": []}, candidates_per_round=3)
 
 
+def test_proposer_prompt_requires_raw_json_with_exact_candidate_count(tmp_path: Path):
+    class CapturingAgent:
+        prompt = ""
+
+        def run_json(self, prompt, **_kwargs):
+            self.prompt = prompt
+            return {
+                "reflection": "",
+                "proposals": [
+                    {"family": "one", "decision": "switch", "proposal": "p1"},
+                    {"family": "two", "decision": "switch", "proposal": "p2"},
+                    {"family": "three", "decision": "switch", "proposal": "p3"},
+                ],
+            }
+
+    agent = CapturingAgent()
+    propose(
+        agent,
+        goal="make it faster",
+        editable=["src/**"],
+        frozen=["tests/**"],
+        history=[],
+        base_sha="base-sha",
+        cwd=tmp_path,
+        candidates_per_round=3,
+    )
+
+    assert "passed directly to json.loads()" in agent.prompt
+    assert "first non-whitespace character must be `{`" in agent.prompt
+    assert "last non-whitespace character must be `}`" in agent.prompt
+    assert "Do not use Markdown code fences" in agent.prompt
+    assert "Do not place prose, headings, commentary, XML tags, or tool-call markup" in agent.prompt
+    assert "`proposals` must contain exactly 3 items" in agent.prompt
+    assert "A ```json code fence is acceptable" not in agent.prompt
+    assert all(f"<mechanism label {i}>" in agent.prompt for i in range(1, 4))
+    assert "<mechanism label 4>" not in agent.prompt
+
+
 def test_selector_uses_objective_and_filters_gates_and_risk():
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -155,6 +194,93 @@ def test_selector_uses_score_only_as_tiebreaker():
     assert _select_winner(candidates, schema)["sha"] == "b"
 
 
+@pytest.mark.parametrize(
+    ("lower_is_better", "prior_value", "candidate_values"),
+    [
+        (True, 100.0, [100.0, 120.0, 110.0]),
+        (False, 100.0, [100.0, 80.0, 90.0]),
+    ],
+)
+def test_selector_keeps_incumbent_when_no_candidate_improves_objective(
+    lower_is_better: bool,
+    prior_value: float,
+    candidate_values: list[float],
+):
+    schema = {
+        "objective": {"key": "OBJECTIVE", "lower_is_better": lower_is_better},
+        "gates": [{"key": "CORRECTNESS"}],
+    }
+    candidates = [
+        {
+            "candidate": i,
+            "sha": f"candidate-{i}",
+            "risk": "low",
+            "score": 1.0,
+            "metrics": {"OBJECTIVE": value, "CORRECTNESS": True},
+        }
+        for i, value in enumerate(candidate_values)
+    ]
+
+    assert _select_winner(
+        candidates,
+        schema,
+        prior_metrics={"OBJECTIVE": prior_value},
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("lower_is_better", "prior_value", "candidate_values", "winner"),
+    [
+        (True, 100.0, [110.0, 90.0, 95.0], "candidate-1"),
+        (False, 100.0, [90.0, 105.0, 101.0], "candidate-1"),
+    ],
+)
+def test_selector_advances_only_when_best_candidate_improves_objective(
+    lower_is_better: bool,
+    prior_value: float,
+    candidate_values: list[float],
+    winner: str,
+):
+    schema = {
+        "objective": {"key": "OBJECTIVE", "lower_is_better": lower_is_better},
+        "gates": [{"key": "CORRECTNESS"}],
+    }
+    candidates = [
+        {
+            "candidate": i,
+            "sha": f"candidate-{i}",
+            "risk": "low",
+            "score": 0.5,
+            "metrics": {"OBJECTIVE": value, "CORRECTNESS": True},
+        }
+        for i, value in enumerate(candidate_values)
+    ]
+
+    selected = _select_winner(
+        candidates,
+        schema,
+        prior_metrics={"OBJECTIVE": prior_value},
+    )
+
+    assert selected is not None
+    assert selected["sha"] == winner
+
+
+def test_selector_uses_best_candidate_when_prior_objective_is_missing():
+    schema = {
+        "objective": {"key": "OBJECTIVE", "lower_is_better": True},
+        "gates": [{"key": "CORRECTNESS"}],
+    }
+    candidates = [
+        {"candidate": 0, "sha": "slow", "risk": "low", "score": 0.5,
+         "metrics": {"OBJECTIVE": 20.0, "CORRECTNESS": True}},
+        {"candidate": 1, "sha": "fast", "risk": "low", "score": 0.5,
+         "metrics": {"OBJECTIVE": 10.0, "CORRECTNESS": True}},
+    ]
+
+    assert _select_winner(candidates, schema, prior_metrics={})["sha"] == "fast"
+
+
 def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     store = Store(tmp_path, metrics_schema={
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -183,6 +309,47 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     projected = views.for_proposer(rows)
     assert projected[0]["selected_sha"] == "b"
     assert projected[0]["candidates"][0]["feedback_for_report"].startswith("Implemented:")
+
+
+def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Path):
+    store = Store(tmp_path, metrics_schema={
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [{"key": "CORRECTNESS"}],
+    })
+    winner = {
+        "candidate": 0, "family": "winner", "proposal": "p0", "sha": "best",
+        "score": 0.8, "risk": "low", "feedback": "improved",
+        "metrics": {"SPEED_MS": 100.0, "CORRECTNESS": True},
+        "accepted": True, "selected": True,
+    }
+    store.append_generation(
+        0,
+        parent_sha="baseline",
+        selected_candidate=0,
+        selected_sha="best",
+        candidates=[winner],
+    )
+    regressed = {
+        "candidate": 0, "family": "regressed", "proposal": "p1", "sha": "slower",
+        "score": 0.2, "risk": "low", "feedback": "regressed",
+        "metrics": {"SPEED_MS": 120.0, "CORRECTNESS": True},
+        "accepted": True, "selected": False,
+    }
+    store.append_generation(
+        1,
+        parent_sha="best",
+        selected_candidate=None,
+        selected_sha=None,
+        candidates=[regressed],
+    )
+
+    generation = store.history()[1]
+    assert generation["selected_candidate"] is None
+    assert generation["selected_sha"] is None
+    assert generation["base_sha"] == "best"
+    assert generation["candidates"][0]["sha"] == "slower"
+    assert generation["candidates"][0]["selected"] is False
+    assert store.best_sha == "best"
 
 
 def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path: Path):
