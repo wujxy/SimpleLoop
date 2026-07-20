@@ -134,6 +134,8 @@ def run(config_path: str | Path, run_dir: str | Path,
             print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
                   f"max_rounds={n_rounds} -- nothing to do. Bump loop.max_rounds in "
                   f"the config to add more rounds.", flush=True)
+            _refresh_progress_plot(store)
+            store.write_final_report(cfg["goal"])
             return _summary(store, workspace, run_dir_path)
         parent_sha, last_accepted = _resume_chain(
             done, workspace.baseline_sha(), metrics_schema)
@@ -350,11 +352,12 @@ def _summary(store: Store, workspace: Workspace, run_dir_path: Path) -> dict:
 
 
 def _refresh_progress_plot(store: Store) -> None:
-    plot_mod.write_progress_png(
-        store.run_dir,
-        store.history(),
-        store.metrics_schema,
-    )
+    try:
+        history = store.history()
+    except Exception as exc:
+        print(f"[plot] warning: could not read {store.path}: {exc}", flush=True)
+        return
+    plot_mod.write_progress_png(store.run_dir, history, store.metrics_schema)
 
 
 def _record_failure(store: Store, round_id: int, proposal: str, reason: str,

@@ -25,7 +25,11 @@ class PlotSeries:
 
 
 def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def build_series(history: list[dict], metrics_schema: dict | None) -> PlotSeries:
@@ -58,6 +62,11 @@ def build_series(history: list[dict], metrics_schema: dict | None) -> PlotSeries
                 if parallel
                 else bool(record.get("accepted"))
             )
+            accepted = (
+                selected and bool(record.get("selected_sha"))
+                if parallel
+                else selected
+            )
             score = candidate.get("score")
             if _is_number(score):
                 score_point = (round_number, float(score))
@@ -71,6 +80,7 @@ def build_series(history: list[dict], metrics_schema: dict | None) -> PlotSeries
                 objective_points.append(objective_point)
                 if selected:
                     selected_objectives.append(objective_point)
+                if accepted:
                     incumbent = float(value)
 
         if incumbent is not None:
@@ -152,7 +162,7 @@ def _render_progress_png(series: PlotSeries, output: Path) -> None:
         )
     score_axis.set_title("Judger score")
     score_axis.set_ylabel("Score")
-    score_axis.set_ylim(-0.02, 1.02)
+    score_axis.set_ylim(0.0, 1.0)
     score_axis.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
     if score_axis.get_legend_handles_labels()[0]:
         score_axis.legend(loc="best", frameon=False)

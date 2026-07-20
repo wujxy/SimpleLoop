@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from simpleloop import loop as loop_mod
 from simpleloop import plot as plot_mod
 from simpleloop.plot import build_series
@@ -115,6 +117,46 @@ def test_build_series_without_objective_schema_still_tracks_scores():
     assert series.lower_is_better is None
 
 
+def test_build_series_requires_selected_sha_to_advance_parallel_incumbent():
+    history = [
+        {
+            "round": 0,
+            "selected_candidate": 0,
+            "selected_sha": None,
+            "candidates": [
+                {
+                    "candidate": 0,
+                    "score": 0.8,
+                    "metrics": {"SPEED_MS": 90.0},
+                },
+            ],
+        },
+    ]
+
+    series = build_series(history, SCHEMA)
+
+    assert series.selected_scores == [(1, 0.8)]
+    assert series.selected_objectives == [(1, 90.0)]
+    assert series.incumbent_objective == []
+
+
+def test_build_series_skips_non_finite_values():
+    history = [
+        {
+            "round": 0,
+            "accepted": True,
+            "score": math.nan,
+            "metrics": {"SPEED_MS": math.inf},
+        },
+    ]
+
+    series = build_series(history, SCHEMA)
+
+    assert series.score_points == []
+    assert series.objective_points == []
+    assert series.incumbent_objective == []
+
+
 def test_write_progress_png_creates_valid_png(tmp_path):
     history = [
         {
@@ -159,6 +201,22 @@ def test_render_failure_preserves_previous_png(monkeypatch, tmp_path):
     assert not (tmp_path / ".progress.tmp.png").exists()
 
 
+def test_atomic_replace_failure_preserves_previous_png(monkeypatch, tmp_path):
+    output = tmp_path / "progress.png"
+    output.write_bytes(b"previous image")
+
+    def fail_replace(_source, _destination):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(plot_mod.os, "replace", fail_replace)
+
+    result = plot_mod.write_progress_png(tmp_path, [], SCHEMA)
+
+    assert result is None
+    assert output.read_bytes() == b"previous image"
+    assert not (tmp_path / ".progress.tmp.png").exists()
+
+
 def test_refresh_progress_plot_uses_persisted_history(monkeypatch, tmp_path):
     store = Store(tmp_path, metrics_schema=SCHEMA)
     store.append(
@@ -191,6 +249,19 @@ def test_refresh_progress_plot_uses_persisted_history(monkeypatch, tmp_path):
     }
 
 
+def test_refresh_progress_plot_swallows_history_read_failure(monkeypatch, tmp_path, capsys):
+    store = Store(tmp_path, metrics_schema=SCHEMA)
+
+    def fail_history():
+        raise OSError("history unavailable")
+
+    monkeypatch.setattr(store, "history", fail_history)
+
+    loop_mod._refresh_progress_plot(store)
+
+    assert "[plot] warning:" in capsys.readouterr().out
+
+
 def test_record_failure_refreshes_progress_plot(monkeypatch, tmp_path):
     store = Store(tmp_path, metrics_schema=SCHEMA)
     refreshed = []
@@ -206,3 +277,51 @@ def test_record_failure_refreshes_progress_plot(monkeypatch, tmp_path):
 
     assert refreshed == [store]
     assert len(store.history()) == 1
+
+
+def test_noop_continue_refreshes_plot_and_report(monkeypatch, tmp_path):
+    run_dir = tmp_path / "run"
+    store = Store(run_dir, metrics_schema=SCHEMA)
+    store.append(
+        0,
+        "proposal",
+        "sha",
+        0.8,
+        "feedback",
+        eval_metrics={"SPEED_MS": 90.0, "CORRECTNESS": True},
+        risk="low",
+        accepted=True,
+        base_sha="sha",
+    )
+    config = {
+        "goal": "make it faster",
+        "max_rounds": 1,
+        "candidates_per_round": 1,
+        "max_workers": 1,
+        "agent_timeout_seconds": 10,
+        "repo_path": tmp_path / "source",
+        "baseline_ref": "HEAD",
+        "editable_paths": ["src/**"],
+        "frozen_paths": [],
+        "eval_commands": [],
+        "metrics": SCHEMA,
+    }
+
+    class FakeWorkspace:
+        def __init__(self, *, run_dir, **_kwargs):
+            self.repo = run_dir / "repo"
+
+        def setup(self):
+            self.repo.mkdir(parents=True, exist_ok=True)
+
+        def baseline_sha(self):
+            return "baseline"
+
+    monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
+    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+
+    summary = loop_mod.run("config.yaml", run_dir, continue_run=True)
+
+    assert summary["rounds"] == 1
+    assert (run_dir / "progress.png").exists()
+    assert (run_dir / "final_report.md").exists()
