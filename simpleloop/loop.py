@@ -5,7 +5,8 @@ For each of max_rounds rounds:
   executor.execute(proposal) -> sha (or None if gate-rejected / empty)
   judger.judge(diff + eval)  -> {score, feedback}
   store.append(...)
-  if sha: parent_sha = sha   # chain advances; else chain stays put
+  if candidate passes every configured hard gate: parent_sha = candidate_sha
+  else: parent_sha stays put (the rejected candidate remains in history)
 
 No early stop, no batch, no parallel. The orchestrator never decides whether a
 round is "good" — it just records the judger's score and feeds feedback forward.
@@ -34,11 +35,18 @@ from .workspace import Workspace
 
 
 def run(config_path: str | Path, run_dir: str | Path,
-        proposals: str | Path | list[str] | None = None) -> dict:
+        proposals: str | Path | list[str] | None = None,
+        continue_run: bool = False) -> dict:
     """Run the full loop. Returns a summary dict.
 
     If `proposals` is given (a list of strings, or a path to a YAML/JSON file
     holding one), the claude proposer is skipped and round i uses proposals[i].
+
+    If `continue_run` is True, resume an existing run-dir: rounds already in
+    history.jsonl are skipped, the commit chain resumes from the last accepted
+    round's sha, and loop.max_rounds is treated as the target TOTAL round count
+    (so bump it in the config before continuing). Baseline eval is re-run for
+    the judger's vs-baseline axis (cheap relative to the rounds being added).
     """
     cfg = config_mod.load(config_path)
     # Resolve to absolute now: every derived path (repo, worktrees) must be
@@ -49,6 +57,10 @@ def run(config_path: str | Path, run_dir: str | Path,
     run_dir_path.mkdir(parents=True, exist_ok=True)
 
     static_proposals = _load_proposals(proposals)
+    if static_proposals is not None and continue_run:
+        raise ValueError("--continue cannot be combined with --proposals: continue "
+                         "resumes a claude-proposer run from its history, but "
+                         "--proposals drives rounds from a fixed batch.")
     if static_proposals is not None:
         n_rounds = len(static_proposals)
         print(f"[{stamp()}] STATIC-PROPOSAL mode: {n_rounds} round(s) from the "
@@ -56,17 +68,34 @@ def run(config_path: str | Path, run_dir: str | Path,
     else:
         n_rounds = cfg["max_rounds"]
 
-    agent = Agent(
-        command="claude",
-        timeout_seconds=1800,
-    )
+    # Three role-scoped agents, separated by the tools each role NEEDS so a role
+    # can't do a job it isn't supposed to (reward-hacking / cross-run cheating):
+    #   - proposer: reads the source repo to propose a direction. Never edits —
+    #     giving it Edit/Write is pure attack surface (it could rewrite the
+    #     baseline). Read + Bash only.
+    #   - executor: edits the worktree and runs build/test to verify. Needs the
+    #     full set; its WRITE risk is bounded by gate.check_diff (frozen/editable).
+    #   - judger: reads the diff + re-runs eval to verify claims. Never edits — a
+    #     judger that can write could rewrite eval/reference to make itself pass.
+    #     Read + Bash only.
+    # All three share the same 1h timeout ceiling (configurable per-task via
+    # loop.agent_timeout_seconds): a proposal can be a large systematic change
+    # spanning many call sites, and the executor must finish the WHOLE proposal in
+    # one round (no half-work).
+    timeout = cfg.get("agent_timeout_seconds", 3600)
+    proposer_agent = Agent(command="claude", timeout_seconds=timeout,
+                           allowed_tools="Read,Bash")
+    executor_agent = Agent(command="claude", timeout_seconds=timeout,
+                           allowed_tools="Read,Edit,Write,Bash")
+    judger_agent = Agent(command="claude", timeout_seconds=timeout,
+                         allowed_tools="Read,Bash")
     workspace = Workspace(
         run_dir=run_dir_path,
         repo_path=cfg["repo_path"],
         baseline_ref=cfg["baseline_ref"],
         editable=cfg["editable_paths"],
     )
-    store = Store(run_dir_path)
+    store = Store(run_dir_path, metrics_schema=cfg.get("metrics"))
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
     workspace.setup()
@@ -79,49 +108,104 @@ def run(config_path: str | Path, run_dir: str | Path,
     # optimization from a round that merely beats a weak prior round. Best-effort:
     # a baseline-eval failure does NOT kill the run (the judger falls back to
     # prior-round-only comparison). Skipped entirely when no eval is configured.
-    baseline_eval_block = _eval_baseline(workspace, cfg, parent_sha)
-    # round 0's "prior round" is the baseline. Updated to each round's eval_block
-    # after that round is recorded.
-    prior_eval_block = baseline_eval_block
+    # Returns both the raw text (kept for the record) and the parsed metrics
+    # (the authoritative baseline numbers the judger's FACTS block cites).
+    metrics_schema = cfg.get("metrics")
 
-    for round_id in range(n_rounds):
+    # ---- continue mode: resume from existing history ----
+    # Rounds already in history.jsonl are skipped; the commit chain resumes from
+    # the last accepted round's sha. max_rounds becomes the target TOTAL round
+    # count (caller bumps it in the config before continuing), so the loop runs
+    # range(start_round, n_rounds). Baseline eval is re-run for the judger's
+    # vs-baseline axis; the prior-round axis is rebuilt from the last accepted
+    # round's metrics so the resumed round 0's judger sees a real prior.
+    start_round = 0
+    if continue_run:
+        done = store.history()
+        if not done:
+            raise ValueError(
+                f"--continue: run-dir {run_dir_path} has no history.jsonl rounds; "
+                "drop --continue and start a fresh run."
+            )
+        start_round = len(done)
+        if start_round >= n_rounds:
+            print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
+                  f"max_rounds={n_rounds} -- nothing to do. Bump loop.max_rounds in "
+                  f"the config to add more rounds.", flush=True)
+            return _summary(store, workspace, run_dir_path)
+        parent_sha, last_accepted = _resume_chain(
+            done, workspace.baseline_sha(), metrics_schema)
+        prior_metrics = (last_accepted or {}).get("metrics") or {}
+        prior_eval_block = (last_accepted or {}).get("eval_block") or ""
+        print(f"[{stamp()}] --continue: resuming from round {start_round + 1} "
+              f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
+              flush=True)
+        # baseline eval still runs (judger's vs-baseline axis); its metrics are
+        # only used if start_round == 0, which continue mode excludes, but the
+        # judger may cite baseline numbers so keep them available.
+        baseline_eval_block, baseline_metrics = _eval_baseline(
+            workspace, cfg, workspace.baseline_sha())
+        if last_accepted is None:
+            prior_metrics = baseline_metrics
+            prior_eval_block = baseline_eval_block or ""
+    else:
+        baseline_eval_block, baseline_metrics = _eval_baseline(workspace, cfg, parent_sha)
+        # round 0's "prior round" is the baseline. Updated to each round's eval after
+        # that round is recorded. Both the raw text (for the record) and the parsed
+        # metrics (for the FACTS block) are threaded forward.
+        prior_eval_block = baseline_eval_block
+        prior_metrics = baseline_metrics
+
+    for round_id in range(start_round, n_rounds):
         print(f"\n[{stamp()}] === round {round_id + 1}/{n_rounds} ===", flush=True)
 
-        # 1. proposer — reads the ORIGINAL source repo (read-only) to propose a
-        #    direction. It never touches the working repo; the executor edits there.
+        # 1. proposer — reads the per-run repo (the SAME clone the executor
+        #    commits into, so the round shas in history are valid objects here and
+        #    the proposer can `git show`/`git diff` any prior round's actual
+        #    changes). It never edits — the executor edits in a per-round worktree;
+        #    the proposer's read of the repo is read-only (no working tree is
+        #    checked out for it: the per-run repo is a bare-ish --no-checkout clone,
+        #    so the proposer can only inspect commit history/diffs, not a live tree).
+        #    It must NOT read other runs' repos (cross-run answer-copying); the
+        #    per-run clone is physically isolated per run_dir.
         #    In static-proposal mode this step is skipped: the proposal is taken
         #    verbatim from the supplied batch (history is still recorded, but its
         #    feedback no longer picks the next direction).
         if static_proposals is not None:
             proposal = static_proposals[round_id]
+            reflection, decision = "", "static"  # static mode: no proposer reflection
             print(f"[{stamp()}] proposal (static): {proposal[:150]}", flush=True)
         else:
             try:
-                proposal = proposer_mod.propose(
-                    agent, goal=cfg["goal"], editable=cfg["editable_paths"],
+                proposal_obj = proposer_mod.propose(
+                    proposer_agent, goal=cfg["goal"], editable=cfg["editable_paths"],
                     frozen=cfg["frozen_paths"], history=store.history(),
-                    cwd=Path(cfg["repo_path"]),
+                    base_sha=parent_sha, cwd=workspace.repo,
                 )
             except (AgentError, ValueError) as exc:
                 # AgentError = claude call failed/unparseable; ValueError = empty
                 # 'proposal'. Either way record and skip the round, keep going.
                 print(f"[{stamp()}] proposer failed: {exc}", flush=True)
-                _record_failure(store, round_id, "", "proposer failed: " + str(exc)[:200])
+                _record_failure(store, round_id, "", "proposer failed: " + str(exc)[:200],
+                                base_sha=parent_sha)
                 continue
-            print(f"[{stamp()}] proposal: {proposal[:150]}", flush=True)
+            proposal = proposal_obj.proposal
+            reflection, decision = proposal_obj.reflection, proposal_obj.decision
+            print(f"[{stamp()}] proposal (decision={decision}): {proposal[:150]}", flush=True)
 
         # 2. executor (+ gate + harness commit)
         worktree = workspace.add_worktree(round_id, parent_sha)
         try:
             result = executor_mod.execute(
-                agent, proposal=proposal, goal=cfg["goal"],
+                executor_agent, proposal=proposal, goal=cfg["goal"],
                 editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
                 workspace=workspace, worktree=worktree, round_id=round_id,
             )
         except AgentError as exc:
             print(f"[{stamp()}] executor failed: {exc}", flush=True)
             workspace.remove_worktree(round_id)
-            _record_failure(store, round_id, proposal, "executor failed: " + str(exc)[:200])
+            _record_failure(store, round_id, proposal, "executor failed: " + str(exc)[:200],
+                            reflection=reflection, decision=decision, base_sha=parent_sha)
             continue
 
         if result.sha:
@@ -134,50 +218,90 @@ def run(config_path: str | Path, run_dir: str | Path,
         #    repo clone has no working tree). The judger ALSO runs in the worktree
         #    so it can cat/grep the actual source and re-run a command to verify a
         #    claim. The worktree is removed only after the judger returns.
+        #    run_eval returns (raw_text, metrics) — the harness parses the declared
+        #    key=value lines so the judger never has to read numbers out of prose
+        #    (which hallucinated a baseline number across 12 rounds before).
         eval_block = ""
+        eval_metrics: dict = {}
         if result.sha and cfg["eval_commands"]:
             try:
-                eval_block = judger_mod.run_eval(cfg["eval_commands"], cwd=worktree)
+                eval_block, eval_metrics = judger_mod.run_eval(
+                    cfg["eval_commands"], cwd=worktree, metrics_schema=metrics_schema)
             except Exception as exc:  # timeout or subprocess error
                 eval_block = f"(eval failed to run: {exc})"
                 print(f"[{stamp()}] eval error: {exc}", flush=True)
 
+        accepted = _candidate_accepted(result.sha, eval_metrics, metrics_schema)
+        next_base_sha = result.sha if accepted else parent_sha
+        if result.sha and not accepted:
+            print(f"[{stamp()}] candidate rejected by hard gates; accepted base stays "
+                  f"{parent_sha[:10]}", flush=True)
+
         try:
             judgment = judger_mod.judge(
-                agent, goal=cfg["goal"], proposal=proposal, sha=result.sha,
+                judger_agent, goal=cfg["goal"], proposal=proposal, sha=result.sha,
                 reason=result.reason, parent_sha=parent_sha, workspace=workspace,
                 eval_block=eval_block, cwd=worktree,
-                prior_eval_block=prior_eval_block,
-                baseline_eval_block=baseline_eval_block,
+                metrics=eval_metrics,
+                prior_metrics=prior_metrics,
+                baseline_metrics=baseline_metrics,
+                metrics_schema=metrics_schema,
             )
         except (AgentError, ValueError) as exc:
             # AgentError = claude call failed; ValueError = judger returned a
-            # malformed score/feedback. Either way: record, advance the chain if
-            # a commit exists, and keep going — one bad judgment must not kill a
-            # 10-round run.
+            # malformed score/feedback/risk. Hard-gate acceptance was already
+            # computed by the harness, so a bad judgment does not override it.
             print(f"[{stamp()}] judger failed: {exc}", flush=True)
             _record_failure(store, round_id, proposal, "judger failed: " + str(exc)[:200], result.sha,
-                            eval_block)
-            if result.sha:
-                parent_sha = result.sha
+                            eval_block, eval_metrics, changed_paths=result.changed_paths,
+                            reflection=reflection, decision=decision,
+                            accepted=accepted, base_sha=next_base_sha)
+            if accepted:
+                prior_eval_block = eval_block or prior_eval_block
+                prior_metrics = eval_metrics or prior_metrics
+            parent_sha = next_base_sha
             continue
         finally:
             # the worktree must not leak, whatever the judger raised.
             workspace.remove_worktree(round_id)
 
-        print(f"[{stamp()}] score={judgment.score:.2f}  feedback: {judgment.feedback[:150]}", flush=True)
+        print(f"[{stamp()}] score={judgment.score:.2f}  risk={judgment.risk}  "
+              f"feedback: {judgment.feedback[:120]}", flush=True)
+        # The objective line: print the authoritative measured value (harness-parsed,
+        # not the judger's prose) with vs-prior and vs-baseline deltas so the run
+        # log shows each round's optimization result at a glance. Before, the speed
+        # number lived inside feedback (truncated to 120 chars) or only in
+        # history.jsonl, so the log reader couldn't see whether a round actually
+        # improved. Best-effort: silent if no metrics schema / no objective value.
+        _print_objective(eval_metrics, prior_metrics, baseline_metrics, metrics_schema)
 
-        # 4. record + advance chain. eval_block is stored so the NEXT round's
-        #    judger gets this round's result as its "prior round" axis.
-        store.append(round_id, proposal, result.sha, judgment.score, judgment.feedback, eval_block)
-        prior_eval_block = eval_block or prior_eval_block
-        if result.sha:
-            parent_sha = result.sha
+        # 4. record + advance chain. eval_block + eval_metrics are stored so the
+        #    NEXT round's judger gets this round's result as its "prior round"
+        #    axis (raw text for the record + parsed metrics for the FACTS block).
+        #    risk is stored for the harness's best selection (gate-pass + risk≠high).
+        #    reflection + decision are stored as human-audit evidence (what the
+        #    proposer reflected before choosing this direction) — NOT fed back
+        #    into the next round's prompt (views.for_proposer doesn't project them).
+        store.append(round_id, proposal, result.sha, judgment.score, judgment.feedback,
+                     eval_block, judgment.feedback_for_report,
+                     eval_metrics=eval_metrics, risk=judgment.risk,
+                     changed_paths=result.changed_paths,
+                     reflection=reflection, decision=decision,
+                     accepted=accepted, base_sha=next_base_sha)
+        if accepted:
+            prior_eval_block = eval_block or prior_eval_block
+            prior_metrics = eval_metrics or prior_metrics
+        parent_sha = next_base_sha
 
     report = store.write_final_report(cfg["goal"])
     print(f"\n[{stamp()}] done. best={store.best_sha} (score {store.best_score:.2f})", flush=True)
     print(f"[{stamp()}] report: {report}", flush=True)
     print(f"[{stamp()}] working repo (for tracing): {workspace.repo}", flush=True)
+    return _summary(store, workspace, run_dir_path)
+
+
+def _summary(store: Store, workspace: Workspace, run_dir_path: Path) -> dict:
+    """Build the run summary dict (shared by the normal exit and continue no-op)."""
     return {
         "best_sha": store.best_sha,
         "best_score": store.best_score,
@@ -188,34 +312,88 @@ def run(config_path: str | Path, run_dir: str | Path,
 
 
 def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
-                    sha: str | None = None, eval_block: str = "") -> None:
-    """Record a round where a role crashed, so history stays complete."""
-    store.append(round_id, proposal, sha, 0.0, f"[loop failure] {reason}", eval_block)
+                    sha: str | None = None, eval_block: str = "",
+                    eval_metrics: dict | None = None,
+                    changed_paths: list[str] | None = None,
+                    reflection: str = "", decision: str = "",
+                    accepted: bool = False, base_sha: str | None = None) -> None:
+    """Record a round where a role crashed, so history stays complete.
+
+    A failed round never has a valid risk band; record risk as 'high' so it is
+    never selected as best (a crashed judger/executor round is definitionally
+    not a ship candidate). reflection/decision default empty — a proposer
+    crash (L192) has neither; an executor/judger crash (L209/L251) passes the
+    proposer's reflection/decision through so the audit trail is complete."""
+    store.append(round_id, proposal, sha, 0.0, f"[loop failure] {reason}", eval_block,
+                 feedback_for_report=f"[loop failure] {reason}",
+                 eval_metrics=eval_metrics or {}, risk="high",
+                 changed_paths=changed_paths or [],
+                 reflection=reflection, decision=decision,
+                 accepted=accepted, base_sha=base_sha)
 
 
-def _eval_baseline(workspace: Workspace, cfg: dict, baseline_sha: str) -> str | None:
+def _candidate_accepted(candidate_sha: str | None, metrics: dict | None,
+                        metrics_schema: dict | None) -> bool:
+    """Whether a candidate becomes the next cumulative base.
+
+    Every declared gate must be explicitly True. Missing/unknown gate values are
+    rejection, while configs without gates keep the legacy commit-on-SHA behavior.
+    """
+    if not candidate_sha:
+        return False
+    gates = (metrics_schema or {}).get("gates", [])
+    if not gates:
+        return True
+    values = metrics or {}
+    return all(values.get(g["key"]) is True for g in gates)
+
+
+def _resume_chain(history: list[dict], baseline_sha: str,
+                  metrics_schema: dict | None) -> tuple[str, dict | None]:
+    """Return the last accepted SHA and its record, skipping rejected tails.
+
+    New records carry an explicit accepted flag. For old history, infer the flag
+    from the currently configured hard gates so a legacy correctness-failing tail
+    is not accidentally resumed. Without gates, legacy SHA behavior is preserved.
+    """
+    for record in reversed(history):
+        sha = record.get("sha")
+        if "accepted" in record:
+            accepted = bool(sha) and record.get("accepted") is True
+        else:
+            accepted = _candidate_accepted(
+                sha, record.get("metrics") or {}, metrics_schema)
+        if accepted:
+            return sha, record
+    return baseline_sha, None
+
+
+def _eval_baseline(workspace: Workspace, cfg: dict, baseline_sha: str) -> tuple[str | None, dict]:
     """Run the eval commands once on the unoptimized baseline commit.
 
-    Returns the eval output block (the judger's "vs baseline" axis), or None if
-    no eval is configured or the baseline eval failed. Best-effort: failures are
-    logged and swallowed — the run continues with prior-round-only comparison.
-    Uses a throwaway worktree on the baseline SHA (the bare per-run clone has no
-    working tree, same reason the per-round eval uses a worktree).
+    Returns (eval_block, metrics) — the raw text (kept for the record) and the
+    parsed metrics dict (the authoritative baseline numbers the judger's FACTS
+    block cites). (None, {}) if no eval is configured or the baseline eval
+    failed. Best-effort: failures are logged and swallowed — the run continues
+    with prior-round-only comparison. Uses a throwaway worktree on the baseline
+    SHA (the bare per-run clone has no working tree, same reason the per-round
+    eval uses a worktree).
     """
     if not cfg["eval_commands"]:
-        return None
+        return None, {}
     print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]}) for the judger's "
           f"vs-baseline axis...", flush=True)
     wt = None
     try:
         wt = workspace.add_worktree("baseline", baseline_sha)
-        block = judger_mod.run_eval(cfg["eval_commands"], cwd=wt)
+        block, metrics = judger_mod.run_eval(
+            cfg["eval_commands"], cwd=wt, metrics_schema=cfg.get("metrics"))
         print(f"[{stamp()}] baseline eval done.", flush=True)
-        return block
+        return block, metrics
     except Exception as exc:  # worktree add or eval failure
         print(f"[{stamp()}] baseline eval failed (judger will use prior-round-only "
               f"comparison): {exc}", flush=True)
-        return None
+        return None, {}
     finally:
         if wt is not None:
             workspace.remove_worktree("baseline")
@@ -223,6 +401,45 @@ def _eval_baseline(workspace: Workspace, cfg: dict, baseline_sha: str) -> str | 
 
 def stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _print_objective(metrics: dict | None, prior: dict | None, baseline: dict | None,
+                     schema: dict | None) -> None:
+    """Print the round's measured objective value with vs-prior and vs-baseline deltas.
+
+    All three values are harness-parsed (authoritative) — never the judger's prose,
+    which is the number-hallucination vector this loop was built to avoid. Silent
+    (no line) when the eval has no metrics schema or this round produced no
+    objective value (e.g. no-commit / failed-eval rounds): the score+feedback line
+    above already says "no commit" for those, so a redundant "objective: unknown"
+    line would just be noise. lower_is_better is read from the schema so the delta
+    arrow points the right way regardless of whether the objective is ms/evt,
+    binary size, or throughput.
+    """
+    if not schema or not metrics:
+        return
+    obj = schema.get("objective", {})
+    key = obj.get("key")
+    if not key:
+        return
+    val = metrics.get(key)
+    if val is None:
+        return  # no measurement this round (no commit / eval crashed) — stay silent
+    lower_is_better = obj.get("lower_is_better", True)
+    def _fmt_delta(this, other, label):
+        if not isinstance(this, (int, float)) or not isinstance(other, (int, float)) or other == 0:
+            return None
+        pct = (this - other) / other * 100.0
+        improved = (pct < 0) if lower_is_better else (pct > 0)
+        arrow = "↓ better" if improved else ("↑ worse" if pct != 0 else "= same")
+        return f"{label} {other:g} ({pct:+.1f}%, {arrow})"
+    parts = [f"{key}={val:g}"]
+    for other, label in ((prior, "vs prior"), (baseline, "vs baseline")):
+        if other:
+            d = _fmt_delta(val, other.get(key), label)
+            if d:
+                parts.append(d)
+    print(f"[{stamp()}] objective: " + "  |  ".join(parts), flush=True)
 
 
 def _load_proposals(proposals: str | Path | list[str] | None) -> list[str] | None:

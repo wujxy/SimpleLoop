@@ -53,13 +53,22 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 4
+  max_rounds: 40
 
 eval:
   commands:
     # One self-contained command: env + build + e2e bit-identical gate + speed bench.
-    # Prints CORRECTNESS=, SPEED_MS=, EVAL_RESULT= for the judger.
+    # Prints CORRECTNESS=, SPEED_MS=, EVAL_RESULT= — the harness parses these into
+    # the metrics dict (the judger cites them; it must not read numbers out of the
+    # prose, which hallucinated a baseline number across 12 rounds before).
     - "bash scripts/sl_eval.sh --evtmax 10"
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    gates:
+      - key: CORRECTNESS
+      - key: EVAL_RESULT
 
 source:
   path: ../../omilrec-v100    # relative to this task.yaml; real git repo

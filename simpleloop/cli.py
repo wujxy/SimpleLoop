@@ -25,6 +25,16 @@ def main(argv: list[str] | None = None) -> None:
              "claude proposer is SKIPPED and round i uses proposals[i] (controlled-"
              "experiment mode); runs for len(proposals) rounds, ignoring max_rounds.",
     )
+    run.add_argument(
+        "--continue",
+        dest="continue_run",
+        action="store_true",
+        help="Resume an existing run-dir. Rounds already recorded in history.jsonl "
+             "are skipped; the loop runs from the next round up to loop.max_rounds "
+             "(which becomes the TARGET TOTAL round count -- bump it in the config "
+             "before continuing). The commit chain resumes from the last recorded "
+             "round's sha. Baseline eval is re-run for the judger's vs-baseline axis.",
+    )
 
     validate = sub.add_parser("validate", help="Validate a config without running.")
     validate.add_argument("--config", required=True, help="Task config (YAML/JSON).")
@@ -46,7 +56,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "run":
         try:
-            summary = loop.run(args.config, args.run_dir, proposals=args.proposals)
+            summary = loop.run(args.config, args.run_dir,
+                               proposals=args.proposals,
+                               continue_run=args.continue_run)
         except config_mod.ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             raise SystemExit(1)

@@ -1,16 +1,34 @@
-"""History store: append-only JSONL of each round + best-score tracking.
+"""History store: append-only JSONL of each round + best tracking.
 
-Each round records {round, proposal, sha, score, feedback, eval_block}. The best
-commit is the round with the highest score seen so far (judger's subjective 0-1
-score). This is the loop's output AND the next proposer's input.
+Each round records {round, proposal, sha, accepted, base_sha, score, risk,
+feedback, feedback_for_report, eval_block, metrics}. `sha` is the attempted
+candidate; `base_sha` is the accepted cumulative source after that round. The
+best commit is selected by the HARNESS, by the real objective metric — NOT by
+the judger's subjective 0-1 score. This is the fix for
+the "best by score" problem surfaced in the 12-round OMILRECV2 run, where the
+highest-score round (r5, 0.88, 571ms) locked out the fastest correct commit
+(r10, 0.85, 321ms): once the harness owns the real speed (parsed from eval
+output), best selection becomes "among gate-pass + risk-not-high rounds, take
+the best objective" — score demotes to a quality signal, not a ranking number.
+
+Best selection rule (only when metrics_schema is configured):
+  eligible = rounds where every declared gate metric is True (PASS) AND
+             judger-risk != "high" AND the objective metric is present+numeric.
+  best = the eligible round with the best objective (min if lower_is_better,
+         else max). First such round wins ties.
+A failed-gate or high-risk round is never best, even if its objective is best —
+this is what keeps a latent-risk flag (e.g. r5's MODE-keyed cache validity) from
+being the chosen ship commit when a safer later round is nearly as fast.
+
+Without a metrics_schema (diff-only / legacy configs), best falls back to the
+old score-based rule so nothing breaks.
 
 eval_block is the raw harness-run eval output for the round (capped), stored so
 the loop can feed the prior round's eval + the baseline eval to the next round's
-judger as explicit comparison axes — otherwise the judger has only the current
-round's single absolute number and can't tell "vs prior round" from "vs baseline"
-(see memory simpleloop-judger-prior-round-compare). Storing the raw text (not a
-parsed metric) keeps this project-agnostic: the judger reads the number out of
-the text itself, no SPEED_MS=/CORRECTNESS= hardcoding in the loop.
+judger as explicit comparison axes. metrics is the harness-parsed key=value dict
+(the authoritative numbers); the raw text is kept for the record and for the
+judger to verify a specific claim, but the parsed metrics are what the judger
+cites and what best selection uses.
 
 No separate event/artifact/execution stores — one JSONL covers everything.
 """
@@ -27,32 +45,78 @@ _HIST_EVAL_CAP = 6000
 
 
 class Store:
-    def __init__(self, run_dir: Path):
+    def __init__(self, run_dir: Path, metrics_schema: dict | None = None):
         self.run_dir = Path(run_dir)
         self.path = self.run_dir / "history.jsonl"
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.best_score: float = -1.0
-        self.best_sha: str | None = None
+        # metrics_schema: {"objective": {key, lower_is_better}, "gates": [{key}]}
+        # or None (diff-only / legacy -> best by score). Set once at loop start;
+        # drives best selection.
+        self.metrics_schema = metrics_schema
+        self.best_score: float = -1.0           # judger quality number (report only)
+        self.best_sha: str | None = None        # harness-selected best commit
         self.best_round: int | None = None
+        # For score-based fallback / report divergence:
+        self.best_by_score_sha: str | None = None
+        self.best_by_score_round: int | None = None
 
     def append(self, round_id: int, proposal: str, sha: str | None,
                score: float | None, feedback: str,
-               eval_block: str = "") -> None:
-        """Record one round. Updates best if this round's score beats it."""
+               eval_block: str = "",
+               feedback_for_report: str = "",
+               eval_metrics: dict | None = None,
+               risk: str = "high",
+               changed_paths: list[str] | None = None,
+               reflection: str = "",
+               decision: str = "",
+               accepted: bool = False,
+               base_sha: str | None = None) -> None:
+        """Record one round and update best selection.
+
+        risk defaults to 'high' — a caller that doesn't supply one (e.g. a loop
+        failure) is treated as not-best-eligible, which is the safe default for a
+        round where we couldn't even get a risk read.
+
+        changed_paths: the files the executor touched this round (already computed
+        by workspace.changed_paths for the gate). Stored so the proposer can see
+        what each prior round changed without running git — a cheap landing-state
+        signal that complements sha (the proposer can `git diff` the sha for
+        detail). Empty list on gate-rejected / no-change / failed rounds.
+
+        reflection + decision: the proposer's reflection paragraph and continue|
+        switch token. Stored as HUMAN-AUDIT EVIDENCE (so you can later see what
+        the proposer reflected before re-proposing a direction) but NOT projected
+        back into the next round's prompt (views.for_proposer omits them), so a
+        prior decision never biases the next round's choice.
+
+        sha remains the candidate commit for backward compatibility. accepted
+        says whether all configured hard gates passed; base_sha is the accepted
+        source after this round and therefore the next executor's starting point.
+        """
+        # feedback_for_report falls back to the tight `feedback` when omitted
+        # (e.g. a loop-failure record only sets feedback) so the record is never
+        # missing its report field.
+        report = feedback_for_report if (isinstance(feedback_for_report, str)
+                                         and feedback_for_report.strip()) else feedback
         record = {
             "round": round_id,
             "proposal": proposal,
             "sha": sha,
             "score": score,
+            "risk": risk,
             "feedback": feedback,
-            "eval_block": eval_block[:_HIST_EVAL_CAP],
+            "feedback_for_report": report,
+            "eval_block": (eval_block or "")[:_HIST_EVAL_CAP],
+            "metrics": eval_metrics or {},
+            "changed_paths": changed_paths or [],
+            "reflection": reflection,
+            "decision": decision,
+            "accepted": bool(accepted),
+            "base_sha": base_sha,
         }
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        if sha and score is not None and score > self.best_score:
-            self.best_score = score
-            self.best_sha = sha
-            self.best_round = round_id
+        self._recompute_best()
 
     def history(self) -> list[dict]:
         """Read all rounds back (for the proposer's prompt)."""
@@ -72,19 +136,111 @@ class Store:
             return None
         return rounds[-1].get("eval_block") or None
 
+    def _recompute_best(self) -> None:
+        """Recompute best over the full history.
+
+        Metric-based when a schema is set; score-based fallback otherwise. Done
+        from scratch each append (cheap for tens-of-rounds histories) so that
+        adding a schema or changing the rule never leaves stale best state.
+        """
+        rounds = self.history()
+        if not rounds:
+            return
+        # always track the highest-score round (for the report's divergence line)
+        scored = [r for r in rounds if r.get("sha") and isinstance(r.get("score"), (int, float))]
+        if scored:
+            top = max(scored, key=lambda r: r["score"])
+            self.best_by_score_sha = top["sha"]
+            self.best_by_score_round = top["round"]
+            # score-based fallback (and the legacy public field)
+            if self.metrics_schema is None:
+                self.best_sha = top["sha"]
+                self.best_round = top["round"]
+                self.best_score = top["score"]
+
+        if self.metrics_schema is None:
+            return  # score-based best already set above
+
+        obj = self.metrics_schema["objective"]
+        obj_key = obj["key"]
+        lower = obj["lower_is_better"]
+        gate_keys = [g["key"] for g in self.metrics_schema.get("gates", [])]
+
+        best = None  # (round, sha, obj_value)
+        for r in rounds:
+            sha = r.get("sha")
+            if not sha:
+                continue
+            m = r.get("metrics") or {}
+            # gate-pass: every declared gate must be True (present + PASS).
+            if not all(m.get(gk) is True for gk in gate_keys):
+                continue
+            # risk not high
+            if str(r.get("risk", "high")).lower() == "high":
+                continue
+            # objective present + numeric
+            ov = m.get(obj_key)
+            if not isinstance(ov, (int, float)):
+                continue
+            if best is None:
+                best = (r["round"], sha, ov)
+                continue
+            better = (ov < best[2]) if lower else (ov > best[2])
+            if better:
+                best = (r["round"], sha, ov)
+        if best is not None:
+            self.best_sha = best[1]
+            self.best_round = best[0]
+            # keep best_score as the judger score of that round for the report
+            rec = next((r for r in rounds if r["round"] == best[0]), None)
+            if rec and isinstance(rec.get("score"), (int, float)):
+                self.best_score = rec["score"]
+
     def write_final_report(self, goal: str) -> Path:
         """Write a human-readable markdown summary. Returns its path."""
         rounds = self.history()
         lines = [f"# SimpleLoop Run Report", "", f"**Goal:** {goal}", ""]
         if self.best_sha:
-            lines += [f"- Best commit: `{self.best_sha}` (round {self.best_round}, score {self.best_score:.2f})", ""]
+            lines += [f"- Best commit: `{self.best_sha}` (round {self.best_round}, "
+                      f"selected by {'objective metric' if self.metrics_schema else 'judger score'}"
+                      f", score {self.best_score:.2f})", ""]
         else:
             lines += ["- No accepted commit produced.", ""]
+        # Report divergence between metric-best and score-best when they differ —
+        # this is the exact tension the harness-owned best was built to surface.
+        if (self.metrics_schema and self.best_by_score_sha
+                and self.best_by_score_sha != self.best_sha):
+            lines += [f"- Highest-score round (judger score): `{self.best_by_score_sha}` "
+                      f"(round {self.best_by_score_round}) — differs from the metric-selected best; "
+                      f"the metric best is what ships, the score-best is a quality signal.",
+                      ""]
         lines += ["## Round History", ""]
         for r in rounds:
-            lines += [f"### Round {r['round']}", f"- proposal: {r['proposal'][:200]}",
-                      f"- sha: `{r['sha']}`", f"- score: {r['score']}",
-                      f"- feedback: {r['feedback'][:300]}", ""]
+            m = r.get("metrics") or {}
+            metrics_line = ""
+            if self.metrics_schema and m:
+                obj_key = self.metrics_schema["objective"]["key"]
+                parts = []
+                if obj_key in m:
+                    parts.append(f"{obj_key}={m[obj_key]}")
+                for g in self.metrics_schema.get("gates", []):
+                    if g["key"] in m:
+                        v = m[g["key"]]
+                        parts.append(f"{g['key']}={'PASS' if v is True else 'FAIL' if v is False else '?'}")
+                if parts:
+                    metrics_line = f"  metrics: {' '.join(parts)}"
+            # the tight proposer-facing signal as the headline feedback line, then
+            # the full human narrative under it.
+            report_narrative = r.get("feedback_for_report") or r.get("feedback", "")
+            lines += [f"### Round {r['round']}",
+                      f"- proposal: {r['proposal'][:200]}",
+                      f"- candidate sha: `{r['sha']}`  accepted: "
+                      f"{r.get('accepted', '?')}  base sha: `{r.get('base_sha', '?')}`",
+                      f"- score: {r['score']}  risk: {r.get('risk', '?')}  decision: {r.get('decision', '?')}",
+                      metrics_line,
+                      f"- feedback: {r['feedback'][:300]}",
+                      f"- narrative: {report_narrative}",
+                      f"- reflection: {r.get('reflection', '')}", ""]
         out = self.run_dir / "final_report.md"
         out.write_text("\n".join(lines), encoding="utf-8")
         return out

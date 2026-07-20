@@ -6,7 +6,9 @@ Minimal schema:
   safety.editable_paths: [glob]      (required)
   safety.frozen_paths: [glob]        (optional, default [])
   loop.max_rounds: int                (required)
+  loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
   eval.commands: [str]                (optional; omit -> judger is diff-only)
+  eval.metrics: {objective, gates}    (optional; omit -> judger reads prose, best by score)
   source.path: path                   (required; the repo to optimize)
   source.baseline_ref: str            (optional, default HEAD)
 
@@ -69,6 +71,10 @@ def _resolve(raw: dict, path: Path) -> dict:
     if not isinstance(max_rounds, int) or max_rounds < 1:
         raise ConfigError("loop.max_rounds: required positive integer")
 
+    agent_timeout = loop.get("agent_timeout_seconds", 3600)
+    if not isinstance(agent_timeout, int) or agent_timeout < 60:
+        raise ConfigError("loop.agent_timeout_seconds: must be an integer >= 60 (seconds)")
+
     src_path = source.get("path")
     if not src_path:
         raise ConfigError("source.path: required")
@@ -78,6 +84,7 @@ def _resolve(raw: dict, path: Path) -> dict:
     baseline_ref = str(source.get("baseline_ref") or "HEAD")
 
     eval_commands: list[str] = []
+    metrics: dict | None = None
     if "eval" in raw:
         eval_block = raw["eval"]
         if not isinstance(eval_block, dict):
@@ -87,16 +94,87 @@ def _resolve(raw: dict, path: Path) -> dict:
             raise ConfigError("eval.commands: must be a list of strings")
         eval_commands = [str(c) for c in eval_commands]
 
+        # metrics: declares the structured key=value lines the harness parses out
+        # of eval output (NOT the judger — the judger only interprets). Two roles
+        # only, both project-agnostic: `objective` (the thing being optimized +
+        # its direction) and `gates` (pass/fail keys that veto a round). The harness
+        # owns these numbers and selects `best` by the objective among gate-pass,
+        # risk-not-high rounds. Without this block the judger falls back to reading
+        # prose and is known to hallucinate numbers (see memory
+        # simpleloop-judger-prior-round-compare). No noise_floor / reps — deferred
+        # until a run proves they're needed.
+        if "metrics" in eval_block:
+            metrics = _resolve_metrics(eval_block["metrics"])
+
     return {
         "goal": str(goal),
         "editable_paths": [str(g) for g in editable],
         "frozen_paths": [str(g) for g in frozen],
         "max_rounds": int(max_rounds),
+        "agent_timeout_seconds": int(agent_timeout),
         "eval_commands": eval_commands,
+        "metrics": metrics,
         "repo_path": str(repo),
         "baseline_ref": baseline_ref,
         "config_dir": str(path.parent),
     }
+
+
+def _resolve_metrics(raw: object) -> dict:
+    """Validate the eval.metrics block. Returns a normalized dict.
+
+    Schema (two roles only — anything else is an error, matching the strict
+    unknown-top-level-key policy so a misspelled knob fails at load):
+      metrics:
+        objective:
+          key: SPEED_MS          # the key=value line to parse
+          lower_is_better: true  # required bool — direction is not guessable
+        gates:                   # optional; list of {key: str}
+          - key: CORRECTNESS
+
+    The harness never hardcodes SPEED_MS / CORRECTNESS — these are config-declared,
+    so the next user's objective can be binary_size or coverage_p99.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("eval.metrics: must be an object")
+    unknown = set(raw) - {"objective", "gates"}
+    if unknown:
+        raise ConfigError(f"eval.metrics: unknown key(s): {sorted(unknown)} "
+                          "(only 'objective' and 'gates' are declared; noise_floor/"
+                          "reps are deferred until a run proves they're needed)")
+
+    obj = raw.get("objective")
+    if not isinstance(obj, dict):
+        raise ConfigError("eval.metrics.objective: required object (the metric being optimized)")
+    obj_key = obj.get("key")
+    if not isinstance(obj_key, str) or not obj_key.strip():
+        raise ConfigError("eval.metrics.objective.key: required non-empty string "
+                          "(the key=value line the harness parses, e.g. SPEED_MS)")
+    obj_unknown = set(obj) - {"key", "lower_is_better"}
+    if obj_unknown:
+        raise ConfigError(f"eval.metrics.objective: unknown key(s): {sorted(obj_unknown)}")
+    lower_is_better = obj.get("lower_is_better")
+    if not isinstance(lower_is_better, bool):
+        raise ConfigError("eval.metrics.objective.lower_is_better: required bool "
+                          "(direction is not guessable — declare it)")
+
+    gates: list[dict] = []
+    raw_gates = raw.get("gates", [])
+    if not isinstance(raw_gates, list):
+        raise ConfigError("eval.metrics.gates: must be a list of {key: str} objects")
+    for i, g in enumerate(raw_gates):
+        if not isinstance(g, dict):
+            raise ConfigError(f"eval.metrics.gates[{i}]: must be an object with a 'key' field")
+        g_unknown = set(g) - {"key"}
+        if g_unknown:
+            raise ConfigError(f"eval.metrics.gates[{i}]: unknown key(s): {sorted(g_unknown)}")
+        gk = g.get("key")
+        if not isinstance(gk, str) or not gk.strip():
+            raise ConfigError(f"eval.metrics.gates[{i}].key: required non-empty string")
+        gates.append({"key": gk})
+
+    return {"objective": {"key": obj_key, "lower_is_better": lower_is_better},
+            "gates": gates}
 
 
 def _need(raw: dict, key: str, kind: type) -> dict:
