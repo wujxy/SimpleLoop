@@ -17,6 +17,13 @@ from simpleloop.proposer import _parse_batch
 from simpleloop.store import Store
 
 
+EXAMPLES = Path(__file__).parents[2] / "examples"
+
+
+def _example_yaml(relative_path: str) -> dict:
+    return yaml.safe_load((EXAMPLES / relative_path).read_text(encoding="utf-8"))
+
+
 def _write_config(tmp_path: Path, loop_block: dict | None = None) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -37,6 +44,33 @@ def test_config_parallel_defaults(tmp_path: Path):
     cfg = config_mod.load(_write_config(tmp_path))
     assert cfg["candidates_per_round"] == 1
     assert cfg["max_workers"] == 1
+
+
+def test_tiny_example_uses_parallel_objective_selection():
+    raw = _example_yaml("tiny_algo_opt/task.yaml")
+
+    assert raw["loop"]["candidates_per_round"] == 3
+    assert raw["loop"]["max_workers"] == 3
+    assert raw["eval"]["metrics"] == {
+        "objective": {"key": "ms_per_call", "lower_is_better": True},
+        "gates": [{"key": "CORRECTNESS"}, {"key": "DRIFT"}],
+    }
+    commands = "\n".join(raw["eval"]["commands"])
+    assert "CORRECTNESS=PASS" in commands
+    assert "CORRECTNESS=FAIL" in commands
+    assert "DRIFT=PASS" in commands
+    assert "DRIFT=FAIL" in commands
+
+
+def test_omilrec_v100_example_uses_parallel_speed_selection():
+    raw = _example_yaml("omilrec-v100.yaml")
+
+    assert raw["loop"]["candidates_per_round"] == 3
+    assert raw["loop"]["max_workers"] == 3
+    assert raw["eval"]["metrics"] == {
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [{"key": "CORRECTNESS"}, {"key": "EVAL_RESULT"}],
+    }
 
 
 @pytest.mark.parametrize("field", ["candidates_per_round", "max_workers"])
