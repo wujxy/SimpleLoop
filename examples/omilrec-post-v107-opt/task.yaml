@@ -7,9 +7,17 @@ task:
   goal: >
     Optimize the speed of the v1.0.0 OMILRECV2 reconstruction algorithm under
     OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the post-v1.0.7
-    FCN replay gate passing and the end-to-end reconstruction within 4 mm
-    vertex, 7 keV energy, 10 ps t0, and 0.1 PE peSum tolerances. Edit only
-    the admitted source files.
+    FCN replay gate (1e-13 drift) and the end-to-end reconstruction within
+    4 mm vertex, 7 keV energy, 10 ps t0, and 0.1 PE peSum tolerances.
+
+    Both gates use PHYSICS tolerances (not bit-identical), allowing float op
+    changes and code cleanup as long as the numerical results stay within range.
+    Focus on: simplifying complex expressions, removing redundant calculations,
+    dead code elimination, loop structure refactors, fixing awkward code patterns.
+    The FCN code lives in OMILRECV2/src/omilrec_charge_ll.cc and
+    omilrec_time_pdf.cc; reconstruction code lives in OMILRECV2/src/omilrec_reconstruction.cc.
+
+    Edit only the admitted source files.
 
 safety:
   editable_paths:
@@ -43,17 +51,18 @@ eval:
     gates:
       - key: FCN
         description: >
-          The likelihood value Minuit minimizes, replayed against the v1.0.7-rev1
-          golden pack at 1e-13 drift. Any change to float op order/rounding in the
-          likelihood code shifts the reduction and fails it.
+          Likelihood value at 1e-13 drift vs v1.0.7-rev1 (not bit-identical).
+          Allows arithmetic simplifications and code cleanup within machine precision.
+          The likelihood code lives in OMILRECV2/src/omilrec_charge_ll.cc and
+          omilrec_time_pdf.cc.
       - key: CONSISTENCY
         description: >
-          Reconstructed vertex/energy/t0/peSum of 4 events within 4mm/7keV/10ps/0.1PE
-          of the v1.0.7-rev1 reference — the physics output, not bit-exact.
+          Reconstructed physics (vertex/energy/t0/peSum) within 4mm/7keV/10ps/0.1PE
+          of v1.0.7-rev1. Allows float op changes as long as physics output stays
+          within range. The reconstruction code lives in OMILRECV2/src/omilrec_reconstruction.cc.
       - key: EVAL_RESULT
         description: >
-          The eval script ran to completion and produced all metrics. Fails on build
-          failure, timeout, or crash before gates could be measured.
+          Eval script completed (fails on build/timeout/crash).
 
 source:
   path: ../../../omilrec-v100-postv107-gated   # real git repo, freshly-prepared gated package
