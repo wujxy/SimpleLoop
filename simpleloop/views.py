@@ -19,9 +19,34 @@ reports are unaffected.
 """
 from __future__ import annotations
 
+import re
+
 
 _PROPOSER_FULL_PROPOSAL_ROUNDS = 6
 _PROPOSER_OLD_PROPOSAL_CHARS = 300
+
+# The judger prefixes each feedback with a `LANDED_STATE: <tag>` token (the
+# contract lives in judger.py); we surface it as a structured field in the
+# proposer's view instead of forcing the proposer to re-parse prose. The tag
+# is the judger's own landing hint — this projection is deterministic, not new
+# information, and degrades to None for legacy feedback written before the
+# prefix convention existed.
+_LANDING_STATE_RE = re.compile(r"LANDED_STATE:\s*([a-z-]+)", re.IGNORECASE)
+
+
+def _landing_state(feedback: str | None) -> str | None:
+    """Extract the judger's LANDED_STATE tag from feedback, or None.
+
+    The tag (not-implemented | already-implemented | gate-rejected) lets the
+    proposer tell a real-but-rejected attempt from an executor no-op without
+    inferring it from `accepted=false` prose. No prefix (legacy/loop-failure
+    feedback) -> None, which the proposer reads as "unlabelled", never as a
+    guessed state.
+    """
+    if not feedback:
+        return None
+    m = _LANDING_STATE_RE.search(feedback)
+    return m.group(1).lower() if m else None
 
 
 def _proposal_projection(proposal: str, keep_full: bool) -> dict[str, str]:
@@ -89,6 +114,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
                         "risk": c.get("risk"),
                         "metrics": c.get("metrics") or {},
                         "changed_paths": c.get("changed_paths") or [],
+                        "landing_state": _landing_state(c.get("feedback", "")),
                         "feedback": c.get("feedback", ""),
                         "feedback_for_report": c.get("feedback_for_report", ""),
                     }
@@ -109,6 +135,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
             "risk": r.get("risk"),
             "metrics": r.get("metrics") or {},
             "changed_paths": r.get("changed_paths") or [],
+            "landing_state": _landing_state(r.get("feedback", "")),
             "feedback": r["feedback"],
             "feedback_for_report": r.get("feedback_for_report", r.get("feedback", "")),
         })

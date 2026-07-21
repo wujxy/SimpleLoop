@@ -170,7 +170,7 @@ Judging guidance:
 - Judge whether the change moves toward the goal, achieves real improvement, introduces risk, and is good-quality code.
 {eval_guidance}{facts_guidance}- Penalize unsupported claims, regressions vs the prior round, and changes that break a gate.
 - Give objective facts about what landed, how it measured, and why it behaved that way. Do not choose the next direction.
-- `risk` is your read of the refactor's LATENT correctness risk (not the measured speed — the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-identical move with the same operators/evaluation order/types. Be concrete in feedback_for_report about WHY the risk level.
+- `risk` is your read of the refactor's LATENT correctness risk (not the measured speed — the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-faithful move with the same operators/evaluation order/types. Be concrete in feedback_for_report about WHY the risk level.
 
 Final delivery contract (mandatory):
 - Your final response MUST be exactly one parseable JSON object with four keys:

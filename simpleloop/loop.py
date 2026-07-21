@@ -188,12 +188,9 @@ def run(config_path: str | Path, run_dir: str | Path,
                     candidates_per_round=cfg.get("candidates_per_round", 1),
                 )
             except (AgentError, ValueError) as exc:
-                # AgentError = claude call failed/unparseable; ValueError = empty
-                # 'proposal'. Either way record and skip the round, keep going.
-                print(f"[{stamp()}] proposer failed: {exc}", flush=True)
-                _record_failure(store, round_id, "", "proposer failed: " + str(exc)[:200],
-                                base_sha=parent_sha)
-                continue
+                # A proposer contract failure cannot produce a candidate generation.
+                print(f"[{stamp()}] proposer failed; aborting run: {exc}", flush=True)
+                raise
             proposals_batch = proposal_obj.proposals
             reflection = proposal_obj.reflection
             print(f"[{stamp()}] proposals: {len(proposals_batch)} candidate(s)",

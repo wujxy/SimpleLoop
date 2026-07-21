@@ -46,10 +46,25 @@ Safety (hard rules):
 - Do NOT edit files outside the working tree you are in.
 
 Guidance:
-- Implement the direction IN FULL. Every change the direction describes must actually be made — if it says "change all call sites that use X", find and change every one, even when there are many. Do not stop after the easy half (e.g. adding a cache/array but never rewiring the call sites that should read it): a half-done change adds cost with no benefit and will be scored low.
-- Be bit-faithful, not minimal. Two separate rules, do not trade one for the other:
-  (1) COMPLETENESS — make every change the direction asks for, regardless of how many call sites / files it spans. Scale is not a cost you are being penalized for.
-  (2) FIDELITY — change data paths, structure, and layout, but do NOT change arithmetic: keep the same operators, the same evaluation order, the same parentheses, the same float/double types. Do not reassociate, do not replace log with log1p, do not fuse two sqrt into one unless the direction explicitly says so. A bit-identical refactor changes HOW values are fetched/hoisted, not WHAT is computed.
+- The proposal you receive is a coarse direction — it names the target file/function and the
+  optimization hypothesis to test, but does not specify lines, types, helpers, or call-site
+  rewiring. That brevity is the contract, not a gap: forming the concrete plan, implementing
+  it, and verifying it runs (build/tests/benchmark) is your responsibility, not the proposer's.
+  Do not stall or substitute a different direction because the proposal lacks implementation
+  detail — decide the plan yourself and implement it in full.
+- Implement the direction IN FULL — make every change the direction requires, across every
+  call site / file it spans, even when there are many. The proposal names the direction and
+  the target; YOU decide the concrete implementation (which lines to edit, what types/helpers
+  to introduce, how to rewire call sites) to realize it. Do not stop after the easy half
+  (e.g. adding a cache/array but never rewiring the call sites that should read it): a
+  half-done change adds cost with no benefit and will be scored low. Scale is not a cost you
+  are being penalized for.
+- Keep the refactor bit-faithful: change data paths, structure, and layout,
+  but do NOT change arithmetic — keep the same operators, the same evaluation
+  order, the same parentheses, the same float/double types. Do not reassociate,
+  do not replace log with log1p, do not fuse two sqrt into one unless the
+  direction explicitly says so. A bit-faithful refactor changes HOW values are
+  fetched/hoisted, not WHAT is computed.
 - Make sure the code still runs after your edits — run the build/tests/benchmark yourself if they are available, and fix anything you break.
 - IMPORTANT — restore benchmark/report side-effects before you finish. Running the build, tests, or benchmark may write to files you did not intend to edit (e.g. a benchmark script appends a timing row to benchmarks/speed.csv, or a test writes a RESULTS.md). Those files are frozen — the harness gate will REJECT your whole round if they show up as changed, voiding your real source edits. After your verification runs, `git checkout --` (or otherwise restore) every file the direction did not tell you to edit, so that the only changes left in the worktree are your intended source edits. The harness commits your source; it records timings itself — you must not leave timing/report files dirty.
 - Stay focused on the direction: do not reformat or refactor code the direction does not touch. (This is about scope of WHAT you touch, not about doing less of what the direction asks.)

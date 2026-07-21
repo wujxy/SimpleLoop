@@ -29,7 +29,7 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 40
+  max_rounds: 10
   candidates_per_round: 3
   max_workers: 3
 

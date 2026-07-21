@@ -53,12 +53,14 @@ def test_for_proposer_projects_landing_state():
          "score": 0.7, "risk": "low",
          "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
+         "landing_state": None,
          "feedback": "f0", "feedback_for_report": "r0"},
         {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444",
          "accepted": False, "base_sha": "aaaa1111bbbb2222",
          "score": 0.05, "risk": "low",
          "metrics": {"CORRECTNESS": False},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
+         "landing_state": "not-implemented",
          "feedback": "LANDED_STATE: not-implemented correctness FAIL",
          "feedback_for_report": "r1"},
     ]
@@ -433,33 +435,23 @@ def test_judger_prompt_has_no_direction_advice_and_requires_landed_state():
 #     anti-death-loop MUST: don't re-propose an already-implemented direction ---
 
 def test_proposer_prompt_must_stays_only_for_hard_limits():
-    """The landing/payoff CHECKS (git diff, read trend) stay advisory (the
-    prompt says the proposer MAY inspect a relevant prior SHA) — they are
-    targeted judgment calls, not per-round musts. The hard delivery contract
-    (three-field JSON, no prose) stays mandatory. And the anti-death-loop MUST
-    is now wired to the `decision` token (continue requires a stated mechanism
-    difference), so it has a forcing function the old prose-only "do not
-    re-propose" rule lacked."""
+    """Repository inspection stays advisory while structure is enforced by
+    JSON Schema instead of prompt formatting commands."""
     import inspect
     from simpleloop import proposer as prop_mod
     src = inspect.getsource(prop_mod)
-    # the mandatory self-audit heading + per-round musts are gone:
     assert "Self-audit before proposing" not in src
     assert "DO NOT re-propose it" not in src
-    # git inspection is explicitly optional, not a per-round audit:
     assert "MAY inspect the most relevant prior SHA" in src
-    # the three roles are stated so the proposer knows its scope:
     assert "PROPOSER (you)" in src
     assert "EXECUTOR" in src
     assert "JUDGER" in src
-    # the hard delivery contract is now a parseable JSON object that supports
-    # batch proposals and legacy single-proposal shape:
-    assert "MUST be exactly one parseable JSON object" in src
+    assert "Your response is delivered through the configured JSON Schema." in src
     assert '"proposals"' in src
     assert "reflection" in src and "decision" in src and "proposal" in src
-    # the forcing function: continue decision binds to a stated mechanism difference
-    assert "If `decision` is `continue`" in src
-    assert "State the difference in `reflection`" in src
+    assert "MUST be exactly one parseable JSON object" not in src
+    assert "If `decision` is `continue`" not in src
+    assert "State the difference in `reflection`" not in src
 
 
 def test_proposer_prompt_keeps_routing_lightweight_and_git_targeted():
@@ -513,7 +505,14 @@ def test_proposer_prompt_uses_explicit_base_and_explains_rejected_candidate(tmp_
 
         def run_json(self, prompt, **_kwargs):
             self.prompt = prompt
-            return {"reflection": "brief", "decision": "continue", "proposal": "next"}
+            return {
+                "reflection": "brief",
+                "proposals": [{
+                    "family": "next",
+                    "decision": "continue",
+                    "proposal": "next",
+                }],
+            }
 
     agent = CapturingAgent()
     prop_mod.propose(
@@ -539,8 +538,14 @@ def test_proposer_prompt_uses_explicit_base_and_explains_rejected_candidate(tmp_
     assert "git show accepted-full-sha:<path>" in agent.prompt
     assert "candidate_sha=candidate-full-sha" in agent.prompt
     assert "accepted=false" in agent.prompt
-    assert "real implementation" in agent.prompt
-    assert "not part of the current accepted base" in agent.prompt
+    # the rejected candidate's landing shape is carried by the structured
+    # `landing=` field in the history block (not by scar-tissue prose telling
+    # the proposer that accepted=false "still represents a real implementation").
+    # This fixture's feedback has no LANDED_STATE prefix, so landing=None is
+    # rendered as the literal field value, not inferred from accepted=false.
+    assert "landing=None" in agent.prompt
+    assert "real implementation" not in agent.prompt
+    assert "not part of the current accepted base" not in agent.prompt
     assert "HEAD" not in agent.prompt
 
 
@@ -554,8 +559,11 @@ def test_proposer_prompt_labels_compact_and_full_history(tmp_path: Path):
             self.prompt = prompt
             return {
                 "reflection": "brief",
-                "decision": "switch",
-                "proposal": "next",
+                "proposals": [{
+                    "family": "next",
+                    "decision": "switch",
+                    "proposal": "next",
+                }],
             }
 
     old_generation = _parallel_history_record(
@@ -654,36 +662,63 @@ def test_resume_chain_falls_back_to_baseline_when_no_candidate_was_accepted():
     assert loop_mod._resume_chain(history, "baseline", schema) == ("baseline", None)
 
 
-def test_proposer_prompt_has_antideathloop_must():
-    """selfloop-test-3 reproduced the death loop (proposer re-proposed an
-    already-landed direction 9x; executor empty-committed each time). The old
-    advisory LANDED_STATE hint was ignored, and the prose-only "Do NOT
-    re-propose" rule had no forcing function. The fix: a MUST scoped to the
-    `continue` decision token — continue requires the proposal to be
-    substantively different in mechanism/call sites from a prior
-    already-implemented round, with the difference stated in `reflection`;
-    line-number/rephrasing drift is explicitly NOT a valid difference (test-3's
-    r5->r6 "1177-1203" -> "1177/1178/1184" drift was the exact escape the
-    proposer used to re-propose the same optimization). Also forbids frozen-path
-    directions (gate would reject) and treats gate-rejected differently from
-    already-implemented (retry-and-narrow vs switch-tracks)."""
+def test_proposer_prompt_keeps_required_guidance_and_drops_executor_planning():
+    """Required source-grounding guidance stays verbatim; implementation
+    planning, bit-faithful proof, and format-policing text are removed. The
+    candidate count is enforced by the JSON Schema + _parse_batch, not by
+    prompt prose, so the 'Produce exactly N' sentence is gone (its invariant
+    is asserted structurally in test_parse_batch_enforces_exact_count).
+
+    proposal-vs-plan boundary: the proposal field is a DIRECTION, not an
+    implementation plan. The prompt must NOT ask the proposer to enumerate call
+    sites / mechanism / implementation detail (that is the executor's job, and
+    asking for it is what made an earlier run produce a 2190-char 'proposal'
+    that violated the 800-char schema limit and exhausted structured-output
+    retries). Re-anchored here against the new wording."""
     import inspect
     from simpleloop import proposer as prop_mod
     src = inspect.getsource(prop_mod)
-    # the anti-death-loop MUST is present, scoped to the continue decision:
-    assert "LANDED_STATE: already-implemented" in src
-    assert "different mechanism or different call sites" in src
-    assert "State the difference in `reflection`" in src
-    # line-number/rephrasing drift is explicitly NOT a valid difference
-    # (test-3's r5->r6 "1177-1203" -> "1177/1178/1184" drift was the exact
-    # escape the proposer used to re-propose the same optimization):
-    assert "drifting line numbers or rephrasing" in src
-    # frozen-path directions are forbidden (gate would reject -> voided round):
-    assert "frozen_paths" in src
-    # gate-rejected is treated as "retry and narrow scope", NOT "switch tracks"
-    # (so it does not get confused with already-implemented):
-    assert "narrow its scope/mechanism" in src
-    assert r'"done, switch tracks"' in src
+    normalized = " ".join(src.split())
+    assert "Produce exactly {candidates_per_round} candidate proposal(s)." not in src
+    assert "diversify candidates across meaningfully different mechanism families" in normalized
+    assert "Each candidate must be one coherent experiment that the executor can implement and the gate can verify in one round." in normalized
+    # the proposal is a direction, grounded in the accepted base, NOT an
+    # implementation plan enumerating call sites / mechanism:
+    assert "Ground it in the current accepted base" in normalized
+    assert "name the target file/function" in normalized
+    assert "Do NOT write the implementation" in normalized
+    # anti-plan guard: the old "identify ... call sites, and expected benefit"
+    # phrasing (which induced plan-level proposals) must be gone.
+    assert "identify the target code, mechanism, relevant call sites, and expected benefit" not in normalized
+    assert "relevant call sites" not in normalized
+    # the scope-violation guard makes "no implementation" a first-class rule:
+    assert "proposal that reads like a patch is a scope violation" in normalized
+    assert "Do NOT propose a direction that requires editing files under frozen_paths" in src
+    assert "bit-faithful constraints" not in src
+    assert "Size is not a virtue and not a sin" not in src
+    assert "Forbidden in `proposal`: sequencing language" not in src
+    assert "narrow its scope/mechanism" not in src
+    assert "passed directly to json.loads()" not in src
+
+
+def test_parse_batch_enforces_exact_count():
+    """The 'produce exactly N candidates' invariant moved out of prompt prose
+    into structure: the JSON Schema pins minItems=maxItems=N, and _parse_batch
+    rejects a response whose proposals count != candidates_per_round. This is
+    the structural anchor for the prose sentence that was deleted."""
+    from simpleloop.proposer import _parse_batch, ProposalBatch
+    one = {"family": "f", "decision": "continue", "proposal": "p"}
+    two = [one, dict(one, family="g")]
+    # right count passes
+    assert isinstance(_parse_batch({"reflection": "", "proposals": two},
+                                   candidates_per_round=2), ProposalBatch)
+    # too few / too many -> ValueError (the sentence 'Produce exactly N' used to carry)
+    with pytest.raises(ValueError):
+        _parse_batch({"reflection": "", "proposals": [one]},
+                      candidates_per_round=2)
+    with pytest.raises(ValueError):
+        _parse_batch({"reflection": "", "proposals": [one, one, one]},
+                      candidates_per_round=2)
 
 
 # --- loop._print_objective: the run log shows each round's measured speed ---

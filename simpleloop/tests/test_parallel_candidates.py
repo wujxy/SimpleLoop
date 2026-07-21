@@ -9,11 +9,13 @@ import yaml
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop import views
+from simpleloop.agent import Agent, AgentError, AgentResult
 from simpleloop.executor import ExecResult
 from simpleloop.judger import Judgment
 from simpleloop.loop import _run_candidates, _select_winner
 from simpleloop.proposer import Proposal
 from simpleloop.proposer import _parse_batch
+from simpleloop.proposer import _proposer_schema
 from simpleloop.proposer import propose
 from simpleloop.store import Store
 
@@ -74,6 +76,19 @@ def test_omilrec_v100_example_uses_parallel_speed_selection():
     }
 
 
+def test_omilrec_v100_postv107_gated_example_uses_new_package_only():
+    cfg = config_mod.load(EXAMPLES / "omilrec-v100-postv107-gated.yaml")
+
+    assert cfg["repo_path"].endswith("/omilrec-v100-postv107-gated")
+    assert cfg["eval_commands"] == ["bash scripts/sl_eval_post_v107.sh --evtmax 10"]
+    assert cfg["metrics"] == {
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [{"key": "FCN"}, {"key": "CONSISTENCY"}, {"key": "EVAL_RESULT"}],
+    }
+    assert "/omilrec/scripts/" not in "\n".join(cfg["eval_commands"])
+    assert "/omilrec-v100/scripts/" not in "\n".join(cfg["eval_commands"])
+
+
 @pytest.mark.parametrize("field", ["candidates_per_round", "max_workers"])
 @pytest.mark.parametrize("value", [0, -1, "2"])
 def test_config_parallel_rejects_invalid_values(tmp_path: Path, field: str, value):
@@ -81,17 +96,28 @@ def test_config_parallel_rejects_invalid_values(tmp_path: Path, field: str, valu
         config_mod.load(_write_config(tmp_path, {field: value}))
 
 
-def test_parse_batch_accepts_legacy_single_when_k_is_one():
-    batch = _parse_batch(
-        {"reflection": "r", "decision": "continue", "proposal": "do one thing"},
-        candidates_per_round=1,
-    )
-    assert batch.reflection == "r"
-    assert len(batch.proposals) == 1
-    assert batch.proposals[0].proposal == "do one thing"
-    assert batch.proposals[0].decision == "continue"
-    assert batch.proposals[0].family == "single"
-    assert batch.warnings == []
+def test_proposer_schema_requires_exact_candidate_count():
+    schema = _proposer_schema(3)
+    proposals = schema["properties"]["proposals"]
+    assert proposals["minItems"] == 3
+    assert proposals["maxItems"] == 3
+    assert schema["required"] == ["reflection", "proposals"]
+    assert schema["additionalProperties"] is False
+
+
+def test_proposer_schema_uses_batch_shape_when_k_is_one():
+    schema = _proposer_schema(1)
+    proposals = schema["properties"]["proposals"]
+    assert proposals["minItems"] == 1
+    assert proposals["maxItems"] == 1
+
+
+def test_parse_batch_rejects_legacy_single_when_k_is_one():
+    with pytest.raises(ValueError, match="only reflection and proposals"):
+        _parse_batch(
+            {"reflection": "r", "decision": "continue", "proposal": "do one thing"},
+            candidates_per_round=1,
+        )
 
 
 def test_parse_batch_accepts_new_shape():
@@ -107,29 +133,69 @@ def test_parse_batch_accepts_new_shape():
     )
     assert [p.family for p in batch.proposals] == ["layout", "hoist"]
     assert [p.proposal for p in batch.proposals] == ["p0", "p1"]
-    assert batch.warnings == []
 
 
-def test_parse_batch_degrades_legacy_when_k_is_greater_than_one():
-    batch = _parse_batch(
-        {"reflection": "r", "decision": "continue", "proposal": "only one"},
-        candidates_per_round=3,
-    )
-    assert len(batch.proposals) == 1
-    assert "returned legacy single-proposal JSON" in batch.warnings[0]
+def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
+    with pytest.raises(ValueError, match="only reflection and proposals"):
+        _parse_batch(
+            {"reflection": "r", "decision": "continue", "proposal": "only one"},
+            candidates_per_round=3,
+        )
 
 
 def test_parse_batch_rejects_empty_batch():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="expected exactly 3"):
         _parse_batch({"reflection": "r", "proposals": []}, candidates_per_round=3)
 
 
-def test_proposer_prompt_requires_raw_json_with_exact_candidate_count(tmp_path: Path):
+@pytest.mark.parametrize("count", [1, 2, 4])
+def test_parse_batch_rejects_wrong_candidate_count(count: int):
+    data = {
+        "reflection": "r",
+        "proposals": [
+            {"family": f"family_{i}", "decision": "switch", "proposal": f"p{i}"}
+            for i in range(count)
+        ],
+    }
+    with pytest.raises(ValueError, match="expected exactly 3"):
+        _parse_batch(data, candidates_per_round=3)
+
+
+def test_parse_batch_rejects_duplicate_families():
+    with pytest.raises(ValueError, match="duplicate family"):
+        _parse_batch(
+            {
+                "reflection": "r",
+                "proposals": [
+                    {"family": "Layout", "decision": "switch", "proposal": "p0"},
+                    {"family": " layout ", "decision": "continue", "proposal": "p1"},
+                ],
+            },
+            candidates_per_round=2,
+        )
+
+
+def test_parse_batch_rejects_invalid_decision():
+    with pytest.raises(ValueError, match="decision must be continue or switch"):
+        _parse_batch(
+            {
+                "reflection": "r",
+                "proposals": [
+                    {"family": "layout", "decision": "maybe", "proposal": "p0"},
+                ],
+            },
+            candidates_per_round=1,
+        )
+
+
+def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     class CapturingAgent:
         prompt = ""
+        schema = None
 
-        def run_json(self, prompt, **_kwargs):
+        def run_json(self, prompt, json_schema=None, **_kwargs):
             self.prompt = prompt
+            self.schema = json_schema
             return {
                 "reflection": "",
                 "proposals": [
@@ -151,15 +217,12 @@ def test_proposer_prompt_requires_raw_json_with_exact_candidate_count(tmp_path: 
         candidates_per_round=3,
     )
 
-    assert "passed directly to json.loads()" in agent.prompt
-    assert "first non-whitespace character must be `{`" in agent.prompt
-    assert "last non-whitespace character must be `}`" in agent.prompt
-    assert "Do not use Markdown code fences" in agent.prompt
-    assert "Do not place prose, headings, commentary, XML tags, or tool-call markup" in agent.prompt
-    assert "`proposals` must contain exactly 3 items" in agent.prompt
-    assert "A ```json code fence is acceptable" not in agent.prompt
-    assert all(f"<mechanism label {i}>" in agent.prompt for i in range(1, 4))
-    assert "<mechanism label 4>" not in agent.prompt
+    assert agent.schema == _proposer_schema(3)
+    assert "Your response is delivered through the configured JSON Schema." in agent.prompt
+    assert "passed directly to json.loads()" not in agent.prompt
+    assert "first non-whitespace character must be `{`" not in agent.prompt
+    assert "Do not use Markdown code fences" not in agent.prompt
+    assert "legacy shape" not in agent.prompt
 
 
 def test_selector_uses_objective_and_filters_gates_and_risk():
@@ -400,3 +463,106 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
     assert _select_winner(candidates, schema)["candidate"] == 0
+
+
+def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):
+    agent = Agent()
+    expected = {"reflection": "", "proposals": []}
+
+    def fake_run(*_args, **_kwargs):
+        return AgentResult(text="ignored", data=expected)
+
+    monkeypatch.setattr(agent, "_run", fake_run)
+
+    assert agent.run_json(
+        "prompt",
+        cwd=tmp_path,
+        label="proposer",
+        json_schema={"type": "object"},
+    ) is expected
+
+
+def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path: Path):
+    agent = Agent()
+
+    def fake_run(*_args, **_kwargs):
+        return AgentResult(
+            text='explanation before {"reflection":"","proposals":[]}',
+            data={},
+        )
+
+    monkeypatch.setattr(agent, "_run", fake_run)
+
+    with pytest.raises(AgentError, match="not an exact JSON object"):
+        agent.run_json(
+            "prompt",
+            cwd=tmp_path,
+            label="proposer",
+            json_schema={"type": "object"},
+        )
+
+
+def test_run_aborts_before_executor_when_proposer_contract_fails(
+    monkeypatch, tmp_path: Path
+):
+    cfg = {
+        "goal": "go faster",
+        "editable_paths": ["src/**"],
+        "frozen_paths": [],
+        "max_rounds": 1,
+        "candidates_per_round": 3,
+        "max_workers": 3,
+        "agent_timeout_seconds": 10,
+        "metrics": None,
+        "repo_path": tmp_path / "source",
+        "baseline_ref": "HEAD",
+        "eval_commands": [],
+    }
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeWorkspace:
+        def __init__(self, *, run_dir, **_kwargs):
+            self.run_dir = run_dir
+            self.repo = run_dir / "repo"
+
+        def setup(self):
+            self.repo.mkdir(parents=True, exist_ok=True)
+
+        def baseline_sha(self):
+            return "baseline-sha"
+
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def history(self):
+            return []
+
+        def append(self, *_args, **_kwargs):
+            raise AssertionError("proposer failure must not be written as a round")
+
+    executor_called = False
+
+    def fail_proposer(*_args, **_kwargs):
+        raise ValueError("invalid proposer batch")
+
+    def fail_if_executor_runs(*_args, **_kwargs):
+        nonlocal executor_called
+        executor_called = True
+        raise AssertionError("executor must not run")
+
+    monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
+    monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(loop_mod, "Store", FakeStore)
+    monkeypatch.setattr(loop_mod, "_eval_baseline", lambda *_args: ("", {}))
+    monkeypatch.setattr(loop_mod.proposer_mod, "propose", fail_proposer)
+    monkeypatch.setattr(loop_mod, "_run_candidates", fail_if_executor_runs)
+
+    with pytest.raises(ValueError, match="invalid proposer batch"):
+        loop_mod.run("config.yaml", tmp_path / "run")
+
+    assert executor_called is False

@@ -3,8 +3,8 @@
 Calls `claude -p --input-format text --output-format json` as a non-interactive
 subprocess with a timeout and heartbeat logging. Two call modes:
 
-  - run_json(prompt): for proposer/judger. Parses the agent's text response as
-    a JSON object; raises AgentError if it can't.
+  - run_json(prompt): for proposer/judger. With json_schema it requires Claude's
+    structured output; without one it keeps the legacy tolerant JSON parser.
   - run_text(prompt): for executor. Returns the raw text; the executor does not
     return JSON, it just edits files in the worktree. We only care that it ran.
 
@@ -66,9 +66,33 @@ class Agent:
         # claude reads), inheriting the rest of the host env.
         self.max_output_tokens = max_output_tokens
 
-    def run_json(self, prompt: str, *, cwd: Path, label: str = "agent") -> dict:
+    def run_json(
+        self,
+        prompt: str,
+        *,
+        cwd: Path,
+        label: str = "agent",
+        json_schema: dict | None = None,
+    ) -> dict:
         """Run the agent, return its parsed JSON object. Raises AgentError on failure."""
-        result = self._run(prompt, cwd=cwd, label=label)
+        result = self._run(
+            prompt, cwd=cwd, label=label, json_schema=json_schema)
+        if json_schema is not None:
+            if result.data:
+                return result.data
+            try:
+                parsed = json.loads(result.text)
+            except json.JSONDecodeError as exc:
+                raise AgentError(
+                    f"[{label}] structured output was not an exact JSON object: {exc}",
+                    raw_output=result.text,
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise AgentError(
+                    f"[{label}] structured output must be a JSON object",
+                    raw_output=result.text,
+                )
+            return parsed
         try:
             return _extract_json(result.text)
         except AgentError as exc:
@@ -79,7 +103,8 @@ class Agent:
         """Run the agent, return its raw text. Used by the executor (no JSON expected)."""
         return self._run(prompt, cwd=cwd, label=label).text
 
-    def _run(self, prompt: str, *, cwd: Path, label: str) -> AgentResult:
+    def _run(self, prompt: str, *, cwd: Path, label: str,
+             json_schema: dict | None = None) -> AgentResult:
         exe = self._resolve_command()
         # Prompt goes to claude via STDIN, not argv. A long proposer history (the
         # round-N proposal can be kilobytes; across 14+ rounds the assembled
@@ -97,6 +122,8 @@ class Agent:
         if self.model:
             argv += ["--model", self.model]
         argv += self.extra_args
+        if json_schema is not None:
+            argv += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
 
         prompt_bytes = prompt.encode("utf-8")
         print(f"[{label}] claude call started (timeout={self.timeout_seconds}s, cwd={cwd}, "
@@ -177,13 +204,18 @@ class Agent:
 
         # Claude Code's --output-format json wraps the agent text in a "result" field.
         text = stdout
+        data: dict = {}
         try:
             outer = json.loads(stdout)
-            if isinstance(outer, dict) and isinstance(outer.get("result"), str):
-                text = outer["result"]
+            if isinstance(outer, dict):
+                structured = outer.get("structured_output")
+                if isinstance(structured, dict):
+                    data = structured
+                if isinstance(outer.get("result"), str):
+                    text = outer["result"]
         except json.JSONDecodeError:
             pass  # older/fake wrappers print the agent text directly
-        return AgentResult(text=text, data={})
+        return AgentResult(text=text, data=data)
 
     def _resolve_command(self) -> str:
         found = shutil.which(self.command)

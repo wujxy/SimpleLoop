@@ -22,11 +22,10 @@ back into the next round's prompt.
 """
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from .agent import Agent, AgentError
+from .agent import Agent
 from . import views
 
 
@@ -41,10 +40,6 @@ class Proposal:
     but they are NOT fed back into the next round's prompt — `views.for_proposer`
     does not project them — so they never bias the next round's decision.
 
-    `decision` is the forcing-function token for the hard rule: `continue`
-    requires the proposal to be substantively different from a prior
-    already-implemented round (the difference must be stated in `reflection`);
-    `switch` is unconstrained.
     """
     proposal: str
     decision: str = "switch"   # default switch (conservative) if the judger omitted it
@@ -61,13 +56,53 @@ class ProposalBatch:
     """
     reflection: str
     proposals: list[Proposal]
-    warnings: list[str] = field(default_factory=list)
 
 
 def _proposal_history_field(record: dict) -> tuple[str, str]:
     if "proposal" in record:
         return "proposal", str(record.get("proposal") or "")
     return "proposal_head", str(record.get("proposal_head") or "")
+
+
+def _proposer_schema(candidates_per_round: int) -> dict:
+    """Return the strict structured-output contract for one proposer call."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["reflection", "proposals"],
+        "properties": {
+            "reflection": {
+                "type": "string",
+                "maxLength": 600,
+            },
+            "proposals": {
+                "type": "array",
+                "minItems": candidates_per_round,
+                "maxItems": candidates_per_round,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["family", "decision", "proposal"],
+                    "properties": {
+                        "family": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                        },
+                        "decision": {
+                            "type": "string",
+                            "enum": ["continue", "switch"],
+                        },
+                        "proposal": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 800,
+                        },
+                    },
+                },
+            },
+        },
+    }
 
 
 def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
@@ -104,6 +139,7 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                         f"family={c.get('family','?')} | candidate_sha={c.get('sha') or '(no commit)'} | "
                         f"{' '.join(cm_parts)} | changed: {','.join(c_paths) if c_paths else '(none)'} | "
                         f"score={c.get('score')} | risk={c.get('risk','?')} | "
+                        f"landing={c.get('landing_state')} | "
                         f"feedback=\"{c.get('feedback','')}\" | "
                         f"diagnostic=\"{c.get('feedback_for_report','')}\" | "
                         f'{proposal_label}="{proposal_text}"'
@@ -116,10 +152,12 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                 )
             else:
                 proposal_label, proposal_text = _proposal_history_field(r)
+                landing = r.get("landing_state")
                 hist_lines.append(
                     f"  round {r['round']}: candidate_sha={sha_str} | "
                     f"accepted={accepted_str} | base_sha={round_base} | {metrics_str} | "
                     f"changed: {paths_str} | score={r['score']} | risk={r.get('risk','?')} | "
+                    f"landing={landing} | "
                     f"feedback=\"{r['feedback']}\" | "
                     f"diagnostic=\"{r.get('feedback_for_report','')}\" | "
                     f'{proposal_label}="{proposal_text}"'
@@ -128,27 +166,19 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
     else:
         hist_block = "  (none yet — this is the first round)"
 
-    output_example = json.dumps(
-        {
-            "reflection": "<1-2 sentence routing judgment>",
-            "proposals": [
-                {
-                    "family": f"<mechanism label {i + 1}>",
-                    "decision": "<continue|switch>",
-                    "proposal": f"<candidate direction {i + 1}>",
-                }
-                for i in range(candidates_per_round)
-            ],
-        },
-        indent=2,
-    )
 
     prompt = f"""You are the PROPOSER in an optimization loop. Choose candidate directions for the next round.
 
 Roles in this loop (so you know what your input/output is and is not):
-- PROPOSER (you): read the per-run repo + prior-round history, choose candidate directions. The search decision is yours.
-- EXECUTOR: takes one candidate direction, edits code in an isolated worktree, runs the gate, and commits. It does not choose or question the direction.
-- JUDGER: looks at one candidate's diff + metrics, grades the effect, tags a landing state, and writes objective diagnostic feedback. It does not choose the next direction.
+- PROPOSER (you): read the current accepted source and prior-round history, choose WHAT
+  optimization hypothesis should be tested next, and explain WHY it is promising. You own
+  direction selection, not implementation planning.
+- EXECUTOR: takes one candidate direction, inspects the code needed to implement it, makes
+  all implementation-level decisions within that direction, edits code in an isolated
+  worktree, runs the gate, and commits. It must not replace the proposed optimization
+  hypothesis with a different one.
+- JUDGER: looks at one candidate's diff + metrics, grades the effect, tags a landing state,
+  and writes objective diagnostic feedback. It does not choose the next direction.
 
 Task goal:
 {goal}
@@ -167,10 +197,12 @@ Current accepted source:
 - base_sha: {base_sha}
 - Every candidate in this round starts from this exact commit.
 - Only the selected candidate becomes part of the future source state.
-- A history row with a candidate SHA and accepted=false still represents a real implementation
-  performed by the executor. It failed a hard gate and is not part of the current accepted base;
-  do not mistake it for the executor making no changes. You may inspect that candidate when
-  deciding whether to correct the attempt, continue the mechanism, or switch direction.
+- A non-selected candidate is not in the current accepted base, but its `landing`
+  field (from the judger's tag) tells you what shape it had: `gate-rejected`
+  (a real attempt the hard gate voided), `already-implemented` (executor found
+  nothing to do), or `not-implemented` (landed but not selected). Inspect such a
+  candidate's SHA when deciding whether to correct the attempt, continue the
+  mechanism, or switch direction.
 
 This round:
 - candidates_per_round: {candidates_per_round}
@@ -180,28 +212,37 @@ Safety (hard rules):
 - frozen_paths (must never be touched): {frozen}
 
 Hard rules on what you may propose (mandatory — violating these wastes a round):
-- If `decision` is `continue`: your proposal MUST be for a different mechanism or different call sites than any prior round the judger tagged `LANDED_STATE: already-implemented` (or any prior round that landed the same area). State the difference in `reflection` — you can see what each prior round touched in the history above (changed paths, LANDED_STATE tag), so name the difference from what is visible there (drifting line numbers or rephrasing the same optimization is not a difference; if you cannot name a real mechanism difference, choose `switch` — that is the honest decision, not a fallback).
-- If `decision` is `switch`: the above does not apply — pick a different mechanism family freely.
-- Do NOT propose a direction that requires editing files under frozen_paths — the gate will reject it and void the round. If a prior round was tagged `LANDED_STATE: gate-rejected`, you may retry the direction (decision=continue is fine here), but narrow its scope/mechanism so it stays within editable_paths (the rejection reason names what was touched). gate-rejected is "wrong scope, fix the writing", not "done, switch tracks" — do not confuse it with already-implemented.
+- Do NOT propose a direction that requires editing files under frozen_paths — the gate will reject it and void the round.
 
 Prior rounds (each carries candidate/base SHA, accepted state, metrics, changed_paths,
 score, judger feedback/diagnostic, and the proposal):
 {hist_block}
 
 How to read the history:
-- A selected candidate is part of the current accepted lineage.
-- A non-selected candidate is not in the current source, but it is still useful evidence:
-  it shows a mechanism that was attempted and how it performed.
-- Use all candidate outcomes as search memory. Do not ignore failed, regressed, no-op,
-  high-risk, or non-selected candidates.
-- The diagnostic feedback states what landed, what the test result was, and why the
-  proposal worked, regressed, failed, or was inconclusive.
+- A selected candidate is part of the current accepted lineage; a non-selected
+  candidate is not in the source but is still useful evidence — it shows a
+  mechanism that was attempted and how it performed. Use all candidate outcomes
+  as search memory, including failed, regressed, no-op, high-risk, or
+  non-selected ones.
 
 Guidance:
-- Before proposing, make a lightweight routing judgement from the prior-round history:
-  decide whether the current optimization direction still has a concrete,
-  evidence-backed next opportunity or is exhausted/stalled and should be replaced.
-  This is a short routing step, not the main task and not an audit of every round.
+- Your job is to read enough of the code and prior-round history to point at a direction.
+  Name WHERE the suspected waste is, WHAT makes it wasteful, and WHICH optimization
+  mechanism should be tested. Do not decide HOW that mechanism should be represented or
+  implemented in code. A proposal that fits in a few sentences is correct; a proposal that
+  reads like a patch is a scope violation.
+- Code inspection is for direction selection only. Once you can identify a plausible
+  target, the wasteful mechanism, and an evidence-backed optimization hypothesis, stop
+  inspecting code and produce the proposal. You do not need enough detail to implement the
+  change; do not trace every downstream call site or inspect implementation details merely
+  to make the proposal more complete.
+- Do not produce an implementation plan: no edit sequence, pseudocode, patch outline, exact
+  data representation, variable or member design, helper signatures, detailed control-flow
+  rewrites, or call-site-by-call-site changes. Those decisions belong to the executor.
+- Make a lightweight routing judgement from the prior-round history: decide whether the
+  current optimization direction still has a concrete, evidence-backed next opportunity or
+  is exhausted/stalled and should be replaced. This is a short routing step, not the main
+  task and not an audit of every round — your output is the proposal, not the routing.
 - When judging whether a round's change helped, treat its objective delta vs the direct
   prior accepted state as the primary evidence; comparison vs baseline describes cumulative
   progress, and `accepted=true` only means hard gates passed, so neither by itself proves
@@ -210,142 +251,107 @@ Guidance:
   mechanism or call site has already landed, you MAY inspect the most relevant prior SHA
   with `git show` or `git diff`. Git inspection is optional and targeted; do not
   systematically re-audit all prior rounds.
-- Produce exactly {candidates_per_round} candidate proposal(s).
-- If {candidates_per_round} is 1, behave like the serial loop and choose the single best next direction.
-- If {candidates_per_round} is greater than 1, diversify candidates across meaningfully different mechanism families. Do not submit small wording variants of the same idea.
+- With {candidates_per_round} candidate(s) requested, choose the single best next direction
+  when {candidates_per_round} is 1 (serial-loop behavior), or diversify candidates across
+  meaningfully different mechanism families when it is greater than 1. Do not submit
+  near-duplicates.
 - Each candidate proposal must be a single change the executor can build and the gate can verify in ONE round.
-- Size is not a virtue and not a sin: a large systematic refactor (one mechanism, many call sites) is fine and often the highest-value kind; do not shrink a high-payoff direction just to be safe. Point at the specific functions/modules/files and call sites it touches.
-- But the direction must be a self-contained atomic change, not a multi-round plan. Forbidden in `proposal`: sequencing language like "first commit / then stack / step 1 of N / defer X to a later round / the deferred slice that round K sequenced". To eat a big direction over several rounds, propose only THIS round's slice (the slice itself, fully implementable+verifiable this round) and let a later round independently propose the next slice — never write the sequence into the proposal.
-- When a direction has been tried for several rounds without improvement (or with regressions), `switch` is usually the right `decision`.
 
 Reference:
-- `base_sha` is authoritative for what is currently accepted. Historical candidate SHAs
-  are evidence about attempts; accepted=false means their changes are not in that base.
-- The `LANDED_STATE:` tag supplies the judger's change-shape hint. In particular,
-  already-implemented means the executor found nothing to do; this differs from a real
-  candidate commit that was rejected by a hard gate.
+- `base_sha` is authoritative for what is currently accepted. Historical
+  candidate SHAs are evidence about attempts; `accepted=false` means their changes
+  are not in that base, and the `landing` field carries the judger's shape tag
+  (gate-rejected / already-implemented / not-implemented) so you need not infer it.
 
 Machine-readable final delivery:
-- Your final assistant message is passed directly to json.loads(). No human-facing explanation is needed.
-- Your final response MUST be exactly one parseable JSON object.
-- After completing any repository inspection or tool calls, return one raw JSON object as the final assistant message.
-- The first non-whitespace character must be `{{`.
-- The last non-whitespace character must be `}}`.
-- Do not use Markdown code fences.
-- Do not place prose, headings, commentary, XML tags, or tool-call markup before or after the JSON object.
-- `proposals` must contain exactly {candidates_per_round} items.
-- When candidates_per_round is 1, this legacy shape is also accepted:
-  {{"reflection": "<one paragraph>", "decision": "<continue|switch>", "proposal": "<your direction>"}}
-- Your investigation goes through tool calls (`git show`, `git diff`, `git log`). Put the conclusions that matter in `reflection` and `proposal`, not outside the JSON.
+- Your response is delivered through the configured JSON Schema.
 - `reflection` (mandatory when prior history exists; round 0 may leave it empty):
-  at most 1–2 sentences stating only the historical evidence that affects this round's
-  choice — whether the current direction still has a concrete next opportunity or has
-  stalled/exhausted its headroom, and why. This is a judgement, not a recap of every round.
+  at most 1–2 sentences stating only the historical evidence that affects this
+  round's choice — whether the current direction still has a concrete next
+  opportunity or has stalled/exhausted its headroom, and why. This is a
+  judgement, not a recap of every round.
 - `family`: a short mechanism label, such as `qpdf_bin_hoist`, `data_layout`, `loop_domain`, `control_flow`, or another precise label.
 - `decision`: one of two tokens —
     `continue`  — deepen or extend the same target bottleneck / optimization hypothesis
                   with a substantively distinct next change.
     `switch`    — pursue a different target bottleneck / optimization hypothesis because
                   the current one lacks a worthwhile next change.
-- `proposal`: each proposal is a concrete candidate direction. Ground it in the current
-  accepted base, and identify the target code, mechanism, relevant call sites, expected
-  benefit, bit-faithful constraints, and one-round implementation scope.
-- If you are uncertain or blocked, still return the JSON object with a conservative, specific proposal.
-- Do not ask for more data and do not emit a summary.
-- Before sending, check that the complete response itself is one JSON object and that
-  the `proposals` array has exactly {candidates_per_round} items.
-
-Example shape for this round ({candidates_per_round} candidates):
-{output_example}"""
-    try:
-        data = agent.run_json(prompt, cwd=cwd, label="proposer")
-    except AgentError as exc:
-        # The agent returned prose instead of JSON. A rough direction in prose is
-        # still a usable proposal — degrade gracefully instead of wasting a round.
-        # reflection/decision are lost in this path; that's acceptable (fallback is
-        # degrade-gracefully), but we log it so the loss is visible, not silent.
-        fallback = _prose_fallback(exc.raw_output)
-        if not fallback:
-            raise
-        print(f"[proposer] JSON parse failed; using prose fallback as proposal "
-              f"(reflection/decision lost)", flush=True)
-        return ProposalBatch(reflection="", proposals=[Proposal(proposal=fallback)],
-                             warnings=["JSON parse failed; prose fallback produced one candidate"])
+- `proposal`: each proposal is a concrete candidate direction, not an implementation plan.
+  Ground it in the current accepted base: name the target file/function (or loop, subsystem,
+  data path) and what repeated or wasteful mechanism should be reduced; state the optimization
+  hypothesis to test; and give the expected benefit and experiment boundary. Do NOT write the
+  implementation — no exact lines, variable or member names, pointer or container choices,
+  helper APIs, edit steps, call-site-by-call-site rewrites, pseudocode, or verification
+  commands. Those decisions belong to the executor."""
+    data = agent.run_json(
+        prompt,
+        cwd=cwd,
+        label="proposer",
+        json_schema=_proposer_schema(candidates_per_round),
+    )
     batch = _parse_batch(data, candidates_per_round=candidates_per_round)
-    for warning in batch.warnings:
-        print(f"[proposer] {warning}", flush=True)
     if not batch.reflection and visible:
-        # round 0 is allowed to skip reflection (no history to reflect on); later
-        # rounds omitting it is a contract lapse but not worth failing a round over.
+        # Round 0 may omit reflection; later rounds should provide the routing judgment.
         print(f"[proposer] reflection empty (history exists) — contract lapse, proceeding",
               flush=True)
     return batch
 
 
 def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
-    """Normalize new batch JSON and legacy single-proposal JSON."""
-    reflection = str(data.get("reflection", "")).strip()
-    warnings: list[str] = []
+    """Validate and normalize one exact-K structured proposer response."""
+    if not isinstance(data, dict):
+        raise ValueError("proposer response must be an object")
+    if set(data) != {"reflection", "proposals"}:
+        raise ValueError("proposer response must contain only reflection and proposals")
+
+    reflection = data.get("reflection")
+    if not isinstance(reflection, str):
+        raise ValueError("reflection must be a string")
+    reflection = reflection.strip()
+
     raw_proposals = data.get("proposals")
-    proposals: list[Proposal] = []
-    if isinstance(raw_proposals, list):
-        for i, item in enumerate(raw_proposals):
-            if not isinstance(item, dict):
-                raise ValueError(f"proposals[{i}]: must be an object, got {type(item).__name__}")
-            proposal = item.get("proposal")
-            if not isinstance(proposal, str) or not proposal.strip():
-                raise ValueError(f"proposals[{i}].proposal: must be a non-empty string")
-            decision = _normalize_decision(item.get("decision", "switch"))
-            family = str(item.get("family") or f"candidate_{i}").strip() or f"candidate_{i}"
-            proposals.append(Proposal(proposal=proposal.strip(), decision=decision,
-                                      reflection=reflection, family=family))
-    elif isinstance(data.get("proposal"), str) and data.get("proposal", "").strip():
-        if candidates_per_round > 1:
-            warnings.append(
-                f"returned legacy single-proposal JSON for candidates_per_round="
-                f"{candidates_per_round}; degrading to one candidate"
-            )
-        proposals.append(Proposal(proposal=data["proposal"].strip(),
-                                  decision=_normalize_decision(data.get("decision", "switch")),
-                                  reflection=reflection,
-                                  family=str(data.get("family") or "single").strip() or "single"))
-    else:
-        raise ValueError(f"proposer did not return proposals[] or a non-empty proposal: {data}")
-
-    if not proposals:
-        raise ValueError("proposer returned an empty proposals list")
-    if candidates_per_round == 1 and len(proposals) > 1:
-        warnings.append("returned multiple proposals for candidates_per_round=1; using the first")
-        proposals = proposals[:1]
-    if candidates_per_round > 1 and len(proposals) != candidates_per_round:
-        warnings.append(
-            f"returned {len(proposals)} candidate(s), expected {candidates_per_round}; "
-            "running the returned candidates"
+    if not isinstance(raw_proposals, list):
+        raise ValueError("proposals must be a list")
+    if len(raw_proposals) != candidates_per_round:
+        raise ValueError(
+            f"expected exactly {candidates_per_round} proposals, "
+            f"got {len(raw_proposals)}"
         )
-    return ProposalBatch(reflection=reflection, proposals=proposals, warnings=warnings)
 
+    proposals: list[Proposal] = []
+    seen_families: set[str] = set()
+    for i, item in enumerate(raw_proposals):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"proposals[{i}]: must be an object, got {type(item).__name__}")
+        if set(item) != {"family", "decision", "proposal"}:
+            raise ValueError(
+                f"proposals[{i}] must contain only family, decision, and proposal")
 
-def _normalize_decision(value: object) -> str:
-    decision = str(value or "switch").strip().lower()
-    if decision not in ("continue", "switch"):
-        print(f"[proposer] decision '{decision}' not continue|switch; defaulting to switch",
-              flush=True)
-        return "switch"
-    return decision
+        family = item.get("family")
+        if not isinstance(family, str) or not family.strip():
+            raise ValueError(f"proposals[{i}].family must be a non-empty string")
+        family = family.strip()
+        family_key = family.casefold()
+        if family_key in seen_families:
+            raise ValueError(f"proposals[{i}] has duplicate family: {family}")
+        seen_families.add(family_key)
 
+        decision = item.get("decision")
+        if decision not in ("continue", "switch"):
+            raise ValueError(
+                f"proposals[{i}].decision must be continue or switch")
 
-def _prose_fallback(raw: str) -> str | None:
-    """If the agent emitted prose instead of JSON, salvage it as the proposal.
+        proposal = item.get("proposal")
+        if not isinstance(proposal, str) or not proposal.strip():
+            raise ValueError(
+                f"proposals[{i}].proposal must be a non-empty string")
 
-    Returns the non-empty prose (trimmed) or None if there's nothing usable. We
-    don't try to parse a JSON object here — run_json already tried and failed.
-    """
-    if not raw:
-        return None
-    # drop a leading ```json fence if the agent half-fenced prose
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1] if "\n" in text else ""
-        text = text.rsplit("```", 1)[0]
-    text = text.strip()
-    return text or None
+        proposals.append(Proposal(
+            proposal=proposal.strip(),
+            decision=decision,
+            reflection=reflection,
+            family=family,
+        ))
+
+    return ProposalBatch(reflection=reflection, proposals=proposals)
