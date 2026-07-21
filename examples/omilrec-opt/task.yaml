@@ -73,5 +73,5 @@ eval:
       - key: EVAL_RESULT
 
 source:
-  path: ../../omilrec-v100    # relative to this task.yaml; real git repo
-  baseline_ref: main          # b51f3b8 (v1.0.0)
+  path: ../../../omilrec-v100    # relative to this task.yaml; real git repo at v1.0.0
+  baseline_ref: main             # b51f3b8 (v1.0.0)

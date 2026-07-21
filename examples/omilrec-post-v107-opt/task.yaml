@@ -1,0 +1,50 @@
+kind: task
+
+# Independent OMILRECV2 experiment: start from v1.0.0 source, gate with
+# post-v1.0.7 FCN fixture replay and relaxed reconstruction tolerances.
+
+task:
+  goal: >
+    Optimize the speed of the v1.0.0 OMILRECV2 reconstruction algorithm under
+    OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the post-v1.0.7
+    FCN replay gate passing and the end-to-end reconstruction within 4 mm
+    vertex, 7 keV energy, 10 ps t0, and 0.1 PE peSum tolerances. Edit only
+    the admitted source files.
+
+safety:
+  editable_paths:
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "benchmarks/**"
+    - "reference/**"
+    - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
+    - "pyproject.toml"
+    - "docs/**"
+    - "CLAUDE.md"
+    - "README.md"
+    - ".gitignore"
+
+loop:
+  max_rounds: 40
+  candidates_per_round: 3
+  max_workers: 3
+
+eval:
+  commands:
+    - "bash scripts/sl_eval_post_v107.sh --evtmax 10"
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    gates:
+      - key: FCN
+      - key: CONSISTENCY
+      - key: EVAL_RESULT
+
+source:
+  path: ../../../omilrec-v100-postv107-gated   # real git repo, freshly-prepared gated package
+  baseline_ref: postv107-gated-v100            # the prepared start commit

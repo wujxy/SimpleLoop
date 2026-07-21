@@ -55,5 +55,5 @@ eval:
     - "bash scripts/sl_eval.sh --evtmax 10"
 
 source:
-  path: ../../omilrec       # relative to this task.yaml; real git repo
-  baseline_ref: main        # ff71809 (v1.11.0)
+  path: ../../../omilrec       # relative to this task.yaml; real git repo at v1.11.0
+  baseline_ref: main          # ff71809 (v1.11.0)

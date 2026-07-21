@@ -1,26 +1,68 @@
 kind: task
 
+# ============================================================================
+#  SimpleLoop task.yaml — reference template
+#  ============================================================================
+#  Copy this file, fill in the four required blocks (task / safety / loop /
+#  source), and point `--config` at it. `simpleloop validate --config <file>`
+#  checks the schema before you run.
+#
+#  Paths in `source.path` are resolved RELATIVE TO THIS FILE, not cwd.
+#  `source.path` must point at a real git repo (has a .git/).
+#
+#  Full schema + validation lives in simpleloop/config.py. Strict: unknown
+#  top-level keys are errors so a misspelled knob fails at validate, not
+#  silently mid-run. Concrete filled-in examples live in the three folders:
+#    tiny_algo_opt/            — self-contained toy target (Python)
+#    omilrec-opt/              — OMILRECV2 FCN optimization (v1.0.0 + v1.11.0)
+#    omilrec-post-v107-opt/    — OMILRECV2 from v1.0.0, post-v1.0.7-gated
+# ============================================================================
+
 task:
   goal: >
-    Optimize the speed of the algorithm under src/. Reduce ms/event while keeping
-    results numerically equivalent. Edit only the admitted source files.
+    One sentence: what to optimize, where it lives, and the correctness
+    constraint. E.g. "Optimize the speed of <algo> under src/. Lower
+    <metric> while keeping <gate> passing. Edit only the admitted source
+    files." The proposer reads this verbatim — be specific about the hot
+    code and the arithmetic constraint.
 
 safety:
+  # editable_paths  (required): glob list of files the executor MAY change.
   editable_paths:
     - "src/**/*.cc"
     - "src/**/*.h"
+  # frozen_paths (optional, default []): the gate rejects any edit here.
+  # Put tests, scripts, build files, reference/baseline data, and docs here.
   frozen_paths:
     - "tests/**"
     - "scripts/**"
+    - "benchmarks/**"
     - "CMakeLists.txt"
+    - "pyproject.toml"
 
 loop:
-  max_rounds: 10
+  max_rounds: 10                 # required, positive int
+  # candidates_per_round: 1       # optional, default 1 — fanout per round
+  # max_workers: 1                # optional, default 1 — candidate concurrency
+  # agent_timeout_seconds: 3600   # optional, default 3600 — per claude call budget
 
 eval:
+  # commands (optional): run after each commit, in the round worktree, before
+  # it is removed. Omit `eval` entirely for a diff-only judger. Each command
+  # should print `KEY=value` lines for the metrics block below to parse.
   commands:
-    - "python -m pytest -q tests/"        # optional; omit to judge on diff alone
+    - "python -m pytest -q tests/"
+  metrics:
+    # objective (optional but strongly recommended — without it the judger
+    # reads prose and is known to hallucinate numbers): the key=value line to
+    # optimize, and its direction (not guessable).
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    # gates (optional): pass/fail keys that veto a round regardless of score.
+    gates:
+      - key: CORRECTNESS
 
 source:
-  path: /path/to/your/repo               # the git repo to optimize
-  baseline_ref: HEAD
+  path: ../../path/to/your/repo  # relative to THIS file; must be a git repo
+  baseline_ref: HEAD             # optional, default HEAD

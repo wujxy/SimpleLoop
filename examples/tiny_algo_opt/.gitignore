@@ -1,0 +1,7 @@
+# SimpleLoop run artifacts (the loop writes run-NNN/ here). Keep them local.
+runs/
+
+# Python caches inside repo/ (regenerated on run).
+repo/__pycache__/
+repo/*/__pycache__/
+repo/.pytest_cache/
