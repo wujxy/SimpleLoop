@@ -107,7 +107,8 @@ def _proposer_schema(candidates_per_round: int) -> dict:
 
 def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             history: list[dict], base_sha: str, cwd: Path,
-            candidates_per_round: int = 1) -> ProposalBatch:
+            candidates_per_round: int = 1,
+            gate_block: str = "") -> ProposalBatch:
     """Return ProposalBatch for the next round."""
     # Project history through the proposer's view: this strips eval_block (the
     # judger's axis — the judger summarizes it into `feedback` for us) and
@@ -167,122 +168,77 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
         hist_block = "  (none yet — this is the first round)"
 
 
-    prompt = f"""You are the PROPOSER in an optimization loop. Choose candidate directions for the next round.
+    prompt = f"""You are the PROPOSER in an optimization loop.
 
-Roles in this loop (so you know what your input/output is and is not):
-- PROPOSER (you): read the current accepted source and prior-round history, choose WHAT
-  optimization hypothesis should be tested next, and explain WHY it is promising. You own
-  direction selection, not implementation planning.
-- EXECUTOR: takes one candidate direction, inspects the code needed to implement it, makes
-  all implementation-level decisions within that direction, edits code in an isolated
-  worktree, runs the gate, and commits. It must not replace the proposed optimization
-  hypothesis with a different one.
-- JUDGER: looks at one candidate's diff + metrics, grades the effect, tags a landing state,
-  and writes objective diagnostic feedback. It does not choose the next direction.
+Role:
+Choose WHAT optimization hypothesis should be tested next and explain WHY it is
+promising. Read code to select a direction, not to design the implementation.
+The EXECUTOR owns all implementation-level decisions.
 
 Task goal:
 {goal}
 
-You are running in the per-run git repo — the same clone the executor commits each
-round into. It has NO working tree (no checked-out files), so you inspect committed
-content with git plumbing, not `cat`/`grep` of a live tree:
-  - `git show {base_sha}:<path>`                    — read the current accepted source
-  - `git show <candidate_sha>`                      — inspect one prior attempt's diff
-  - `git diff <base_sha>..<candidate_sha> -- <path>` — targeted comparison when useful
-The per-round shas in the history below ARE valid objects here (they are commits in
-THIS repo) — you can diff/show them directly. Do NOT edit anything (no working tree
-exists to edit); do NOT read other runs' repos.
-
+Gates (reference for your proposal — each tests a specific quantity;
+a proposal that would move that quantity beyond its limit should be avoided):
+{gate_block}
 Current accepted source:
 - base_sha: {base_sha}
-- Every candidate in this round starts from this exact commit.
-- Only the selected candidate becomes part of the future source state.
-- A non-selected candidate is not in the current accepted base, but its `landing`
-  field (from the judger's tag) tells you what shape it had: `gate-rejected`
-  (a real attempt the hard gate voided), `already-implemented` (executor found
-  nothing to do), or `not-implemented` (landed but not selected). Inspect such a
-  candidate's SHA when deciding whether to correct the attempt, continue the
-  mechanism, or switch direction.
+- Every candidate starts from this commit.
+- Only the selected candidate enters the future accepted state.
 
-This round:
-- candidates_per_round: {candidates_per_round}
+You may inspect committed source with targeted `git show` or `git diff` commands.
+There is no working tree (the per-run repo is a `--no-checkout` clone), so read
+files via `git show {base_sha}:<path>` -- not Read/cat/grep, which see an empty
+tree. Do not edit the repository or inspect other runs. The prior-round shas in
+the history below ARE valid objects in this repo, so you may diff/show them
+directly to check whether a mechanism was already attempted.
 
-Safety (hard rules):
-- editable_paths (only these may be changed by the executor): {editable}
-- frozen_paths (must never be touched): {frozen}
-
-Hard rules on what you may propose (mandatory — violating these wastes a round):
-- Do NOT propose a direction that requires editing files under frozen_paths — the gate will reject it and void the round.
-
-Prior rounds (each carries candidate/base SHA, accepted state, metrics, changed_paths,
-score, judger feedback/diagnostic, and the proposal):
+Prior-round outcomes:
 {hist_block}
 
-How to read the history:
-- A selected candidate is part of the current accepted lineage; a non-selected
-  candidate is not in the source but is still useful evidence — it shows a
-  mechanism that was attempted and how it performed. Use all candidate outcomes
-  as search memory, including failed, regressed, no-op, high-risk, or
-  non-selected ones.
+Choose the next direction:
+- Read only enough code and history to identify the target, suspected waste, and
+  optimization mechanism. Then stop exploring and produce the proposal.
+- Use prior outcomes to decide whether to continue the current bottleneck or switch
+  to a different one. Use all candidate outcomes as search memory, including failed,
+  regressed, no-op, or non-selected ones.
+- Treat objective delta against the direct prior accepted state as the primary
+  evidence. Gate acceptance alone does not prove an optimization helped.
+- When one candidate is requested, choose the best direction. When multiple are
+  requested, choose meaningfully different mechanism families.
+- Each candidate must be one coherent, one-round experiment.
+- Do not write the implementation.
 
-Guidance:
-- Your job is to read enough of the code and prior-round history to point at a direction.
-  Name WHERE the suspected waste is, WHAT makes it wasteful, and WHICH optimization
-  mechanism should be tested. Do not decide HOW that mechanism should be represented or
-  implemented in code. A proposal that fits in a few sentences is correct; a proposal that
-  reads like a patch is a scope violation.
-- Code inspection is for direction selection only. Once you can identify a plausible
-  target, the wasteful mechanism, and an evidence-backed optimization hypothesis, stop
-  inspecting code and produce the proposal. You do not need enough detail to implement the
-  change; do not trace every downstream call site or inspect implementation details merely
-  to make the proposal more complete.
-- Do not produce an implementation plan: no edit sequence, pseudocode, patch outline, exact
-  data representation, variable or member design, helper signatures, detailed control-flow
-  rewrites, or call-site-by-call-site changes. Those decisions belong to the executor.
-- Make a lightweight routing judgement from the prior-round history: decide whether the
-  current optimization direction still has a concrete, evidence-backed next opportunity or
-  is exhausted/stalled and should be replaced. This is a short routing step, not the main
-  task and not an audit of every round — your output is the proposal, not the routing.
-- When judging whether a round's change helped, treat its objective delta vs the direct
-  prior accepted state as the primary evidence; comparison vs baseline describes cumulative
-  progress, and `accepted=true` only means hard gates passed, so neither by itself proves
-  that round's mechanism was beneficial.
-- Use the history summary by default. If it is genuinely unclear whether a relevant
-  mechanism or call site has already landed, you MAY inspect the most relevant prior SHA
-  with `git show` or `git diff`. Git inspection is optional and targeted; do not
-  systematically re-audit all prior rounds.
-- With {candidates_per_round} candidate(s) requested, choose the single best next direction
-  when {candidates_per_round} is 1 (serial-loop behavior), or diversify candidates across
-  meaningfully different mechanism families when it is greater than 1. Do not submit
-  near-duplicates.
-- Each candidate proposal must be a single change the executor can build and the gate can verify in ONE round.
+Constraints:
+- candidates_per_round: {candidates_per_round}
+- editable_paths: {editable}
+- frozen_paths: {frozen}
+- Do not propose a direction that requires modifying frozen_paths.
 
-Reference:
-- `base_sha` is authoritative for what is currently accepted. Historical
-  candidate SHAs are evidence about attempts; `accepted=false` means their changes
-  are not in that base, and the `landing` field carries the judger's shape tag
-  (gate-rejected / already-implemented / not-implemented) so you need not infer it.
+Return the configured JSON Schema:
+- "reflection" (mandatory when prior history exists; round 0 may leave it empty):
+  in at most 1–2 dense sentences, identify the historical evidence that matters for this
+  round and judge whether the current target bottleneck or optimization hypothesis still
+  has one concrete, substantively distinct next opportunity, or has stalled/exhausted its
+  worthwhile headroom. This is the basis for the decision, not a recap of every round.
 
-Machine-readable final delivery:
-- Your response is delivered through the configured JSON Schema.
-- `reflection` (mandatory when prior history exists; round 0 may leave it empty):
-  at most 1–2 sentences stating only the historical evidence that affects this
-  round's choice — whether the current direction still has a concrete next
-  opportunity or has stalled/exhausted its headroom, and why. This is a
-  judgement, not a recap of every round.
-- `family`: a short mechanism label, such as `qpdf_bin_hoist`, `data_layout`, `loop_domain`, `control_flow`, or another precise label.
-- `decision`: one of two tokens —
-    `continue`  — deepen or extend the same target bottleneck / optimization hypothesis
-                  with a substantively distinct next change.
-    `switch`    — pursue a different target bottleneck / optimization hypothesis because
-                  the current one lacks a worthwhile next change.
-- `proposal`: each proposal is a concrete candidate direction, not an implementation plan.
-  Ground it in the current accepted base: name the target file/function (or loop, subsystem,
-  data path) and what repeated or wasteful mechanism should be reduced; state the optimization
-  hypothesis to test; and give the expected benefit and experiment boundary. Do NOT write the
-  implementation — no exact lines, variable or member names, pointer or container choices,
-  helper APIs, edit steps, call-site-by-call-site rewrites, pseudocode, or verification
-  commands. Those decisions belong to the executor."""
+- "decision": encode the routing judgement made in `reflection` as exactly one token —
+  `continue` — the reflection identifies a worthwhile next experiment on the same target
+  bottleneck or optimization hypothesis.
+  `switch`   — the reflection finds no worthwhile next experiment there, so another target
+  bottleneck or optimization hypothesis should be pursued.
+
+- "proposal" (the primary output): propose the single highest-value direction that follows
+  from the decision. If `continue`, give a substantively distinct next experiment on the
+  same target or hypothesis; if `switch`, move to a genuinely different target or hypothesis.
+  Ground it in the current accepted base by naming the target file/function or subsystem,
+  the suspected waste, the optimization mechanism to test, the expected benefit, and the
+  one-round scope. State what should be tested, not how to implement it.
+
+- The three fields must form one chain: `reflection` justifies `decision`, and `proposal`
+  must be the direct next action implied by that decision. If uncertain or blocked, still
+  return the JSON object with a conservative, specific proposal.
+"""
     data = agent.run_json(
         prompt,
         cwd=cwd,

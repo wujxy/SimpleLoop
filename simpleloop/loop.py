@@ -32,6 +32,7 @@ from . import executor as executor_mod
 from . import judger as judger_mod
 from . import plot as plot_mod
 from . import proposer as proposer_mod
+from . import views
 from .store import Store
 from .workspace import Workspace
 
@@ -113,6 +114,11 @@ def run(config_path: str | Path, run_dir: str | Path,
     # Returns both the raw text (kept for the record) and the parsed metrics
     # (the authoritative baseline numbers the judger's FACTS block cites).
     metrics_schema = cfg.get("metrics")
+    # Pre-render the gates' list lines once for the run: the same bullet lines
+    # go into both the proposer's (reference) and executor's (acceptance) prompt,
+    # each prefixed by its own fixed framing sentence in that role's prompt. Empty
+    # when no gate declares a description (degrades to today: no gate list shown).
+    gate_lines = views.gate_block(metrics_schema)
 
     # ---- continue mode: resume from existing history ----
     # Rounds already in history.jsonl are skipped; the commit chain resumes from
@@ -186,6 +192,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                     frozen=cfg["frozen_paths"], history=store.history(),
                     base_sha=parent_sha, cwd=workspace.repo,
                     candidates_per_round=cfg.get("candidates_per_round", 1),
+                    gate_block=gate_lines,
                 )
             except (AgentError, ValueError) as exc:
                 # A proposer contract failure cannot produce a candidate generation.
@@ -200,7 +207,7 @@ def run(config_path: str | Path, run_dir: str | Path,
             candidates = _run_candidates(
                 proposals_batch, round_id, parent_sha, cfg, workspace,
                 executor_agent, judger_agent, prior_metrics, baseline_metrics,
-                metrics_schema,
+                metrics_schema, gate_lines,
             )
             winner = _select_winner(
                 candidates,
@@ -236,6 +243,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                 executor_agent, proposal=proposal, goal=cfg["goal"],
                 editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
                 workspace=workspace, worktree=worktree, round_id=round_id,
+                gate_block=gate_lines,
             )
         except AgentError as exc:
             print(f"[{stamp()}] executor failed: {exc}", flush=True)
@@ -383,14 +391,14 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
                     parent_sha: str, cfg: dict, workspace: Workspace,
                     executor_agent: Agent, judger_agent: Agent,
                     prior_metrics: dict, baseline_metrics: dict,
-                    metrics_schema: dict | None) -> list[dict]:
+                    metrics_schema: dict | None, gate_lines: str) -> list[dict]:
     """Run one generation's candidates, possibly concurrently."""
     max_workers = min(cfg.get("max_workers", 1), max(1, len(proposals)))
     if max_workers <= 1 or len(proposals) <= 1:
         return [
             _run_one_candidate(i, proposal, round_id, parent_sha, cfg, workspace,
                                executor_agent, judger_agent, prior_metrics,
-                               baseline_metrics, metrics_schema)
+                               baseline_metrics, metrics_schema, gate_lines)
             for i, proposal in enumerate(proposals)
         ]
     results: list[dict | None] = [None] * len(proposals)
@@ -398,7 +406,7 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
         futures = {
             pool.submit(_run_one_candidate, i, proposal, round_id, parent_sha, cfg,
                         workspace, executor_agent, judger_agent, prior_metrics,
-                        baseline_metrics, metrics_schema): i
+                        baseline_metrics, metrics_schema, gate_lines): i
             for i, proposal in enumerate(proposals)
         }
         for future in as_completed(futures):
@@ -419,7 +427,7 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
                        workspace: Workspace, executor_agent: Agent,
                        judger_agent: Agent, prior_metrics: dict,
                        baseline_metrics: dict,
-                       metrics_schema: dict | None) -> dict:
+                       metrics_schema: dict | None, gate_lines: str) -> dict:
     """Executor + eval + judger for one candidate."""
     worktree_id = f"{round_id}-c{candidate_id}"
     worktree = None
@@ -436,6 +444,7 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
             executor_agent, proposal=proposal.proposal, goal=cfg["goal"],
             editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
             workspace=workspace, worktree=worktree, round_id=worktree_id,
+            gate_block=gate_lines,
         )
         if result.sha:
             print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} committed: "

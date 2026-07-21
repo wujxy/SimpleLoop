@@ -142,6 +142,31 @@ def for_proposer(history: list[dict]) -> list[dict]:
     return out
 
 
+def gate_block(metrics_schema: dict | None) -> str:
+    """Render the declared gates' list lines, from the config schema only.
+
+    Returns ONLY the per-gate bullet lines (``- <key>: <description>``), joined by
+    newlines — no header. The framing sentence (what gates are, how the role should
+    treat them) lives in each role's prompt template, next to its other fixed text,
+    so all fixed prompt wording stays in the prompt and only the data part is
+    rendered here.
+
+    No domain knowledge lives here — every gate's meaning is the config author's
+    `description` string, passed through verbatim.
+
+    Returns "" when there are no gates with a description — a task that does not
+    declare descriptions gets an empty block (the prompt's fixed header sits above
+    an empty list, which is harmless since SimpleLoop always declares gates).
+    """
+    if not metrics_schema:
+        return ""
+    gates = metrics_schema.get("gates") or []
+    described = [g for g in gates if g.get("description")]
+    if not described:
+        return ""
+    return "\n".join(f"- {g['key']}: {g['description']}" for g in described)
+
+
 def for_executor(proposal: str, goal: str, editable: list[str],
                  frozen: list[str]) -> dict:
     """What the executor sees: the proposal + safety + a goal anchor. No history.

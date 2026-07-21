@@ -139,7 +139,7 @@ def _resolve_metrics(raw: object) -> dict:
         objective:
           key: SPEED_MS          # the key=value line to parse
           lower_is_better: true  # required bool — direction is not guessable
-        gates:                   # optional; list of {key: str}
+        gates:                   # optional; list of {key: str, description?: str}
           - key: CORRECTNESS
 
     The harness never hardcodes SPEED_MS / CORRECTNESS — these are config-declared,
@@ -175,13 +175,19 @@ def _resolve_metrics(raw: object) -> dict:
     for i, g in enumerate(raw_gates):
         if not isinstance(g, dict):
             raise ConfigError(f"eval.metrics.gates[{i}]: must be an object with a 'key' field")
-        g_unknown = set(g) - {"key"}
+        g_unknown = set(g) - {"key", "description"}
         if g_unknown:
             raise ConfigError(f"eval.metrics.gates[{i}]: unknown key(s): {sorted(g_unknown)}")
         gk = g.get("key")
         if not isinstance(gk, str) or not gk.strip():
             raise ConfigError(f"eval.metrics.gates[{i}].key: required non-empty string")
-        gates.append({"key": gk})
+        description = g.get("description")
+        if description is not None and not isinstance(description, str):
+            raise ConfigError(f"eval.metrics.gates[{i}].description: must be a string")
+        gate: dict = {"key": gk}
+        if description and description.strip():
+            gate["description"] = description.strip()
+        gates.append(gate)
 
     return {"objective": {"key": obj_key, "lower_is_better": lower_is_better},
             "gates": gates}

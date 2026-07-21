@@ -129,7 +129,7 @@ def _build_prompt(goal: str, proposal: str, diff: str, eval_block: str,
 
     # ---- raw eval text (still provided for verification of a claim) ---------
     has_eval = bool(eval_block)
-    eval_section = f"""Eval command output (THIS round — raw text, for verifying a specific claim; the parsed metrics above are authoritative, do not read numbers out of this prose):
+    eval_section = f"""Eval command output (THIS round — raw text, for verifying a specific claim):
 {eval_block}
 """ if has_eval else ""
     eval_guidance = (
@@ -146,7 +146,7 @@ def _build_prompt(goal: str, proposal: str, diff: str, eval_block: str,
 
     return f"""You are the JUDGER in a serial optimization loop. Grade this round's change.
 
-Your scope: you see ONE round's diff + metrics. You judge the effect and tag a landing state. You do NOT choose the next direction — you lack the global view (one diff, not the whole direction space) and you do not profile — so leave direction choice to the proposer. Your feedback is a reference for the proposer, not an instruction.
+Your scope: you see ONE round's diff + metrics. You judge the effect and tag a landing state. You do NOT choose the next direction — leave that to the proposer. Your feedback is a reference for the proposer, not an instruction.
 
 Task goal:
 {goal}

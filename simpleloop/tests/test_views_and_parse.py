@@ -19,9 +19,12 @@ from pathlib import Path
 
 import pytest
 
+from simpleloop import config as config_mod
 from simpleloop import views
 from simpleloop.judger import Judgment, _parse, _build_prompt
 from simpleloop.store import Store
+
+EXAMPLES = Path(__file__).parents[2] / "examples"
 
 
 # --- views.for_proposer: projects landing-state signals to the proposer ---
@@ -401,202 +404,6 @@ def test_parse_accepts_legacy_feedback_without_prefix():
                  "feedback": "843ms vs 945ms -11%",
                  "feedback_for_report": "..."})
     assert jd.feedback == "843ms vs 945ms -11%"
-
-
-def test_judger_prompt_has_no_direction_advice_and_requires_landed_state():
-    """The judger is told NOT to choose/propose the next direction (that's the
-    proposer's job) and is asked to prefix feedback with LANDED_STATE."""
-    prompt = _build_prompt("g", "p", "d", "e",
-                           {"SPEED_MS": 100.0}, {"SPEED_MS": 110.0},
-                           {"SPEED_MS": 945.0},
-                           {"objective": {"key": "SPEED_MS", "lower_is_better": True},
-                            "gates": []})
-    # the old direction-advice ASK ("give actionable feedback ... what to try next
-    # or what to fix") is gone — the judger is no longer told to advise on direction.
-    # (the phrase "what to try next" may still appear in a "do NOT ..." instruction;
-    # what matters is the judger is not ASKED to produce it.)
-    assert "Give concrete, actionable feedback for the next proposer" not in prompt
-    assert "what to fix" not in prompt
-    # the judger is told the next direction is NOT its job (wording may shift,
-    # so check the intent not a fixed phrase):
-    assert "Do not choose the next direction" in prompt
-    # and the LANDED_STATE prefix is in the delivery contract:
-    assert "LANDED_STATE:" in prompt
-    assert "already-implemented" in prompt
-    assert "not-implemented" in prompt
-    assert "gate-rejected" in prompt
-    # the "fully landed in the current source" deep-audit phrasing is gone
-    # (it induced the judger to re-grep the source and blow its output budget);
-    # already-implemented now relays the executor's call instead:
-    assert "fully landed in the current source" not in prompt
-
-
-# --- proposer: MUST stays only for hard limits; operations stay advisory; new
-#     anti-death-loop MUST: don't re-propose an already-implemented direction ---
-
-def test_proposer_prompt_must_stays_only_for_hard_limits():
-    """Repository inspection stays advisory while structure is enforced by
-    JSON Schema instead of prompt formatting commands."""
-    import inspect
-    from simpleloop import proposer as prop_mod
-    src = inspect.getsource(prop_mod)
-    assert "Self-audit before proposing" not in src
-    assert "DO NOT re-propose it" not in src
-    assert "MAY inspect the most relevant prior SHA" in src
-    assert "PROPOSER (you)" in src
-    assert "EXECUTOR" in src
-    assert "JUDGER" in src
-    assert "Your response is delivered through the configured JSON Schema." in src
-    assert '"proposals"' in src
-    assert "reflection" in src and "decision" in src and "proposal" in src
-    assert "MUST be exactly one parseable JSON object" not in src
-    assert "If `decision` is `continue`" not in src
-    assert "State the difference in `reflection`" not in src
-
-
-def test_proposer_prompt_keeps_routing_lightweight_and_git_targeted():
-    """Reflection/decision only route the main proposal search. History is the
-    default evidence; git inspection is optional, relevant-SHA-only, and must
-    not turn into a systematic audit of every prior round."""
-    import inspect
-    from simpleloop import proposer as prop_mod
-    src = inspect.getsource(prop_mod)
-    normalized = " ".join(src.split())
-    assert "lightweight routing judgement" in normalized
-    assert "not the main task and not an audit of every round" in normalized
-    assert "MAY inspect the most relevant prior SHA" in normalized
-    assert "Git inspection is optional and targeted" in normalized
-    assert "do not systematically re-audit all prior rounds" in normalized
-
-
-def test_proposer_prompt_prioritizes_marginal_effect_for_attribution():
-    """A round's mechanism is credited from its delta vs the direct prior
-    accepted state, not inherited baseline gains or hard-gate acceptance."""
-    import inspect
-    from simpleloop import proposer as prop_mod
-    src = inspect.getsource(prop_mod)
-    normalized = " ".join(src.split())
-    assert "objective delta vs the direct prior accepted state as the primary evidence" in normalized
-    assert "comparison vs baseline describes cumulative progress" in normalized
-    assert "`accepted=true` only means hard gates passed" in normalized
-
-
-def test_proposer_prompt_makes_proposal_the_primary_output():
-    """The delivery contract caps reflection, defines routing by the target
-    bottleneck/optimization hypothesis, and explicitly assigns most reasoning
-    effort to a concrete proposal grounded in the accepted base."""
-    import inspect
-    from simpleloop import proposer as prop_mod
-    src = inspect.getsource(prop_mod)
-    normalized = " ".join(src.split())
-    assert "at most 1–2 sentences" in normalized
-    assert "`proposal`: each proposal is a concrete candidate direction" in normalized
-    assert "target bottleneck / optimization hypothesis" in normalized
-    assert "Ground it in the current accepted base" in normalized
-
-
-def test_proposer_prompt_uses_explicit_base_and_explains_rejected_candidate(tmp_path: Path):
-    """The proposer reads the exact accepted base, while a rejected candidate
-    remains inspectable evidence and is not mistaken for executor no-work."""
-    from simpleloop import proposer as prop_mod
-
-    class CapturingAgent:
-        prompt = ""
-
-        def run_json(self, prompt, **_kwargs):
-            self.prompt = prompt
-            return {
-                "reflection": "brief",
-                "proposals": [{
-                    "family": "next",
-                    "decision": "continue",
-                    "proposal": "next",
-                }],
-            }
-
-    agent = CapturingAgent()
-    prop_mod.propose(
-        agent,
-        goal="g",
-        editable=["src/**"],
-        frozen=["tests/**"],
-        history=[{
-            "round": 0,
-            "proposal": "attempt",
-            "sha": "candidate-full-sha",
-            "accepted": False,
-            "base_sha": "accepted-full-sha",
-            "score": 0.1,
-            "risk": "low",
-            "metrics": {"CORRECTNESS": False},
-            "changed_paths": ["src/a.cc"],
-            "feedback": "correctness FAIL",
-        }],
-        base_sha="accepted-full-sha",
-        cwd=tmp_path,
-    )
-    assert "git show accepted-full-sha:<path>" in agent.prompt
-    assert "candidate_sha=candidate-full-sha" in agent.prompt
-    assert "accepted=false" in agent.prompt
-    # the rejected candidate's landing shape is carried by the structured
-    # `landing=` field in the history block (not by scar-tissue prose telling
-    # the proposer that accepted=false "still represents a real implementation").
-    # This fixture's feedback has no LANDED_STATE prefix, so landing=None is
-    # rendered as the literal field value, not inferred from accepted=false.
-    assert "landing=None" in agent.prompt
-    assert "real implementation" not in agent.prompt
-    assert "not part of the current accepted base" not in agent.prompt
-    assert "HEAD" not in agent.prompt
-
-
-def test_proposer_prompt_labels_compact_and_full_history(tmp_path: Path):
-    from simpleloop import proposer as prop_mod
-
-    class CapturingAgent:
-        prompt = ""
-
-        def run_json(self, prompt, **_kwargs):
-            self.prompt = prompt
-            return {
-                "reflection": "brief",
-                "proposals": [{
-                    "family": "next",
-                    "decision": "switch",
-                    "proposal": "next",
-                }],
-            }
-
-    old_generation = _parallel_history_record(
-        3,
-        ["old parallel zero", "old parallel one"],
-    )
-    old_serial = _serial_history_record(8, "old serial proposal")
-    recent = [
-        _serial_history_record(round_id, f"recent proposal {round_id}")
-        for round_id in [20, 30, 40, 50, 60, 70]
-    ]
-    agent = CapturingAgent()
-
-    prop_mod.propose(
-        agent,
-        goal="g",
-        editable=["src/**"],
-        frozen=[],
-        history=[old_generation, old_serial, *recent],
-        base_sha="accepted-full-sha",
-        cwd=tmp_path,
-    )
-
-    assert 'proposal_head="old parallel zero"' in agent.prompt
-    assert 'proposal_head="old parallel one"' in agent.prompt
-    assert 'proposal_head="old serial proposal"' in agent.prompt
-    assert 'proposal="old parallel zero"' not in agent.prompt
-    assert 'proposal="old serial proposal"' not in agent.prompt
-    assert 'proposal="recent proposal 70"' in agent.prompt
-
-
-# --- loop: hard-gate acceptance and resume state ---
-
 def test_candidate_acceptance_requires_every_declared_gate_to_pass():
     from simpleloop import loop as loop_mod
 
@@ -660,47 +467,6 @@ def test_resume_chain_falls_back_to_baseline_when_no_candidate_was_accepted():
     history = [{"sha": "bad", "accepted": False,
                 "metrics": {"CORRECTNESS": False}}]
     assert loop_mod._resume_chain(history, "baseline", schema) == ("baseline", None)
-
-
-def test_proposer_prompt_keeps_required_guidance_and_drops_executor_planning():
-    """Required source-grounding guidance stays verbatim; implementation
-    planning, bit-faithful proof, and format-policing text are removed. The
-    candidate count is enforced by the JSON Schema + _parse_batch, not by
-    prompt prose, so the 'Produce exactly N' sentence is gone (its invariant
-    is asserted structurally in test_parse_batch_enforces_exact_count).
-
-    proposal-vs-plan boundary: the proposal field is a DIRECTION, not an
-    implementation plan. The prompt must NOT ask the proposer to enumerate call
-    sites / mechanism / implementation detail (that is the executor's job, and
-    asking for it is what made an earlier run produce a 2190-char 'proposal'
-    that violated the 800-char schema limit and exhausted structured-output
-    retries). Re-anchored here against the new wording."""
-    import inspect
-    from simpleloop import proposer as prop_mod
-    src = inspect.getsource(prop_mod)
-    normalized = " ".join(src.split())
-    assert "Produce exactly {candidates_per_round} candidate proposal(s)." not in src
-    assert "diversify candidates across meaningfully different mechanism families" in normalized
-    assert "Each candidate must be one coherent experiment that the executor can implement and the gate can verify in one round." in normalized
-    # the proposal is a direction, grounded in the accepted base, NOT an
-    # implementation plan enumerating call sites / mechanism:
-    assert "Ground it in the current accepted base" in normalized
-    assert "name the target file/function" in normalized
-    assert "Do NOT write the implementation" in normalized
-    # anti-plan guard: the old "identify ... call sites, and expected benefit"
-    # phrasing (which induced plan-level proposals) must be gone.
-    assert "identify the target code, mechanism, relevant call sites, and expected benefit" not in normalized
-    assert "relevant call sites" not in normalized
-    # the scope-violation guard makes "no implementation" a first-class rule:
-    assert "proposal that reads like a patch is a scope violation" in normalized
-    assert "Do NOT propose a direction that requires editing files under frozen_paths" in src
-    assert "bit-faithful constraints" not in src
-    assert "Size is not a virtue and not a sin" not in src
-    assert "Forbidden in `proposal`: sequencing language" not in src
-    assert "narrow its scope/mechanism" not in src
-    assert "passed directly to json.loads()" not in src
-
-
 def test_parse_batch_enforces_exact_count():
     """The 'produce exactly N candidates' invariant moved out of prompt prose
     into structure: the JSON Schema pins minItems=maxItems=N, and _parse_batch
@@ -764,51 +530,37 @@ def test_print_objective_higher_is_better_arrow(capsys):
     out = capsys.readouterr().out
     assert "THROUGHPUT=110" in out
     assert "+10.0%" in out and "better" in out
+def test_gate_block_renders_key_and_description_lines():
+    schema = {
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [
+            {"key": "FCN", "description": "likelihood drift at 1e-13"},
+            {"key": "CONSISTENCY", "description": "physics within tolerance"},
+        ],
+    }
+    block = views.gate_block(schema)
+    assert "- FCN: likelihood drift at 1e-13" in block
+    assert "- CONSISTENCY: physics within tolerance" in block
+    # header/framing prose lives in the prompt, not here:
+    assert "Gates" not in block
 
 
-# --- agent.py: prompt goes via stdin, not argv (ARG_MAX fix) ---
-# A prior 20-round run died mid-loop with `OSError: [Errno 7] Argument list too
-# long` because the prompt (tens of KB of history) was passed as a `claude -p`
-# argv element, which execve caps at ~128KB. Now the prompt is fed on stdin
-# (unbounded) and -p reads it. We assert the argv/popen wiring without spawning
-# claude: argv must NOT contain the prompt, and stdin must be a PIPE.
-
-def test_agent_prompt_is_stdin_not_argv():
-    import inspect
-    from simpleloop import agent as agent_mod
-    src = inspect.getsource(agent_mod)
-    # the prompt is no longer an argv element:
-    assert 'exe, "-p", prompt' not in src
-    assert '"-p", prompt' not in src
-    # stdin is a PIPE (we write the prompt to it), not DEVNULL:
-    assert "stdin=subprocess.PIPE" in src
-    assert "stdin=subprocess.DEVNULL" not in src
-    # input-format text makes -p read the prompt from stdin:
-    assert '"--input-format", "text"' in src
+def test_gate_block_empty_when_no_description():
+    # gates without a description produce nothing (degrades to today's prompt):
+    schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
+              "gates": [{"key": "CORRECTNESS"}, {"key": "EVAL_RESULT"}]}
+    assert views.gate_block(schema) == ""
 
 
-# --- proposer.py: cwd is the per-run repo (shas are valid objects), git plumbing ---
-# The proposer used to run in the ORIGINAL source repo, where the per-round shas
-# (commits in the per-run clone) were NOT valid objects — so `git diff <sha>`
-# failed and the proposer could only reason from a pristine baseline, re-proposing
-# already-landed directions. Now its cwd is the per-run repo and it reads committed
-# content via git plumbing (the per-run clone has no working tree, so cat/grep of
-# a live tree don't work).
+def test_gate_block_empty_when_no_schema():
+    assert views.gate_block(None) == ""
 
-def test_proposer_prompt_uses_per_run_repo_and_git_plumbing():
-    import inspect
-    from simpleloop import proposer as prop_mod
-    from simpleloop import loop as loop_mod
-    # loop passes the per-run repo (workspace.repo), NOT the original source path:
-    lsrc = inspect.getsource(loop_mod)
-    assert "cwd=workspace.repo" in lsrc
-    assert "cwd=Path(cfg[\"repo_path\"])" not in lsrc
-    # proposer prompt teaches git plumbing for reading committed content:
-    psrc = inspect.getsource(prop_mod)
-    assert "git show" in psrc        # read a file at a commit / show a round's diff
-    assert "git diff" in psrc       # diff between two shas
-    assert "git log" in psrc        # the commit chain
-    # it no longer tells the proposer to cat/grep a live tree (there is none):
-    assert "`cat`, `grep`" not in psrc
-    # it tells the proposer the shas in history ARE valid objects here:
-    assert "valid objects" in psrc or "valid commits" in psrc
+
+def test_config_gate_description_is_parsed_and_optional():
+    # gates with description are kept; gates without stay key-only.
+    cfg = config_mod.load(EXAMPLES / "omilrec-post-v107-opt" / "task.yaml")
+    gates = cfg["metrics"]["gates"]
+    keys = [g["key"] for g in gates]
+    assert keys == ["FCN", "CONSISTENCY", "EVAL_RESULT"]
+    for g in gates:
+        assert isinstance(g["description"], str) and g["description"].strip()

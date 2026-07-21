@@ -70,7 +70,14 @@ eval:
       lower_is_better: true
     gates:
       - key: CORRECTNESS
+        description: >
+          10-event reconstructed output bit-identical (tolerance 0, all 15
+          RecVertex fields) to reference/ref_10evt.root — the strict v1.0.0 gate.
+          Any arithmetic change in the FCN shifts the result and fails it.
       - key: EVAL_RESULT
+        description: >
+          The eval script ran to completion and produced all metrics. Fails on build
+          failure, timeout, or crash before gates could be measured.
 
 source:
   path: ../../../omilrec-v100    # relative to this task.yaml; real git repo at v1.0.0

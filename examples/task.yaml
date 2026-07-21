@@ -60,8 +60,14 @@ eval:
       key: SPEED_MS
       lower_is_better: true
     # gates (optional): pass/fail keys that veto a round regardless of score.
+    # `description` (optional, recommended): one sentence on WHAT the gate
+    # measures and WHAT change makes it fail. The proposer/executor read it
+    # verbatim to judge which optimizations are safe.
     gates:
       - key: CORRECTNESS
+        description: >
+          WHAT this gate measures and WHAT change makes it fail (the proposer and
+          executor read this to decide which optimizations are safe).
 
 source:
   path: ../../path/to/your/repo  # relative to THIS file; must be a git repo

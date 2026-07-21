@@ -34,7 +34,14 @@ eval:
       lower_is_better: true
     gates:
       - key: CORRECTNESS
+        description: >
+          The pytest suite passes. Pair counts must be exactly correct — a change
+          that alters any computed count fails.
       - key: DRIFT
+        description: >
+          Per-call output bit-identical to a frozen reference (scripts/check_drift.py).
+          Any change to op order, accumulation, or control flow that shifts the
+          result fails.
 
 source:
   path: repo

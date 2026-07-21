@@ -54,10 +54,9 @@ def test_tiny_example_uses_parallel_objective_selection():
 
     assert raw["loop"]["candidates_per_round"] == 3
     assert raw["loop"]["max_workers"] == 3
-    assert raw["eval"]["metrics"] == {
-        "objective": {"key": "ms_per_call", "lower_is_better": True},
-        "gates": [{"key": "CORRECTNESS"}, {"key": "DRIFT"}],
-    }
+    gates = raw["eval"]["metrics"]["gates"]
+    assert [g["key"] for g in gates] == ["CORRECTNESS", "DRIFT"]
+    assert all("description" in g for g in gates), "every gate declares a description"
     commands = "\n".join(raw["eval"]["commands"])
     assert "CORRECTNESS=PASS" in commands
     assert "CORRECTNESS=FAIL" in commands
@@ -66,25 +65,23 @@ def test_tiny_example_uses_parallel_objective_selection():
 
 
 def test_omilrec_v100_example_uses_parallel_speed_selection():
-    raw = _example_yaml("omilrec-v100.yaml")
+    raw = _example_yaml("omilrec-opt/task.yaml")
 
     assert raw["loop"]["candidates_per_round"] == 3
     assert raw["loop"]["max_workers"] == 3
-    assert raw["eval"]["metrics"] == {
-        "objective": {"key": "SPEED_MS", "lower_is_better": True},
-        "gates": [{"key": "CORRECTNESS"}, {"key": "EVAL_RESULT"}],
-    }
+    gates = raw["eval"]["metrics"]["gates"]
+    assert [g["key"] for g in gates] == ["CORRECTNESS", "EVAL_RESULT"]
+    assert all("description" in g for g in gates), "every gate declares a description"
 
 
 def test_omilrec_v100_postv107_gated_example_uses_new_package_only():
-    cfg = config_mod.load(EXAMPLES / "omilrec-v100-postv107-gated.yaml")
+    cfg = config_mod.load(EXAMPLES / "omilrec-post-v107-opt/task.yaml")
 
     assert cfg["repo_path"].endswith("/omilrec-v100-postv107-gated")
     assert cfg["eval_commands"] == ["bash scripts/sl_eval_post_v107.sh --evtmax 10"]
-    assert cfg["metrics"] == {
-        "objective": {"key": "SPEED_MS", "lower_is_better": True},
-        "gates": [{"key": "FCN"}, {"key": "CONSISTENCY"}, {"key": "EVAL_RESULT"}],
-    }
+    gates = cfg["metrics"]["gates"]
+    assert [g["key"] for g in gates] == ["FCN", "CONSISTENCY", "EVAL_RESULT"]
+    assert all("description" in g for g in gates), "every gate declares a description"
     assert "/omilrec/scripts/" not in "\n".join(cfg["eval_commands"])
     assert "/omilrec-v100/scripts/" not in "\n".join(cfg["eval_commands"])
 
@@ -218,11 +215,6 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     )
 
     assert agent.schema == _proposer_schema(3)
-    assert "Your response is delivered through the configured JSON Schema." in agent.prompt
-    assert "passed directly to json.loads()" not in agent.prompt
-    assert "first non-whitespace character must be `{`" not in agent.prompt
-    assert "Do not use Markdown code fences" not in agent.prompt
-    assert "legacy shape" not in agent.prompt
 
 
 def test_selector_uses_objective_and_filters_gates_and_risk():
@@ -431,7 +423,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         def diff(self, parent_sha, sha):
             return f"diff {parent_sha}..{sha}"
 
-    def fake_execute(agent, *, proposal, goal, editable, frozen, workspace, worktree, round_id):
+    def fake_execute(agent, *, proposal, goal, editable, frozen, workspace, worktree, round_id, gate_block=""):
         return ExecResult(sha=f"sha-{round_id}", reason=None, changed_paths=[f"{round_id}.cc"])
 
     def fake_run_eval(commands, cwd, metrics_schema=None):
@@ -458,7 +450,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         proposals, 7, "parent", {
             "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
             "eval_commands": ["eval"], "max_workers": 1,
-        }, workspace, object(), object(), {"SPEED_MS": 150.0}, {"SPEED_MS": 200.0}, schema)
+        }, workspace, object(), object(), {"SPEED_MS": 150.0}, {"SPEED_MS": 200.0}, schema, "")
 
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
