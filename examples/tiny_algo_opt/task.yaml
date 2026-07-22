@@ -17,7 +17,7 @@ safety:
     - "pyproject.toml"
 
 loop:
-  max_rounds: 10
+  max_rounds: 3
   candidates_per_round: 3
   max_workers: 3
 

@@ -343,13 +343,13 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     })
     candidates = [
         {"candidate": 0, "family": "hoist", "proposal": "p0", "sha": "a",
-         "score": 0.5, "risk": "low", "feedback": "short0",
-         "feedback_for_report": "Implemented: p0. Result: worse. Analysis: no win.",
+         "score": 0.5, "risk": "low",
+         "feedback": "LANDED_STATE: not-implemented\nImplemented: p0\nResult: worse\nAnalysis: no win.",
          "metrics": {"SPEED_MS": 600.0, "CORRECTNESS": True},
          "changed_paths": ["a.cc"], "accepted": True, "selected": False},
         {"candidate": 1, "family": "layout", "proposal": "p1", "sha": "b",
-         "score": 0.7, "risk": "low", "feedback": "short1",
-         "feedback_for_report": "Implemented: p1. Result: better. Analysis: cache locality.",
+         "score": 0.7, "risk": "low",
+         "feedback": "LANDED_STATE: not-implemented\nImplemented: p1\nResult: better\nAnalysis: cache locality.",
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True},
          "changed_paths": ["b.cc"], "accepted": True, "selected": True},
     ]
@@ -363,7 +363,7 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
 
     projected = views.for_proposer(rows)
     assert projected[0]["selected_sha"] == "b"
-    assert projected[0]["candidates"][0]["feedback_for_report"].startswith("Implemented:")
+    assert "Implemented:" in projected[0]["candidates"][0]["feedback"]
 
 
 def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Path):
@@ -431,8 +431,8 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         return "eval", {"SPEED_MS": 100.0 + cid, "CORRECTNESS": True}
 
     def fake_judge(agent, **kwargs):
-        return Judgment(score=0.5, risk="low", feedback="LANDED_STATE: not-implemented PASS",
-                        feedback_for_report="Implemented: x. Result: y. Analysis: z.")
+        return Judgment(score=0.5, risk="low",
+                        feedback="LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z.")
 
     monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(loop_mod.judger_mod, "run_eval", fake_run_eval)

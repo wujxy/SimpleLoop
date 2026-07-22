@@ -116,7 +116,6 @@ def for_proposer(history: list[dict]) -> list[dict]:
                         "changed_paths": c.get("changed_paths") or [],
                         "landing_state": _landing_state(c.get("feedback", "")),
                         "feedback": c.get("feedback", ""),
-                        "feedback_for_report": c.get("feedback_for_report", ""),
                     }
                     for c in (r.get("candidates") or [])
                 ],
@@ -137,7 +136,6 @@ def for_proposer(history: list[dict]) -> list[dict]:
             "changed_paths": r.get("changed_paths") or [],
             "landing_state": _landing_state(r.get("feedback", "")),
             "feedback": r["feedback"],
-            "feedback_for_report": r.get("feedback_for_report", r.get("feedback", "")),
         })
     return out
 

@@ -142,7 +142,6 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                         f"score={c.get('score')} | risk={c.get('risk','?')} | "
                         f"landing={c.get('landing_state')} | "
                         f"feedback=\"{c.get('feedback','')}\" | "
-                        f"diagnostic=\"{c.get('feedback_for_report','')}\" | "
                         f'{proposal_label}="{proposal_text}"'
                     )
                 hist_lines.append(
@@ -160,7 +159,6 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                     f"changed: {paths_str} | score={r['score']} | risk={r.get('risk','?')} | "
                     f"landing={landing} | "
                     f"feedback=\"{r['feedback']}\" | "
-                    f"diagnostic=\"{r.get('feedback_for_report','')}\" | "
                     f'{proposal_label}="{proposal_text}"'
                 )
         hist_block = "\n".join(hist_lines)

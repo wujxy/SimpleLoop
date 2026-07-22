@@ -64,7 +64,6 @@ class Store:
     def append(self, round_id: int, proposal: str, sha: str | None,
                score: float | None, feedback: str,
                eval_block: str = "",
-               feedback_for_report: str = "",
                eval_metrics: dict | None = None,
                risk: str = "high",
                changed_paths: list[str] | None = None,
@@ -94,11 +93,6 @@ class Store:
         says whether all configured hard gates passed; base_sha is the accepted
         source after this round and therefore the next executor's starting point.
         """
-        # feedback_for_report falls back to the tight `feedback` when omitted
-        # (e.g. a loop-failure record only sets feedback) so the record is never
-        # missing its report field.
-        report = feedback_for_report if (isinstance(feedback_for_report, str)
-                                         and feedback_for_report.strip()) else feedback
         record = {
             "round": round_id,
             "proposal": proposal,
@@ -106,7 +100,6 @@ class Store:
             "score": score,
             "risk": risk,
             "feedback": feedback,
-            "feedback_for_report": report,
             "eval_block": (eval_block or "")[:_HIST_EVAL_CAP],
             "metrics": eval_metrics or {},
             "changed_paths": changed_paths or [],
@@ -134,7 +127,6 @@ class Store:
         """Record a self-loop generation with multiple candidate attempts."""
         normalized = []
         for i, c in enumerate(candidates):
-            report = c.get("feedback_for_report") or c.get("feedback", "")
             normalized.append({
                 "candidate": c.get("candidate", i),
                 "family": c.get("family") or "single",
@@ -144,7 +136,6 @@ class Store:
                 "risk": c.get("risk", "high"),
                 "decision": c.get("decision", ""),
                 "feedback": c.get("feedback", ""),
-                "feedback_for_report": report,
                 "eval_block": (c.get("eval_block") or "")[:_HIST_EVAL_CAP],
                 "metrics": c.get("metrics") or {},
                 "changed_paths": c.get("changed_paths") or [],
@@ -162,7 +153,6 @@ class Store:
             "score": selected.get("score") if selected else 0.0,
             "risk": selected.get("risk", "high") if selected else "high",
             "feedback": selected.get("feedback", "") if selected else "[no selected candidate]",
-            "feedback_for_report": selected.get("feedback_for_report", "") if selected else "[no selected candidate]",
             "metrics": selected.get("metrics", {}) if selected else {},
             "changed_paths": selected.get("changed_paths", []) if selected else [],
             "accepted": bool(selected_sha),
@@ -304,7 +294,7 @@ class Store:
                               f"#### Round {r['round']} candidate {c.get('candidate')}",
                               f"- proposal: {c.get('proposal', '')[:300]}",
                               f"- changed paths: {', '.join(c.get('changed_paths') or []) or '(none)'}",
-                              f"- narrative: {c.get('feedback_for_report') or c.get('feedback', '')}"]
+                              f"- feedback: {c.get('feedback', '')}"]
                 lines.append("")
                 continue
             m = r.get("metrics") or {}
@@ -320,17 +310,13 @@ class Store:
                         parts.append(f"{g['key']}={'PASS' if v is True else 'FAIL' if v is False else '?'}")
                 if parts:
                     metrics_line = f"  metrics: {' '.join(parts)}"
-            # the tight proposer-facing signal as the headline feedback line, then
-            # the full human narrative under it.
-            report_narrative = r.get("feedback_for_report") or r.get("feedback", "")
             lines += [f"### Round {r['round']}",
                       f"- proposal: {r['proposal'][:200]}",
                       f"- candidate sha: `{r['sha']}`  accepted: "
                       f"{r.get('accepted', '?')}  base sha: `{r.get('base_sha', '?')}`",
                       f"- score: {r['score']}  risk: {r.get('risk', '?')}  decision: {r.get('decision', '?')}",
                       metrics_line,
-                      f"- feedback: {r['feedback'][:300]}",
-                      f"- narrative: {report_narrative}",
+                      f"- feedback: {r['feedback']}",
                       f"- reflection: {r.get('reflection', '')}", ""]
         out = self.run_dir / "final_report.md"
         out.write_text("\n".join(lines), encoding="utf-8")

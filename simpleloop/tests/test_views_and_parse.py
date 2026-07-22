@@ -33,19 +33,18 @@ def test_for_proposer_projects_landing_state():
     """The proposer sees full candidate/base SHAs + acceptance state so it can
     self-audit whether a direction is already landed (git diff) and whether its
     payoff is exhausted (metric trend), and tell "sound but didn't land" (low
-    risk + empty) from "latent bug" (high risk). It now sees the concise
-    feedback_for_report diagnostic, but still must NOT see eval_block (raw,
-    noisy, hallucination risk)."""
+    risk + empty) from "latent bug" (high risk). The proposer must NOT see eval_block
+    (raw, noisy, hallucination risk)."""
     history = [
         {"round": 0, "proposal": "p0", "sha": "aaaa1111bbbb2222", "score": 0.7,
          "accepted": True, "base_sha": "aaaa1111bbbb2222",
-         "risk": "low", "feedback": "f0", "feedback_for_report": "r0", "eval_block": "e0",
+         "risk": "low", "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z", "eval_block": "e0",
          "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]},
         {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444", "score": 0.05,
          "accepted": False, "base_sha": "aaaa1111bbbb2222", "risk": "low",
          "feedback": "LANDED_STATE: not-implemented correctness FAIL",
-         "feedback_for_report": "r1", "eval_block": "e1",
+         "eval_block": "e1",
          "metrics": {"CORRECTNESS": False},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]},
     ]
@@ -56,16 +55,15 @@ def test_for_proposer_projects_landing_state():
          "score": 0.7, "risk": "low",
          "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
-         "landing_state": None,
-         "feedback": "f0", "feedback_for_report": "r0"},
+         "landing_state": "not-implemented",
+         "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z"},
         {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444",
          "accepted": False, "base_sha": "aaaa1111bbbb2222",
          "score": 0.05, "risk": "low",
          "metrics": {"CORRECTNESS": False},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
          "landing_state": "not-implemented",
-         "feedback": "LANDED_STATE: not-implemented correctness FAIL",
-         "feedback_for_report": "r1"},
+         "feedback": "LANDED_STATE: not-implemented correctness FAIL"},
     ]
     # belt-and-braces: the noisy/raw fields never leak
     for row in out:
@@ -96,8 +94,7 @@ def _serial_history_record(round_id: int, proposal: str) -> dict:
         "risk": "low",
         "metrics": {"SPEED_MS": 500.0 + round_id},
         "changed_paths": ["src/a.cc"],
-        "feedback": f"feedback-{round_id}",
-        "feedback_for_report": f"diagnostic-{round_id}",
+        "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{round_id}\nResult: y{round_id}\nAnalysis: z{round_id}",
         "eval_block": "raw output",
     }
 
@@ -122,8 +119,7 @@ def _parallel_history_record(round_id: int, proposals: list[str]) -> dict:
                 "risk": "low",
                 "metrics": {"SPEED_MS": 600.0 - candidate_id},
                 "changed_paths": [f"src/c{candidate_id}.cc"],
-                "feedback": f"feedback-{candidate_id}",
-                "feedback_for_report": f"diagnostic-{candidate_id}",
+                "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{candidate_id}\nResult: y{candidate_id}\nAnalysis: z{candidate_id}",
                 "eval_block": "raw output",
             }
             for candidate_id, proposal in enumerate(proposals)
@@ -169,8 +165,7 @@ def test_for_proposer_compacts_old_proposal_without_mutating_history():
     assert projected[0]["score"] == 0.5
     assert projected[0]["risk"] == "low"
     assert projected[0]["changed_paths"] == ["src/a.cc"]
-    assert projected[0]["feedback"] == "feedback-0"
-    assert projected[0]["feedback_for_report"] == "diagnostic-0"
+    assert "LANDED_STATE" in projected[0]["feedback"]
     assert "eval_block" not in projected[0]
     assert history == original
 
@@ -201,7 +196,7 @@ def test_for_proposer_applies_one_window_state_to_all_generation_candidates():
     assert all("proposal" not in c for c in old_candidates)
     assert old_candidates[1]["sha"] == "candidate-10-1"
     assert old_candidates[1]["selected"] is True
-    assert old_candidates[1]["feedback_for_report"] == "diagnostic-1"
+    assert "LANDED_STATE" in old_candidates[1]["feedback"]
     assert all("eval_block" not in c for c in old_candidates)
 
     recent_candidates = projected[-1]["candidates"]
@@ -237,20 +232,18 @@ def test_for_judger_carries_eval_axes_not_history():
 
 def test_parse_four_field_contract():
     jd = _parse({"score": 0.83, "risk": "low",
-                 "feedback": "843ms vs 945ms -11%; next: hoist bins",
-                 "feedback_for_report": "Real measured improvement, correctness intact..."})
+                 "feedback": "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: 843ms vs 945ms -11%\nAnalysis: cache locality improvement"})
     assert isinstance(jd, Judgment)
     assert jd.score == 0.83
     assert jd.risk == "low"
-    assert jd.feedback == "843ms vs 945ms -11%; next: hoist bins"
-    assert jd.feedback_for_report == "Real measured improvement, correctness intact..."
+    assert "LANDED_STATE" in jd.feedback
 
 
 def test_parse_rejects_missing_risk():
     """risk is required for best selection (high-risk rounds never ship).
     Older judger output without risk must fail loudly, not silently default."""
     with pytest.raises(ValueError):
-        _parse({"score": 0.5, "feedback": "short", "feedback_for_report": "y"})
+        _parse({"score": 0.5, "feedback": "short"})
 
 
 def test_parse_rejects_bad_risk():
@@ -258,19 +251,6 @@ def test_parse_rejects_bad_risk():
         _parse({"score": 0.5, "risk": "maybe", "feedback": "x"})
     with pytest.raises(ValueError):
         _parse({"score": 0.5, "risk": "", "feedback": "x"})
-
-
-def test_parse_missing_report_falls_back_to_feedback():
-    """Older judger output (or a judger that ignored the contract) omits
-    feedback_for_report — must fall back to `feedback`, not crash."""
-    jd = _parse({"score": 0.5, "risk": "medium", "feedback": "short"})
-    assert jd.feedback == "short"
-    assert jd.feedback_for_report == "short"
-
-
-def test_parse_empty_report_falls_back():
-    jd = _parse({"score": 0.5, "risk": "low", "feedback": "short", "feedback_for_report": "   "})
-    assert jd.feedback_for_report == "short"
 
 
 def test_parse_rejects_bad_score():
@@ -285,53 +265,30 @@ def test_parse_rejects_empty_feedback():
         _parse({"score": 0.5, "risk": "low", "feedback": "   ", "feedback_for_report": "y"})
 
 
-# --- Store: both feedback fields persisted, final_report uses report (plan Step 3) ---
 
-def test_store_persists_both_feedback_fields(tmp_path: Path):
+# --- Store: single feedback field persisted, final_report uses it ---
+
+def test_store_persists_feedback(tmp_path: Path):
     store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.7, "tight", eval_block="e0",
-                 feedback_for_report="full narrative")
+    store.append(0, "p0", "sha0", 0.7, "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: -10% speed\nAnalysis: cache locality",
+                 eval_block="e0")
     rows = store.history()
     assert len(rows) == 1
-    assert rows[0]["feedback"] == "tight"
-    assert rows[0]["feedback_for_report"] == "full narrative"
+    assert "LANDED_STATE" in rows[0]["feedback"]
+    assert "Implemented:" in rows[0]["feedback"]
     assert rows[0]["eval_block"] == "e0"
 
 
-def test_store_report_fallback_when_omitted(tmp_path: Path):
-    """append called without feedback_for_report (e.g. _record_failure) -> field
-    falls back to feedback so the record is never missing it."""
+def test_final_report_uses_feedback(tmp_path: Path):
     store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.0, "[loop failure] boom", eval_block="")
-    rows = store.history()
-    assert rows[0]["feedback_for_report"] == "[loop failure] boom"
-
-
-def test_final_report_uses_feedback_for_report(tmp_path: Path):
-    store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.7, "tight signal",
-                 eval_block="e", feedback_for_report="the long narrative")
+    store.append(0, "p0", "sha0", 0.7, "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: -10% speed\nAnalysis: cache locality",
+                 eval_block="e")
     report_path = store.write_final_report("goal")
     text = report_path.read_text(encoding="utf-8")
-    assert "the long narrative" in text
-    # the tight proposer-facing signal is the headline feedback line; the full
-    # narrative is carried on its own line so humans get the rich version.
-    assert "- feedback: tight signal" in text
-    assert "- narrative: the long narrative" in text
+    assert "LANDED_STATE" in text
+    assert "Implemented:" in text
+    assert "-10% speed" in text
     assert "![Run progress](progress.png)" in text
-
-
-def test_final_report_falls_back_for_old_records(tmp_path: Path):
-    """A history.jsonl written before the two-field contract (no
-    feedback_for_report key) must still render — final_report falls back to
-    `feedback`."""
-    store = Store(tmp_path)
-    # hand-write an old-shape record directly
-    with store.path.open("w", encoding="utf-8") as f:
-        f.write(json.dumps({"round": 0, "proposal": "p0", "sha": "s", "score": 0.5,
-                            "feedback": "legacy", "eval_block": ""}) + "\n")
-    report_path = store.write_final_report("goal")
-    assert "legacy" in report_path.read_text(encoding="utf-8")
 
 
 # --- Store: changed_paths persisted (landing-state signal for the proposer) ---
@@ -340,8 +297,8 @@ def test_store_persists_changed_paths(tmp_path: Path):
     """append stores changed_paths so the proposer can see what each round
     touched without running git."""
     store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.7, "tight", eval_block="e0",
-                 feedback_for_report="full", changed_paths=["a.cc", "a.h"])
+    store.append(0, "p0", "sha0", 0.7, "LANDED_STATE: not-implemented\nImplemented: precompute\nResult: -5% speed\nAnalysis: good",
+                 eval_block="e0", changed_paths=["a.cc", "a.h"])
     rows = store.history()
     assert rows[0]["changed_paths"] == ["a.cc", "a.h"]
 
