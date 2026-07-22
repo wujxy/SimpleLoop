@@ -34,14 +34,15 @@ The existing batch shape stays unchanged:
 previous evidence -> reflection -> decision -> proposal
 ```
 
-`reflection` is a short, generation-level reading of what history implies for
-the next search. Each candidate's `decision` expresses whether its direction
-continues a promising area or switches elsewhere. Its `proposal` is the
-experiment that follows from that route. The prompt describes these fields as
-one thought rather than three independent summaries.
+`reflection` is the batch-level search rationale: it explains what history
+suggests is worth trying in this generation and why the batch allocates its
+experiments among those directions. Each candidate's `decision` expresses
+whether its direction continues a promising area or switches elsewhere. Its
+`proposal` is the experiment that follows from that route. The prompt describes
+these fields as one thought rather than three independent summaries.
 
-Because one reflection is shared by a multi-candidate batch, it establishes the
-overall search reasoning; it is not required to separately prove every
+Because one reflection is shared by a multi-candidate batch, it is neither one
+global continue/switch verdict nor a requirement to separately prove every
 candidate's route or enumerate every target.
 
 ## Prompt content retained
@@ -93,6 +94,11 @@ The proposal description remains naturally actionable: identify a real code
 area, a plausible waste, a broad mechanism, why it may help, and a one-round
 scope, while leaving concrete design choices to the executor.
 
+The role boundary also supplies the natural stopping condition: the executor
+needs a grounded direction rather than a finished investigation. Once the
+executor has enough to take over, the proposer returns the batch instead of
+continuing to improve the completeness of its investigation.
+
 ## Tests
 
 Prompt-level tests will assert that the rendered prompt:
@@ -105,4 +111,3 @@ Prompt-level tests will assert that the rendered prompt:
 6. does not contain the old over-exploration triggers such as
    `highest-value`, `stalled/exhausted`, or invitations to self-audit every
    historical SHA.
-

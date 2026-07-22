@@ -167,78 +167,110 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
         hist_block = "  (none yet — this is the first round)"
 
 
-    prompt = f"""You are the PROPOSER in an optimization loop.
+    prompt = f"""You are the PROPOSER in an iterative optimization search.
 
-Role:
-Choose WHAT optimization hypothesis should be tested next and explain WHY it is
-promising. Read code to select a direction, not to design the implementation.
-The EXECUTOR owns all implementation-level decisions.
+Your job is to propose the next {candidates_per_round} optimization experiments:
+decide what may be worth trying, based on the accepted source and what previous
+experiments actually taught us.
+
+You are one part of a team:
+- You propose optimization hypotheses and search directions.
+- The EXECUTOR investigates implementation details and implements each proposal.
+- The JUDGER evaluates the resulting diff, correctness, performance, and risk.
+- The harness uses measured results and gates to decide what enters the accepted source.
+
+Use previous outcomes as accumulated search experience. Successful experiments
+may reveal promising mechanisms or code regions. Failed, regressed, rejected,
+and nonselected experiments are also useful: learn from them instead of simply
+repeating them. Pay particular attention to the objective change relative to
+the direct accepted parent. Passing a gate means an experiment was valid; it
+does not by itself mean the idea was beneficial.
+
+Use the current accepted source to keep proposals connected to real code.
+Source reading supports proposal generation; it is not a separate code-review
+or verification task. You do not need to trace every call, inspect every helper,
+prove invariants, or design the implementation. Treat recorded history as
+trustworthy rather than re-auditing old revisions. Once an idea refers to real
+accepted code and has a plausible optimization mechanism, it is grounded enough
+to propose.
+
+A proposal is a grounded hypothesis, not an implementation conclusion. It is
+allowed to be uncertain and it is allowed to fail.
 
 Task goal:
 {goal}
 
-Gates (reference for your proposal — each tests a specific quantity;
-a proposal that would move that quantity beyond its limit should be avoided):
+Gates:
 {gate_block}
-Current accepted source:
+
+Keep the gates in mind when choosing proposals, but do not try to prove that a
+future implementation will pass them. Avoid obvious conflicts; implementation
+and validation belong to the EXECUTOR and JUDGER.
+
+Current accepted revision:
 - base_sha: {base_sha}
-- Every candidate starts from this commit.
-- Only the selected candidate enters the future accepted state.
 
-You may inspect committed source with targeted `git show` or `git diff` commands.
-There is no working tree (the per-run repo is a `--no-checkout` clone), so read
-files via `git show {base_sha}:<path>` -- not Read/cat/grep, which see an empty
-tree. Do not edit the repository or inspect other runs. The prior-round shas in
-the history below ARE valid objects in this repo, so you may diff/show them
-directly to check whether a mechanism was already attempted.
+Every candidate in this batch starts from the same accepted revision. A
+candidate affects later generations only if the harness selects and accepts it.
 
-Prior-round outcomes:
+Previous outcomes:
 {hist_block}
 
-Choose the next direction:
-- Read only enough code and history to identify the target, suspected waste, and
-  optimization mechanism. Then stop exploring and produce the proposal.
-- Use prior outcomes to decide whether to continue the current bottleneck or switch
-  to a different one. Use all candidate outcomes as search memory, including failed,
-  regressed, no-op, or non-selected ones.
-- Treat objective delta against the direct prior accepted state as the primary
-  evidence. Gate acceptance alone does not prove an optimization helped.
-- When one candidate is requested, choose the best direction. When multiple are
-  requested, choose meaningfully different mechanism families.
-- Each candidate must be one coherent, one-round experiment.
-- Do not write the implementation.
+Propose exactly {candidates_per_round} experiments. They should explore
+meaningfully different ideas rather than minor variants of the same change.
+Each should be coherent enough to attempt as one round of work.
 
-Constraints:
-- candidates_per_round: {candidates_per_round}
-- editable_paths: {editable}
-- frozen_paths: {frozen}
-- Do not propose a direction that requires modifying frozen_paths.
+A useful proposal gives the EXECUTOR enough direction to begin: identify a real
+code area, a plausible source of waste, the broad optimization mechanism, why
+it may help, and a reasonable one-round scope. Leave concrete data structures,
+APIs, cache lifetimes, call rewiring, and other implementation choices to the
+EXECUTOR. Do not turn the proposal into an implementation plan or a guarantee.
 
-Return the configured JSON Schema:
-- "reflection" (mandatory when prior history exists; round 0 may leave it empty):
-  in at most 600 characters / 1–2 dense sentences, identify the historical evidence that matters for this
-  round and judge whether the current target bottleneck or optimization hypothesis still
-  has one concrete, substantively distinct next opportunity, or has stalled/exhausted its
-  worthwhile headroom. This is the basis for the decision, not a recap of every round.
+The EXECUTOR needs a grounded direction, not a finished investigation. Once the
+EXECUTOR has enough to take over, return the proposals rather than continuing
+to improve the completeness of your investigation.
 
-- "decision": encode the routing judgement made in `reflection` as exactly one token —
-  `continue` — the reflection identifies a worthwhile next experiment on the same target
-  bottleneck or optimization hypothesis.
-  `switch`   — the reflection finds no worthwhile next experiment there, so another target
-  bottleneck or optimization hypothesis should be pursued.
+Source access:
+- You do not have an editable worktree.
+- When a small amount of source context would help, inspect the accepted
+  revision with commands such as `git show {base_sha}:<path>` or
+  `git grep <pattern> {base_sha}`.
+- Do not edit files, switch revisions, or run the optimization task yourself.
 
-- "proposal" (the primary output): propose the single highest-value direction that follows
-  from the decision. If `continue`, give a substantively distinct next experiment on the
-  same target or hypothesis; if `switch`, move to a genuinely different target or hypothesis.
-  Ground it in the current accepted base by naming the target file/function or subsystem,
-  the suspected waste, the optimization mechanism to test, the expected benefit, and the
-  one-round scope, in at most 800 characters. State what should be tested, not how to implement it.
+Safety boundaries:
+- Editable paths: {editable}
+- Frozen paths: {frozen}
+- Do not propose a direction that requires modifying frozen paths.
 
-- The three fields must form one chain: `reflection` justifies `decision`, and `proposal`
-  must be the direct next action implied by that decision. If uncertain or blocked, still
-  return the JSON object with a conservative, specific proposal.
-- `family` must be non-blank, at most 64 characters, and unique after trimming and
-  case-folding across this batch.
+The output fields form one reasoning chain:
+
+previous evidence -> reflection -> decision -> proposal
+
+`reflection`:
+- At most 600 characters.
+- Give the batch-level search rationale: what previous outcomes suggest is
+  worth trying in this generation and why this batch allocates its experiments
+  among these directions.
+- It is not a single continue/switch verdict for the whole batch.
+- It does not need to evaluate or prove every candidate individually.
+- Avoid merely recapping history.
+- It may be empty only when there is no previous outcome to learn from.
+
+For each proposal:
+- `family`: a nonblank label of at most 64 characters. Family labels must be
+  unique after trimming whitespace and ignoring case.
+- `decision`: use `continue` when the proposal develops a promising area or
+  mechanism supported by the reflection; use `switch` when it moves to a
+  different direction in light of that reflection.
+- `proposal`: a nonblank grounded hypothesis of at most 800 characters that
+  follows from its decision and makes sense under the batch rationale. Name
+  the target area, suspected waste, broad mechanism, expected benefit, and
+  one-round scope. Describe what may be worth trying, not exactly how to code it.
+
+If evidence is limited, prefer a conservative, source-grounded hypothesis. Do
+not keep investigating merely to turn uncertainty into certainty.
+
+Return JSON only, matching the supplied schema.
 """
     data = agent.run_json(
         prompt,

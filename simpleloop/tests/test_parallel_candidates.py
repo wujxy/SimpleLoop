@@ -260,6 +260,23 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     )
 
     assert agent.schema == _proposer_schema(3)
+    prompt = " ".join(agent.prompt.split())
+    assert "grounded hypothesis, not an implementation conclusion" in prompt
+    assert "The EXECUTOR investigates implementation details" in prompt
+    assert "The JUDGER evaluates the resulting diff" in prompt
+    assert "previous evidence -> reflection -> decision -> proposal" in prompt
+    assert "batch-level search rationale" in prompt
+    assert "not a single continue/switch verdict for the whole batch" in prompt
+    assert "Once the EXECUTOR has enough to take over" in prompt
+    assert "objective change relative to the direct accepted parent" in prompt
+    assert "git show base-sha:<path>" in prompt
+    assert "Propose exactly 3 experiments" in prompt
+    assert "At most 600 characters" in prompt
+    assert "at most 64 characters" in prompt
+    assert "at most 800 characters" in prompt
+    assert "highest-value" not in prompt
+    assert "stalled/exhausted" not in prompt
+    assert "check whether a mechanism was already attempted" not in prompt
 
 
 def test_selector_uses_objective_and_filters_gates_and_risk():
