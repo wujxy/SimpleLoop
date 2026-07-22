@@ -1,8 +1,8 @@
 """Per-role projection functions.
 
 The store holds the full raw record per round:
-    {round, proposal, sha, score, risk, feedback, feedback_for_report,
-     eval_block, metrics, changed_paths}
+    {round, proposal, sha, score, risk, feedback, eval_block, metrics,
+     changed_paths}
 
 Each role sees only the fields it should, via these projections. The store stays
 the single source of truth (full record, for the judger's prior/baseline eval

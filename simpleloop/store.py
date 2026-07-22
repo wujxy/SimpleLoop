@@ -1,7 +1,7 @@
 """History store: append-only JSONL of each round + best tracking.
 
 Each round records {round, proposal, sha, accepted, base_sha, score, risk,
-feedback, feedback_for_report, eval_block, metrics}. `sha` is the attempted
+feedback, eval_block, metrics}. `sha` is the attempted
 candidate; `base_sha` is the accepted cumulative source after that round. The
 best commit is selected by the HARNESS, by the real objective metric — NOT by
 the judger's subjective 0-1 score. This is the fix for

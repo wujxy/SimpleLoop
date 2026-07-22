@@ -88,6 +88,7 @@ def _proposer_schema(candidates_per_round: int) -> dict:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 64,
+                            "pattern": r"\S",
                         },
                         "decision": {
                             "type": "string",
@@ -97,6 +98,7 @@ def _proposer_schema(candidates_per_round: int) -> dict:
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 800,
+                            "pattern": r"\S",
                         },
                     },
                 },
@@ -111,9 +113,8 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             gate_block: str = "") -> ProposalBatch:
     """Return ProposalBatch for the next round."""
     # Project history through the proposer's view: this strips eval_block (the
-    # judger's axis — the judger summarizes it into `feedback` for us) and
-    # feedback_for_report (human-facing detail). The proposer only sees each
-    # prior round's proposal + score + tight feedback.
+    # judger's axis — the judger summarizes it into `feedback` for us). The
+    # proposer only sees each prior round's proposal + score + tight feedback.
     visible = views.for_proposer(history)
     if visible:
         hist_lines = []
@@ -215,7 +216,7 @@ Constraints:
 
 Return the configured JSON Schema:
 - "reflection" (mandatory when prior history exists; round 0 may leave it empty):
-  in at most 1–2 dense sentences, identify the historical evidence that matters for this
+  in at most 600 characters / 1–2 dense sentences, identify the historical evidence that matters for this
   round and judge whether the current target bottleneck or optimization hypothesis still
   has one concrete, substantively distinct next opportunity, or has stalled/exhausted its
   worthwhile headroom. This is the basis for the decision, not a recap of every round.
@@ -231,11 +232,13 @@ Return the configured JSON Schema:
   same target or hypothesis; if `switch`, move to a genuinely different target or hypothesis.
   Ground it in the current accepted base by naming the target file/function or subsystem,
   the suspected waste, the optimization mechanism to test, the expected benefit, and the
-  one-round scope. State what should be tested, not how to implement it.
+  one-round scope, in at most 800 characters. State what should be tested, not how to implement it.
 
 - The three fields must form one chain: `reflection` justifies `decision`, and `proposal`
   must be the direct next action implied by that decision. If uncertain or blocked, still
   return the JSON object with a conservative, specific proposal.
+- `family` must be non-blank, at most 64 characters, and unique after trimming and
+  case-folding across this batch.
 """
     data = agent.run_json(
         prompt,
@@ -261,7 +264,7 @@ def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
     reflection = data.get("reflection")
     if not isinstance(reflection, str):
         raise ValueError("reflection must be a string")
-    reflection = reflection.strip()
+    reflection = reflection.strip()[:900]
 
     raw_proposals = data.get("proposals")
     if not isinstance(raw_proposals, list):
@@ -286,6 +289,8 @@ def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
         if not isinstance(family, str) or not family.strip():
             raise ValueError(f"proposals[{i}].family must be a non-empty string")
         family = family.strip()
+        if len(family) > 64:
+            raise ValueError(f"proposals[{i}].family must be at most 64 characters")
         family_key = family.casefold()
         if family_key in seen_families:
             raise ValueError(f"proposals[{i}] has duplicate family: {family}")
@@ -302,7 +307,7 @@ def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
                 f"proposals[{i}].proposal must be a non-empty string")
 
         proposals.append(Proposal(
-            proposal=proposal.strip(),
+            proposal=proposal.strip()[:1100],
             decision=decision,
             reflection=reflection,
             family=family,

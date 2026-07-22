@@ -100,6 +100,11 @@ def test_proposer_schema_requires_exact_candidate_count():
     assert proposals["maxItems"] == 3
     assert schema["required"] == ["reflection", "proposals"]
     assert schema["additionalProperties"] is False
+    assert schema["properties"]["reflection"]["maxLength"] == 600
+    item_properties = proposals["items"]["properties"]
+    assert item_properties["proposal"]["maxLength"] == 800
+    assert item_properties["proposal"]["pattern"] == r"\S"
+    assert item_properties["family"]["pattern"] == r"\S"
 
 
 def test_proposer_schema_uses_batch_shape_when_k_is_one():
@@ -130,6 +135,22 @@ def test_parse_batch_accepts_new_shape():
     )
     assert [p.family for p in batch.proposals] == ["layout", "hoist"]
     assert [p.proposal for p in batch.proposals] == ["p0", "p1"]
+
+
+def test_parse_batch_truncates_free_text_at_generation_limit_plus_300():
+    reflection = "r" * 901
+    proposal = "p" * 1101
+    batch = _parse_batch(
+        {
+            "reflection": reflection,
+            "proposals": [
+                {"family": "layout", "decision": "switch", "proposal": proposal},
+            ],
+        },
+        candidates_per_round=1,
+    )
+    assert batch.reflection == reflection[:900]
+    assert batch.proposals[0].proposal == proposal[:1100]
 
 
 def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
@@ -179,6 +200,30 @@ def test_parse_batch_rejects_invalid_decision():
                 "reflection": "r",
                 "proposals": [
                     {"family": "layout", "decision": "maybe", "proposal": "p0"},
+                ],
+            },
+            candidates_per_round=1,
+        )
+
+
+def test_parse_batch_rejects_family_above_schema_limit():
+    valid = _parse_batch(
+        {
+            "reflection": "",
+            "proposals": [
+                {"family": "f" * 64, "decision": "switch", "proposal": "p"},
+            ],
+        },
+        candidates_per_round=1,
+    )
+    assert valid.proposals[0].family == "f" * 64
+
+    with pytest.raises(ValueError, match="at most 64"):
+        _parse_batch(
+            {
+                "reflection": "",
+                "proposals": [
+                    {"family": "f" * 65, "decision": "switch", "proposal": "p"},
                 ],
             },
             candidates_per_round=1,
@@ -430,7 +475,10 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         cid = int(str(cwd).rsplit("c", 1)[-1])
         return "eval", {"SPEED_MS": 100.0 + cid, "CORRECTNESS": True}
 
+    judger_labels = []
+
     def fake_judge(agent, **kwargs):
+        judger_labels.append(kwargs["label"])
         return Judgment(score=0.5, risk="low",
                         feedback="LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z.")
 
@@ -454,7 +502,60 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
 
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
+    assert judger_labels == ["judger r7-c0", "judger r7-c1", "judger r7-c2"]
     assert _select_winner(candidates, schema)["candidate"] == 0
+
+
+def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path, capsys):
+    class FakeWorkspace:
+        def add_worktree(self, round_id, parent_sha):
+            return tmp_path / str(round_id)
+
+        def remove_worktree(self, round_id):
+            pass
+
+        def diff(self, parent_sha, sha):
+            return "diff"
+
+    def fake_execute(*_args, **_kwargs):
+        return ExecResult(sha="candidate", reason=None, changed_paths=["a.cc"])
+
+    def fake_judge(*_args, **_kwargs):
+        raise ValueError("bad structured feedback")
+
+    monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
+    monkeypatch.setattr(loop_mod.judger_mod, "judge", fake_judge)
+
+    candidates = _run_candidates(
+        [Proposal(proposal="p0", family="f0")], 2, "parent", {
+            "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
+            "eval_commands": [], "max_workers": 1,
+        }, FakeWorkspace(), object(), object(), {}, {}, None, "")
+
+    assert candidates[0]["score"] == 0.0
+    assert "candidate r2-c0 failed: bad structured feedback" in capsys.readouterr().out
+
+
+def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
+    def fail_worker(candidate_id, *_args, **_kwargs):
+        raise RuntimeError(f"worker {candidate_id} exploded")
+
+    monkeypatch.setattr(loop_mod, "_run_one_candidate", fail_worker)
+    candidates = _run_candidates(
+        [
+            Proposal(proposal="p0", family="f0"),
+            Proposal(proposal="p1", family="f1"),
+        ],
+        3,
+        "parent",
+        {"max_workers": 2},
+        object(), object(), object(), {}, {}, None, "",
+    )
+
+    assert [candidate["score"] for candidate in candidates] == [0.0, 0.0]
+    out = capsys.readouterr().out
+    assert "candidate r3-c0 worker failed: worker 0 exploded" in out
+    assert "candidate r3-c1 worker failed: worker 1 exploded" in out
 
 
 def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):

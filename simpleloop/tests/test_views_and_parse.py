@@ -2,7 +2,7 @@
 
 These do NOT spawn the claude agent — they test the pure pieces:
   - views.for_proposer projects sha/metrics/changed_paths (landing-state signals)
-    while still excluding eval_block / feedback_for_report
+    while still excluding eval_block
   - views.for_executor / for_judger carry only their role's fields
   - judger._parse handles the four-field contract + the missing-report fallback
     (LANDED_STATE prefix is a feedback-string convention, not a parsed field)
@@ -21,7 +21,7 @@ import pytest
 
 from simpleloop import config as config_mod
 from simpleloop import views
-from simpleloop.judger import Judgment, _parse, _build_prompt
+from simpleloop.judger import Judgment, _parse, _build_prompt, _judger_schema, judge
 from simpleloop.store import Store
 
 EXAMPLES = Path(__file__).parents[2] / "examples"
@@ -255,14 +255,80 @@ def test_parse_rejects_bad_risk():
 
 def test_parse_rejects_bad_score():
     with pytest.raises(ValueError):
-        _parse({"score": 1.5, "risk": "low", "feedback": "x", "feedback_for_report": "y"})
+        _parse({"score": 1.5, "risk": "low", "feedback": "x"})
     with pytest.raises(ValueError):
         _parse({"score": "nan", "risk": "low", "feedback": "x"})
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"score": 0.5, "risk": "low", "feedback": "x", "extra": 1},
+        {"score": "0.5", "risk": "low", "feedback": "x"},
+        {"score": True, "risk": "low", "feedback": "x"},
+        {"score": 0.5, "risk": 1, "feedback": "x"},
+    ],
+)
+def test_parse_rejects_values_outside_exact_schema_contract(data):
+    with pytest.raises(ValueError):
+        _parse(data)
+
+
 def test_parse_rejects_empty_feedback():
     with pytest.raises(ValueError):
-        _parse({"score": 0.5, "risk": "low", "feedback": "   ", "feedback_for_report": "y"})
+        _parse({"score": 0.5, "risk": "low", "feedback": "   "})
+
+
+def test_judger_schema_uses_requested_feedback_limit():
+    schema = _judger_schema()
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["score", "risk", "feedback"]
+    assert schema["properties"]["score"] == {
+        "type": "number", "minimum": 0.0, "maximum": 1.0,
+    }
+    assert schema["properties"]["risk"]["enum"] == ["low", "medium", "high"]
+    assert schema["properties"]["feedback"]["maxLength"] == 500
+    assert schema["properties"]["feedback"]["pattern"] == r"\S"
+
+
+def test_judge_passes_schema_and_custom_label(tmp_path: Path):
+    class CapturingAgent:
+        schema = None
+        label = None
+
+        def run_json(self, _prompt, *, json_schema=None, label=None, **_kwargs):
+            self.schema = json_schema
+            self.label = label
+            return {"score": 0.5, "risk": "low", "feedback": "useful"}
+
+    agent = CapturingAgent()
+    judgment = judge(
+        agent,
+        goal="g",
+        proposal="p",
+        sha=None,
+        reason="no change",
+        parent_sha="base",
+        workspace=None,
+        eval_block="",
+        cwd=tmp_path,
+        label="judger r1-c0",
+    )
+
+    assert judgment.feedback == "useful"
+    assert agent.schema == _judger_schema()
+    assert agent.label == "judger r1-c0"
+
+
+def test_parse_accepts_feedback_through_tolerance_limit():
+    feedback = "x" * 800
+    assert _parse({"score": 0.5, "risk": "low", "feedback": feedback}).feedback == feedback
+
+
+def test_parse_truncates_feedback_above_tolerance_limit():
+    feedback = "x" * 801
+    judgment = _parse({"score": 0.5, "risk": "low", "feedback": feedback})
+    assert judgment.feedback == feedback[:800]
 
 
 
@@ -347,8 +413,7 @@ def test_parse_accepts_landed_state_prefixed_feedback():
     as any other feedback string — the prefix is a convention the proposer reads,
     not a field _parse extracts."""
     jd = _parse({"score": 0.05, "risk": "low",
-                 "feedback": "LANDED_STATE: already-implemented empty diff, 459.3ms",
-                 "feedback_for_report": "executor found the direction already landed..."})
+                 "feedback": "LANDED_STATE: already-implemented empty diff, 459.3ms"})
     assert jd.score == 0.05
     assert jd.risk == "low"
     assert jd.feedback == "LANDED_STATE: already-implemented empty diff, 459.3ms"
@@ -358,8 +423,7 @@ def test_parse_accepts_legacy_feedback_without_prefix():
     """Backward compat: older rounds' feedback (no LANDED_STATE prefix) still
     parses — _parse never looked at the prefix, and it must keep not looking."""
     jd = _parse({"score": 0.83, "risk": "low",
-                 "feedback": "843ms vs 945ms -11%",
-                 "feedback_for_report": "..."})
+                 "feedback": "843ms vs 945ms -11%"})
     assert jd.feedback == "843ms vs 945ms -11%"
 def test_candidate_acceptance_requires_every_declared_gate_to_pass():
     from simpleloop import loop as loop_mod

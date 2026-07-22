@@ -415,6 +415,8 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
                 # Last-resort guard: candidate failures should stay local and not
                 # kill the whole generation.
                 p = proposals[i]
+                print(f"[{stamp()}] candidate r{round_id}-c{i} worker failed: {exc}",
+                      flush=True)
                 results[i] = _candidate_failure(
                     i, p, f"candidate worker failed: {exc}", parent_sha)
     return [r for r in results if r is not None]
@@ -466,6 +468,7 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
             workspace=workspace, eval_block=eval_block, cwd=worktree,
             metrics=eval_metrics, prior_metrics=prior_metrics,
             baseline_metrics=baseline_metrics, metrics_schema=metrics_schema,
+            label=f"judger r{round_id}-c{candidate_id}",
         )
         print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
               f"score={judgment.score:.2f} risk={judgment.risk} "
@@ -487,6 +490,8 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
             "selected": False,
         }
     except (AgentError, ValueError) as exc:
+        print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} failed: {exc}",
+              flush=True)
         changed_paths = result.changed_paths if result else []
         sha = result.sha if result else None
         return _candidate_failure(candidate_id, proposal, str(exc), parent_sha,

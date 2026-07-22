@@ -27,8 +27,7 @@ When there's no SHA (gate rejected / no change), the judger is still called but
 shown the rejection reason instead of a diff, and asked for a low score + feedback
 telling the proposer to avoid that direction.
 
-Delivers: {"score": 0.0-1.0, "risk": "low"|"medium"|"high", "feedback": "...",
-           "feedback_for_report": "..."}.
+Delivers: {"score": 0.0-1.0, "risk": "low"|"medium"|"high", "feedback": "..."}.
 `feedback` begins with a `LANDED_STATE: <already-implemented|not-implemented|
 gate-rejected>` tag so the proposer can self-audit whether a direction is already
 landed without guessing from prose. The judger does NOT propose the next
@@ -53,14 +52,41 @@ class Judgment:
     feedback: str                  # 300-500 chars: four-part diagnostic for proposer + final report
 
 
+def _judger_schema() -> dict:
+    """Strict generation contract; parser tolerates feedback up to 800 chars."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["score", "risk", "feedback"],
+        "properties": {
+            "score": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+            "risk": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+            },
+            "feedback": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "pattern": r"\S",
+            },
+        },
+    }
+
+
 def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
           reason: str | None, parent_sha: str, workspace: Workspace,
           eval_block: str, cwd: Path,
           metrics: dict | None = None,
           prior_metrics: dict | None = None,
           baseline_metrics: dict | None = None,
-          metrics_schema: dict | None = None) -> Judgment:
-    """Grade one round. Returns Judgment(score, risk, feedback, feedback_for_report).
+          metrics_schema: dict | None = None,
+          label: str = "judger") -> Judgment:
+    """Grade one round. Returns Judgment(score, risk, feedback).
 
     eval_block is the harness-run eval output (run in the worktree before this
     call). metrics/prior_metrics/baseline_metrics are the harness-parsed
@@ -80,7 +106,12 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
 
     prompt = _build_prompt(goal, proposal, diff, eval_block,
                            metrics, prior_metrics, baseline_metrics, metrics_schema)
-    data = agent.run_json(prompt, cwd=cwd, label="judger")
+    data = agent.run_json(
+        prompt,
+        cwd=cwd,
+        label=label,
+        json_schema=_judger_schema(),
+    )
     return _parse(data)
 
 
@@ -169,7 +200,7 @@ Judging guidance:
 - Judge whether the change moves toward the goal, achieves real improvement, introduces risk, and is good-quality code.
 {eval_guidance}{facts_guidance}- Penalize unsupported claims, regressions vs the prior round, and changes that break a gate.
 - Give objective facts about what landed, how it measured, and why it behaved that way. Do not choose the next direction.
-- `risk` is your read of the refactor's LATENT correctness risk (not the measured speed - the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-faithful move with the same operators/evaluation order/types. Be concrete in feedback_for_report about WHY the risk level.
+- `risk` is your read of the refactor's LATENT correctness risk (not the measured speed - the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-faithful move with the same operators/evaluation order/types. Be concrete in feedback about WHY the risk level.
 
 Final delivery contract (mandatory):
 - Your final response MUST be exactly one parseable JSON object with three keys:
@@ -224,21 +255,24 @@ def _delta_line(key: str, axis: str, this, other, lower_is_better: bool) -> str:
 
 
 def _parse(data: dict) -> Judgment:
-    try:
-        score = float(data.get("score"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"judger 'score' must be a number 0-1: {data}") from exc
+    if not isinstance(data, dict) or set(data) != {"score", "risk", "feedback"}:
+        raise ValueError(
+            "judger response must contain only score, risk, and feedback")
+    raw_score = data["score"]
+    if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+        raise ValueError(f"judger 'score' must be a number 0-1: {data}")
+    score = float(raw_score)
     if not 0.0 <= score <= 1.0:
         raise ValueError(f"judger 'score' out of range [0,1]: {score}")
-    risk = str(data.get("risk", "")).strip().lower()
+    risk = data["risk"]
+    if not isinstance(risk, str):
+        raise ValueError(f"judger 'risk' must be low|medium|high, got: {risk!r}")
     if risk not in ("low", "medium", "high"):
-        raise ValueError(f"judger 'risk' must be low|medium|high, got: {data.get('risk')!r}")
-    feedback = data.get("feedback")
+        raise ValueError(f"judger 'risk' must be low|medium|high, got: {risk!r}")
+    feedback = data["feedback"]
     if not isinstance(feedback, str) or not feedback.strip():
         raise ValueError(f"judger 'feedback' must be a non-empty string (300-500 chars, four-part): {data}")
-    if len(feedback) > 600:
-        raise ValueError(f"judger 'feedback' too long (max 600 chars), got {len(feedback)} chars")
-    return Judgment(score=score, risk=risk, feedback=feedback.strip())
+    return Judgment(score=score, risk=risk, feedback=feedback.strip()[:800])
 
 
 def run_eval(commands: list[str], cwd: Path,
