@@ -45,6 +45,10 @@ from .agent import Agent
 from .workspace import Workspace
 
 
+_STRUCTURED_TEXT_MARGIN = 300
+_FEEDBACK_GENERATION_LIMIT = 500
+
+
 @dataclass
 class Judgment:
     score: float
@@ -53,7 +57,7 @@ class Judgment:
 
 
 def _judger_schema() -> dict:
-    """Strict generation contract; parser tolerates feedback up to 800 chars."""
+    """Keep strict structure while accepting N+300 feedback headroom."""
     return {
         "type": "object",
         "additionalProperties": False,
@@ -71,7 +75,7 @@ def _judger_schema() -> dict:
             "feedback": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 500,
+                "maxLength": _FEEDBACK_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
                 "pattern": r"\S",
             },
         },
@@ -272,7 +276,13 @@ def _parse(data: dict) -> Judgment:
     feedback = data["feedback"]
     if not isinstance(feedback, str) or not feedback.strip():
         raise ValueError(f"judger 'feedback' must be a non-empty string (300-500 chars, four-part): {data}")
-    return Judgment(score=score, risk=risk, feedback=feedback.strip()[:800])
+    return Judgment(
+        score=score,
+        risk=risk,
+        feedback=feedback.strip()[
+            :_FEEDBACK_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN
+        ],
+    )
 
 
 def run_eval(commands: list[str], cwd: Path,

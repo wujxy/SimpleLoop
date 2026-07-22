@@ -93,16 +93,17 @@ def test_config_parallel_rejects_invalid_values(tmp_path: Path, field: str, valu
         config_mod.load(_write_config(tmp_path, {field: value}))
 
 
-def test_proposer_schema_requires_exact_candidate_count():
+def test_proposer_schema_uses_generation_limit_plus_margin_and_exact_count():
     schema = _proposer_schema(3)
     proposals = schema["properties"]["proposals"]
     assert proposals["minItems"] == 3
     assert proposals["maxItems"] == 3
     assert schema["required"] == ["reflection", "proposals"]
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["reflection"]["maxLength"] == 600
+    assert schema["properties"]["reflection"]["maxLength"] == 900
     item_properties = proposals["items"]["properties"]
-    assert item_properties["proposal"]["maxLength"] == 800
+    assert item_properties["proposal"]["maxLength"] == 1100
+    assert item_properties["family"]["maxLength"] == 364
     assert item_properties["proposal"]["pattern"] == r"\S"
     assert item_properties["family"]["pattern"] == r"\S"
 
@@ -137,20 +138,22 @@ def test_parse_batch_accepts_new_shape():
     assert [p.proposal for p in batch.proposals] == ["p0", "p1"]
 
 
-def test_parse_batch_truncates_free_text_at_generation_limit_plus_300():
+def test_parse_batch_truncates_all_free_text_at_generation_limit_plus_300():
     reflection = "r" * 901
     proposal = "p" * 1101
+    family = "f" * 365
     batch = _parse_batch(
         {
             "reflection": reflection,
             "proposals": [
-                {"family": "layout", "decision": "switch", "proposal": proposal},
+                {"family": family, "decision": "switch", "proposal": proposal},
             ],
         },
         candidates_per_round=1,
     )
     assert batch.reflection == reflection[:900]
     assert batch.proposals[0].proposal == proposal[:1100]
+    assert batch.proposals[0].family == family[:364]
 
 
 def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
@@ -206,30 +209,6 @@ def test_parse_batch_rejects_invalid_decision():
         )
 
 
-def test_parse_batch_rejects_family_above_schema_limit():
-    valid = _parse_batch(
-        {
-            "reflection": "",
-            "proposals": [
-                {"family": "f" * 64, "decision": "switch", "proposal": "p"},
-            ],
-        },
-        candidates_per_round=1,
-    )
-    assert valid.proposals[0].family == "f" * 64
-
-    with pytest.raises(ValueError, match="at most 64"):
-        _parse_batch(
-            {
-                "reflection": "",
-                "proposals": [
-                    {"family": "f" * 65, "decision": "switch", "proposal": "p"},
-                ],
-            },
-            candidates_per_round=1,
-        )
-
-
 def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     class CapturingAgent:
         prompt = ""
@@ -239,16 +218,16 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
             self.prompt = prompt
             self.schema = json_schema
             return {
-                "reflection": "",
+                "reflection": "r" * 900,
                 "proposals": [
-                    {"family": "one", "decision": "switch", "proposal": "p1"},
-                    {"family": "two", "decision": "switch", "proposal": "p2"},
-                    {"family": "three", "decision": "switch", "proposal": "p3"},
+                    {"family": "a" * 364, "decision": "switch", "proposal": "p" * 1100},
+                    {"family": "b" * 364, "decision": "switch", "proposal": "q" * 1100},
+                    {"family": "c" * 364, "decision": "switch", "proposal": "s" * 1100},
                 ],
             }
 
     agent = CapturingAgent()
-    propose(
+    batch = propose(
         agent,
         goal="make it faster",
         editable=["src/**"],
@@ -260,6 +239,9 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     )
 
     assert agent.schema == _proposer_schema(3)
+    assert len(batch.reflection) == 900
+    assert [len(item.family) for item in batch.proposals] == [364, 364, 364]
+    assert [len(item.proposal) for item in batch.proposals] == [1100, 1100, 1100]
     prompt = " ".join(agent.prompt.split())
     assert "grounded hypothesis, not an implementation conclusion" in prompt
     assert "The EXECUTOR investigates implementation details" in prompt

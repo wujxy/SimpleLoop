@@ -279,7 +279,7 @@ def test_parse_rejects_empty_feedback():
         _parse({"score": 0.5, "risk": "low", "feedback": "   "})
 
 
-def test_judger_schema_uses_requested_feedback_limit():
+def test_judger_schema_uses_generation_limit_plus_margin():
     schema = _judger_schema()
     assert schema["additionalProperties"] is False
     assert schema["required"] == ["score", "risk", "feedback"]
@@ -287,7 +287,7 @@ def test_judger_schema_uses_requested_feedback_limit():
         "type": "number", "minimum": 0.0, "maximum": 1.0,
     }
     assert schema["properties"]["risk"]["enum"] == ["low", "medium", "high"]
-    assert schema["properties"]["feedback"]["maxLength"] == 500
+    assert schema["properties"]["feedback"]["maxLength"] == 800
     assert schema["properties"]["feedback"]["pattern"] == r"\S"
 
 
@@ -295,11 +295,13 @@ def test_judge_passes_schema_and_custom_label(tmp_path: Path):
     class CapturingAgent:
         schema = None
         label = None
+        prompt = None
 
-        def run_json(self, _prompt, *, json_schema=None, label=None, **_kwargs):
+        def run_json(self, prompt, *, json_schema=None, label=None, **_kwargs):
+            self.prompt = prompt
             self.schema = json_schema
             self.label = label
-            return {"score": 0.5, "risk": "low", "feedback": "useful"}
+            return {"score": 0.5, "risk": "low", "feedback": "x" * 800}
 
     agent = CapturingAgent()
     judgment = judge(
@@ -315,8 +317,9 @@ def test_judge_passes_schema_and_custom_label(tmp_path: Path):
         label="judger r1-c0",
     )
 
-    assert judgment.feedback == "useful"
+    assert judgment.feedback == "x" * 800
     assert agent.schema == _judger_schema()
+    assert '"feedback": "<300-500 chars, four-part>"' in agent.prompt
     assert agent.label == "judger r1-c0"
 
 
