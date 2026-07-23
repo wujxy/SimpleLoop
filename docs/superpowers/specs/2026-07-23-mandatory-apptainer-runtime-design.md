@@ -317,8 +317,10 @@ From: almalinux:9
     claude --version
 ```
 
-The definition file is user-maintained and version-controlled. SimpleLoop does
-not generate it or infer project dependencies.
+Definition files are version-controlled. SimpleLoop does not generate them or
+infer project dependencies. User projects maintain their own definition; the
+repository also ships maintained definitions for its examples as described
+below.
 
 ## 10. SIF Build Shortcut
 
@@ -357,7 +359,75 @@ then streams Apptainer output and returns its exit status. It does not:
 - overwrite an existing SIF silently; or
 - build an image as an implicit part of `simpleloop run`.
 
-## 11. Logging and Errors
+## 11. Example Definition Files
+
+The repository ships four independent, regular definition files:
+
+```text
+examples/apptainer.def
+examples/tiny_algo_opt/apptainer.def
+examples/omilrec-opt/apptainer.def
+examples/omilrec-post-v107-opt/apptainer.def
+```
+
+They are real files rather than symlinks. Each example directory remains
+self-contained when copied out of the SimpleLoop repository, and each
+definition may evolve with its task without changing another example.
+
+### 11.1 Root template
+
+`examples/apptainer.def` is the generic reference template. It uses an
+AlmaLinux 9 base and installs the common SimpleLoop payload:
+
+- Bash, Git, GCC, G++, Make, CMake, and basic command-line utilities;
+- Python 3, pip, and pytest for the generic Python evaluation shown in
+  `examples/task.yaml`; and
+- pinned Node.js and Claude Code.
+
+Its comments explain that large task resources belong in `runtime.binds`, not
+in the SIF. Its `%test` checks the installed base tools only.
+
+### 11.2 Tiny algorithm definition
+
+`examples/tiny_algo_opt/apptainer.def` is independently buildable and includes
+the common payload plus the Python/pytest dependencies needed by its
+correctness, drift, and benchmark commands. It does not copy the toy repository
+into the image; the run-directory bind supplies the cloned candidate worktree.
+
+### 11.3 OMILREC definitions
+
+`examples/omilrec-opt/apptainer.def` and
+`examples/omilrec-post-v107-opt/apptainer.def` are independent files with the
+same initial JUNO-compatible AlmaLinux 9 tool base. They do not copy JUNO,
+reconstruction maps, inputs, fixtures, or source packages into the image.
+Those remain external and are exposed at their unchanged paths through the
+example task config's `/cvmfs`, `/data/juno`, and project-storage binds.
+
+The two files may initially have identical package lists, but remain separate
+because the tasks have different source packages, gates, and likely future
+runtime needs.
+
+### 11.4 Example commands and configs
+
+Every example README shows its local build command:
+
+```bash
+simpleloop image build examples/apptainer.def
+simpleloop image build examples/tiny_algo_opt/apptainer.def
+simpleloop image build examples/omilrec-opt/apptainer.def
+simpleloop image build examples/omilrec-post-v107-opt/apptainer.def
+```
+
+The default output is the adjacent `apptainer.sif`. Each runnable example
+config uses that relative image path in its required `runtime` block. The root
+`examples/task.yaml` reference template uses `apptainer.sif` beside itself.
+
+Generated `*.sif` files are ignored by Git and are never committed. Example
+READMEs list required external binds and explain that a user may point
+`runtime.image` at one shared prebuilt SIF instead of building every example
+image separately.
+
+## 12. Logging and Errors
 
 At run startup, SimpleLoop prints one concise runtime block:
 
@@ -382,10 +452,12 @@ User-facing failure classes are:
 Errors include the failing payload command without printing secrets or the
 complete host environment.
 
-## 12. Compatibility and Migration
+## 13. Compatibility and Migration
 
-Host execution is removed. Every example config must gain a `runtime` block,
-including the tiny algorithm examples.
+Host execution is removed. Every example config gains a `runtime` block,
+including the generic reference template and tiny algorithm example. Every
+current runnable example directory gains its independent `apptainer.def`, while
+the `examples/` root gains the generic definition template.
 
 Old configs fail validation with a direct message explaining the required
 fields. Continuing an old run is supported only after adding a runtime block to
@@ -396,7 +468,7 @@ temporary environment-variable escape hatch and no automatic host fallback,
 because either would preserve the dual runtime behavior the design is intended
 to eliminate.
 
-## 13. Testing
+## 14. Testing
 
 Unit tests mock process execution and cover:
 
@@ -443,10 +515,21 @@ Unit tests mock process execution and cover:
   overwrite;
 - `apptainer build --fakeroot` argv and exit-code propagation.
 
+### Example assets
+
+- the root and all three current example directories contain regular
+  `apptainer.def` files rather than symlinks;
+- every definition pins Claude Code and declares the required base tools;
+- the tiny definition includes its Python test dependencies;
+- both OMILREC definitions omit JUNO data and document external binds;
+- each example config references its adjacent default SIF;
+- every example README contains the corresponding image-build command; and
+- generated SIF files are ignored by Git.
+
 An optional local smoke test may use a small prebuilt image, but normal unit
 tests and CI do not build a SIF or require Apptainer.
 
-## 14. Explicitly Out of Scope
+## 15. Explicitly Out of Scope
 
 The MVP does not include:
 
@@ -457,13 +540,14 @@ The MVP does not include:
 - user-configured Apptainer flags;
 - arbitrary environment-variable passthrough;
 - GPU flags, resource limits, or network namespaces;
-- image generation, registries, signing, cache management, or provenance;
+- automatic definition generation, registries, signing, cache management, or
+  provenance;
 - per-role images; or
 - security-sandbox claims.
 
 These can be reconsidered only after concrete usage demonstrates a need.
 
-## 15. Success Criteria
+## 16. Success Criteria
 
 The feature is complete when:
 
@@ -478,3 +562,5 @@ The feature is complete when:
 6. Host-side Git gating and commits continue to work.
 7. A user can build a version-controlled definition into a SIF with the
    `simpleloop image build` shortcut.
+8. The generic template and all three current example directories ship
+   independent, buildable definition files and documented build commands.
