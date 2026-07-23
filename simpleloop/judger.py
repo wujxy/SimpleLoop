@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import Agent, normalize_free_text
+from .runtime import ApptainerRuntime
 from .workspace import Workspace
 
 
@@ -57,6 +58,19 @@ class Judgment:
     risk: str                      # low|medium|high - latent-correctness risk of the refactor
     feedback: str                  # 300-500 chars: four-part diagnostic for proposer + final report
     feedback_for_proposer: str     # concise mechanism-level search context
+
+
+@dataclass(frozen=True)
+class EvalResult:
+    """Captured harness output, parsed metrics, and per-command statuses."""
+
+    text: str
+    metrics: dict
+    returncodes: tuple[int, ...]
+
+    @property
+    def commands_ok(self) -> bool:
+        return all(code == 0 for code in self.returncodes)
 
 
 def _judger_schema() -> dict:
@@ -321,14 +335,20 @@ def _parse(data: dict, *, label: str = "judger") -> Judgment:
     )
 
 
-def run_eval(commands: list[str], cwd: Path,
-             metrics_schema: dict | None = None) -> tuple[str, dict]:
+def run_eval(
+    commands: list[str],
+    cwd: Path,
+    runtime: ApptainerRuntime,
+    metrics_schema: dict | None = None,
+) -> EvalResult:
     _OUT_CAP = 16000
     blocks: list[str] = []
     full_text: list[str] = []
+    returncodes: list[int] = []
     for cmd in commands:
+        argv = runtime.exec_argv(["bash", "-lc", cmd], cwd=cwd)
         completed = subprocess.run(
-            cmd, shell=True, cwd=str(cwd),
+            argv, shell=False, cwd=str(cwd), env=runtime.subprocess_env(),
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=600, check=False,
         )
@@ -338,10 +358,11 @@ def run_eval(commands: list[str], cwd: Path,
         body = out if out else err
         blocks.append(f"$ {cmd}  [{status}]\n{body[:_OUT_CAP]}")
         full_text.append(body)
+        returncodes.append(completed.returncode)
     text = "\n\n".join(blocks)
     combined = "\n".join(full_text)
     metrics = _parse_metrics(combined, metrics_schema) if metrics_schema else {}
-    return text, metrics
+    return EvalResult(text, metrics, tuple(returncodes))
 
 
 def _parse_metrics(text: str, schema: dict | None) -> dict:

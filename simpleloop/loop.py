@@ -225,7 +225,9 @@ def run(config_path: str | Path, run_dir: str | Path,
             candidates = _run_candidates(
                 proposals_batch, round_id, parent_sha, cfg, workspace,
                 executor_agent, judger_agent, prior_metrics, baseline_metrics,
-                metrics_schema, gate_lines, telemetry,
+                metrics_schema, gate_lines,
+                runtime=executor_agent.runtime,
+                telemetry=telemetry,
             )
             winner = _select_winner(
                 candidates,
@@ -294,8 +296,14 @@ def run(config_path: str | Path, run_dir: str | Path,
         eval_metrics: dict = {}
         if result.sha and cfg["eval_commands"]:
             try:
-                eval_block, eval_metrics = judger_mod.run_eval(
-                    cfg["eval_commands"], cwd=worktree, metrics_schema=metrics_schema)
+                eval_result = judger_mod.run_eval(
+                    cfg["eval_commands"],
+                    cwd=worktree,
+                    runtime=executor_agent.runtime,
+                    metrics_schema=metrics_schema,
+                )
+                eval_block = eval_result.text
+                eval_metrics = eval_result.metrics
             except Exception as exc:  # timeout or subprocess error
                 eval_block = f"(eval failed to run: {exc})"
                 print(f"[{stamp()}] eval error: {exc}", flush=True)
@@ -432,6 +440,7 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
                     executor_agent: Agent, judger_agent: Agent,
                     prior_metrics: dict, baseline_metrics: dict,
                     metrics_schema: dict | None, gate_lines: str,
+                    runtime,
                     telemetry: RunTelemetry | None = None) -> list[dict]:
     """Run one generation's candidates, possibly concurrently."""
     max_workers = min(cfg.get("max_workers", 1), max(1, len(proposals)))
@@ -441,7 +450,7 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
             candidate = _run_one_candidate(
                 i, proposal, round_id, parent_sha, cfg, workspace,
                 executor_agent, judger_agent, prior_metrics,
-                baseline_metrics, metrics_schema, gate_lines,
+                baseline_metrics, metrics_schema, gate_lines, runtime,
             )
             candidate["telemetry"] = (
                 telemetry.snapshot(persist=True) if telemetry else {}
@@ -453,7 +462,7 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
         futures = {
             pool.submit(_run_one_candidate, i, proposal, round_id, parent_sha, cfg,
                         workspace, executor_agent, judger_agent, prior_metrics,
-                        baseline_metrics, metrics_schema, gate_lines): i
+                        baseline_metrics, metrics_schema, gate_lines, runtime): i
             for i, proposal in enumerate(proposals)
         }
         for future in as_completed(futures):
@@ -479,7 +488,8 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
                        workspace: Workspace, executor_agent: Agent,
                        judger_agent: Agent, prior_metrics: dict,
                        baseline_metrics: dict,
-                       metrics_schema: dict | None, gate_lines: str) -> dict:
+                       metrics_schema: dict | None, gate_lines: str,
+                       runtime) -> dict:
     """Executor + eval + judger for one candidate."""
     worktree_id = f"{round_id}-c{candidate_id}"
     worktree = None
@@ -506,9 +516,14 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
                   f"{result.reason}", flush=True)
         if result.sha and cfg["eval_commands"]:
             try:
-                eval_block, eval_metrics = judger_mod.run_eval(
-                    cfg["eval_commands"], cwd=worktree,
-                    metrics_schema=metrics_schema)
+                eval_result = judger_mod.run_eval(
+                    cfg["eval_commands"],
+                    cwd=worktree,
+                    runtime=runtime,
+                    metrics_schema=metrics_schema,
+                )
+                eval_block = eval_result.text
+                eval_metrics = eval_result.metrics
             except Exception as exc:
                 eval_block = f"(eval failed to run: {exc})"
                 print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "

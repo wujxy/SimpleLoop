@@ -12,7 +12,7 @@ from simpleloop import memory as memory_mod
 from simpleloop import views
 from simpleloop.agent import Agent, AgentError, AgentResult
 from simpleloop.executor import ExecResult
-from simpleloop.judger import Judgment, _parse as parse_judgment
+from simpleloop.judger import EvalResult, Judgment, _parse as parse_judgment
 from simpleloop.loop import _run_candidates, _select_winner
 from simpleloop.proposer import Proposal, ProposalBatch
 from simpleloop.proposer import _parse_batch
@@ -656,9 +656,13 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
     def fake_execute(agent, *, proposal, goal, editable, frozen, workspace, worktree, round_id, gate_block=""):
         return ExecResult(sha=f"sha-{round_id}", reason=None, changed_paths=[f"{round_id}.cc"])
 
-    def fake_run_eval(commands, cwd, metrics_schema=None):
+    def fake_run_eval(commands, cwd, runtime, metrics_schema=None):
         cid = int(str(cwd).rsplit("c", 1)[-1])
-        return "eval", {"SPEED_MS": 100.0 + cid, "CORRECTNESS": True}
+        return EvalResult(
+            "eval",
+            {"SPEED_MS": 100.0 + cid, "CORRECTNESS": True},
+            (0,),
+        )
 
     judger_labels = []
 
@@ -684,7 +688,9 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         proposals, 7, "parent", {
             "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
             "eval_commands": ["eval"], "max_workers": 1,
-        }, workspace, object(), object(), {"SPEED_MS": 150.0}, {"SPEED_MS": 200.0}, schema, "")
+        }, workspace, object(), object(), {"SPEED_MS": 150.0},
+        {"SPEED_MS": 200.0}, schema, "", object(),
+    )
 
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
@@ -721,7 +727,8 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
         [Proposal(proposal="p0", family="f0")], 2, "parent", {
             "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
             "eval_commands": [], "max_workers": 1,
-        }, FakeWorkspace(), object(), object(), {}, {}, None, "")
+        }, FakeWorkspace(), object(), object(), {}, {}, None, "", object(),
+    )
 
     assert candidates[0]["score"] == 0.0
     assert candidates[0]["feedback_for_proposer"] == (
@@ -745,7 +752,7 @@ def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
         3,
         "parent",
         {"max_workers": 2},
-        object(), object(), object(), {}, {}, None, "",
+        object(), object(), object(), {}, {}, None, "", object(),
     )
 
     assert [candidate["score"] for candidate in candidates] == [0.0, 0.0]
@@ -838,7 +845,7 @@ def _run_insight_integration(
 
     class FakeAgent:
         def __init__(self, **_kwargs):
-            pass
+            self.runtime = object()
 
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):

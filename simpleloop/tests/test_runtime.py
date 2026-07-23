@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from simpleloop import config as config_mod
+from simpleloop import judger as judger_mod
 from simpleloop import runtime as runtime_mod
 from simpleloop.runtime import ApptainerRuntime, RuntimePreflightError
 
@@ -420,3 +421,73 @@ def test_runtime_summary_does_not_include_environment_values(
     assert str(runtime.image) in summary
     assert str(runtime.run_dir) in summary
     assert "top-secret" not in summary
+
+
+def test_run_eval_wraps_bash_lc_and_parses_metrics(
+    monkeypatch,
+    tmp_path: Path,
+):
+    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            "SPEED_MS=12.5\nCORRECTNESS=PASS\n",
+            "",
+        )
+
+    monkeypatch.setattr(judger_mod.subprocess, "run", fake_run)
+    schema = {
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [{"key": "CORRECTNESS"}],
+    }
+
+    result = judger_mod.run_eval(
+        ["bash scripts/eval.sh --evtmax 10"],
+        tmp_path,
+        runtime,
+        schema,
+    )
+
+    assert seen["argv"][-3:] == [
+        "bash",
+        "-lc",
+        "bash scripts/eval.sh --evtmax 10",
+    ]
+    assert seen["kwargs"]["shell"] is False
+    assert seen["kwargs"]["env"] == runtime.subprocess_env()
+    assert result.returncodes == (0,)
+    assert result.metrics == {
+        "SPEED_MS": 12.5,
+        "CORRECTNESS": True,
+    }
+    assert "[OK]" in result.text
+
+
+def test_run_eval_records_each_nonzero_status(monkeypatch, tmp_path: Path):
+    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    results = iter(
+        [
+            subprocess.CompletedProcess([], 0, "first", ""),
+            subprocess.CompletedProcess([], 9, "", "second failed"),
+        ]
+    )
+    monkeypatch.setattr(
+        judger_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: next(results),
+    )
+
+    result = judger_mod.run_eval(
+        ["first", "second"],
+        tmp_path,
+        runtime,
+    )
+
+    assert result.returncodes == (0, 9)
+    assert result.commands_ok is False
+    assert "[EXIT 9]" in result.text
