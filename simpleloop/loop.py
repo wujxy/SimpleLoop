@@ -30,6 +30,7 @@ from .agent import Agent, AgentError
 from . import config as config_mod
 from . import executor as executor_mod
 from . import judger as judger_mod
+from . import memory as memory_mod
 from . import plot as plot_mod
 from . import proposer as proposer_mod
 from . import views
@@ -99,6 +100,7 @@ def run(config_path: str | Path, run_dir: str | Path,
         editable=cfg["editable_paths"],
     )
     store = Store(run_dir_path, metrics_schema=cfg.get("metrics"))
+    insights_path = run_dir_path / "insights.jsonl"
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
     workspace.setup()
@@ -186,10 +188,12 @@ def run(config_path: str | Path, run_dir: str | Path,
             reflection, decision = "", "static"  # static mode: no proposer reflection
             print(f"[{stamp()}] proposal (static): {proposal[:150]}", flush=True)
         else:
+            history = store.history()
+            insights = memory_mod.load_insights(insights_path)
             try:
                 proposal_obj = proposer_mod.propose(
                     proposer_agent, goal=cfg["goal"], editable=cfg["editable_paths"],
-                    frozen=cfg["frozen_paths"], history=store.history(),
+                    frozen=cfg["frozen_paths"], history=history, insights=insights,
                     base_sha=parent_sha, cwd=workspace.repo,
                     candidates_per_round=cfg.get("candidates_per_round", 1),
                     gate_block=gate_lines,
@@ -199,6 +203,15 @@ def run(config_path: str | Path, run_dir: str | Path,
                 print(f"[{stamp()}] proposer failed; aborting run: {exc}", flush=True)
                 raise
             proposals_batch = proposal_obj.proposals
+            pending_insight = None
+            try:
+                pending_insight = memory_mod.validate_insight(
+                    proposal_obj.insight,
+                    proposal_obj.insight_refs,
+                    history,
+                )
+            except ValueError as exc:
+                print(f"[{stamp()}] insight skipped: {exc}", flush=True)
             reflection = proposal_obj.reflection
             print(f"[{stamp()}] proposals: {len(proposals_batch)} candidate(s)",
                   flush=True)
@@ -232,6 +245,11 @@ def run(config_path: str | Path, run_dir: str | Path,
                 selected_candidate=selected_candidate, selected_sha=selected_sha,
                 candidates=candidates, reflection=reflection,
             )
+            if pending_insight is not None:
+                insight_text, insight_refs = pending_insight
+                memory_mod.append_insight(
+                    insights_path, round_id, insight_text, insight_refs,
+                )
             _refresh_progress_plot(store)
             parent_sha = next_base_sha
             continue

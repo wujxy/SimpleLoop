@@ -8,12 +8,13 @@ import yaml
 
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
+from simpleloop import memory as memory_mod
 from simpleloop import views
 from simpleloop.agent import Agent, AgentError, AgentResult
 from simpleloop.executor import ExecResult
 from simpleloop.judger import Judgment
 from simpleloop.loop import _run_candidates, _select_winner
-from simpleloop.proposer import Proposal
+from simpleloop.proposer import Proposal, ProposalBatch
 from simpleloop.proposer import _parse_batch
 from simpleloop.proposer import _proposer_schema
 from simpleloop.proposer import propose
@@ -628,6 +629,196 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
             label="proposer",
             json_schema={"type": "object"},
         )
+
+def _run_insight_integration(
+    monkeypatch, tmp_path, *, insight, refs, existing_insights=None,
+    corrupt_insights=False, proposer_calls=None,
+):
+    run_dir = tmp_path / "run"
+    seed = Store(run_dir)
+    seed.append_generation(
+        0,
+        parent_sha="baseline-sha",
+        selected_candidate=0,
+        selected_sha="seed-sha",
+        candidates=[{
+            "candidate": 0,
+            "family": "seed",
+            "proposal": "seed proposal",
+            "sha": "seed-sha",
+            "score": 0.5,
+            "risk": "low",
+            "feedback": "seed feedback",
+            "accepted": True,
+        }],
+    )
+    insights_path = run_dir / "insights.jsonl"
+    for record in existing_insights or []:
+        memory_mod.append_insight(
+            insights_path,
+            int(record["id"][1:]),
+            record["text"],
+            record["refs"],
+        )
+    if corrupt_insights:
+        insights_path.write_text("{not-json\n", encoding="utf-8")
+    cfg = {
+        "goal": "go faster",
+        "editable_paths": ["src/**"],
+        "frozen_paths": [],
+        "max_rounds": 2,
+        "candidates_per_round": 1,
+        "max_workers": 1,
+        "agent_timeout_seconds": 10,
+        "metrics": None,
+        "repo_path": tmp_path / "source",
+        "baseline_ref": "HEAD",
+        "eval_commands": [],
+    }
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeWorkspace:
+        def __init__(self, *, run_dir, **_kwargs):
+            self.run_dir = run_dir
+            self.repo = run_dir / "repo"
+
+        def setup(self):
+            self.repo.mkdir(parents=True, exist_ok=True)
+
+        def baseline_sha(self):
+            return "baseline-sha"
+
+    executed = []
+
+    def fake_propose(*_args, **kwargs):
+        if proposer_calls is not None:
+            proposer_calls.append(True)
+        assert kwargs["insights"] == (existing_insights or [])
+        assert [row["round"] for row in kwargs["history"]] == [0]
+        return ProposalBatch(
+            reflection="historical result narrows the useful mechanism",
+            insight=insight,
+            insight_refs=refs,
+            proposals=[Proposal(
+                family="layout",
+                decision="continue",
+                proposal="test another sparse gather",
+            )],
+        )
+
+    def fake_run_candidates(*_args, **_kwargs):
+        executed.append(True)
+        return [{
+            "candidate": 0,
+            "family": "layout",
+            "decision": "continue",
+            "proposal": "test another sparse gather",
+            "sha": None,
+            "score": 0.0,
+            "risk": "high",
+            "feedback": "no improvement",
+            "accepted": False,
+        }]
+
+    monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
+    monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(loop_mod, "_eval_baseline", lambda *_args: ("", {}))
+    monkeypatch.setattr(loop_mod.proposer_mod, "propose", fake_propose)
+    monkeypatch.setattr(loop_mod, "_run_candidates", fake_run_candidates)
+    monkeypatch.setattr(loop_mod, "_select_winner", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop_mod, "_refresh_progress_plot", lambda *_args: None)
+
+    loop_mod.run("config.yaml", run_dir, continue_run=True)
+    return run_dir, executed
+
+
+def test_run_persists_valid_insight_after_generation(monkeypatch, tmp_path):
+    run_dir, executed = _run_insight_integration(
+        monkeypatch,
+        tmp_path,
+        insight="Sparse gathers benefit from packing.",
+        refs=["r0c0"],
+    )
+
+    assert executed == [True]
+    assert json.loads((run_dir / "insights.jsonl").read_text()) == {
+        "id": "I1",
+        "text": "Sparse gathers benefit from packing.",
+        "refs": ["r0c0"],
+    }
+    assert [row["round"] for row in Store(run_dir).history()] == [0, 1]
+
+
+def test_run_skips_invalid_insight_without_skipping_generation(
+    monkeypatch, tmp_path, capsys
+):
+    run_dir, executed = _run_insight_integration(
+        monkeypatch,
+        tmp_path,
+        insight="Unsupported lesson.",
+        refs=["r99c0"],
+    )
+
+    assert executed == [True]
+    assert not (run_dir / "insights.jsonl").exists()
+    assert [row["round"] for row in Store(run_dir).history()] == [0, 1]
+    output = capsys.readouterr().out
+    assert "insight skipped: memory reference not found: r99c0" in output
+
+
+def test_continue_loads_existing_insights(monkeypatch, tmp_path):
+    existing = [{
+        "id": "I0",
+        "text": "The seed established a reusable constraint.",
+        "refs": ["r0c0"],
+    }]
+    run_dir, executed = _run_insight_integration(
+        monkeypatch,
+        tmp_path,
+        insight="",
+        refs=[],
+        existing_insights=existing,
+    )
+
+    assert executed == [True]
+    assert memory_mod.load_insights(run_dir / "insights.jsonl") == existing
+
+
+def test_existing_identical_round_insight_is_idempotent(monkeypatch, tmp_path):
+    existing = [{
+        "id": "I1",
+        "text": "Sparse gathers benefit from packing.",
+        "refs": ["r0c0"],
+    }]
+    run_dir, executed = _run_insight_integration(
+        monkeypatch,
+        tmp_path,
+        insight=existing[0]["text"],
+        refs=existing[0]["refs"],
+        existing_insights=existing,
+    )
+
+    assert executed == [True]
+    assert memory_mod.load_insights(run_dir / "insights.jsonl") == existing
+
+
+def test_corrupt_insights_abort_before_proposer(monkeypatch, tmp_path):
+    proposer_calls = []
+    with pytest.raises(ValueError, match="could not read insight memory"):
+        _run_insight_integration(
+            monkeypatch,
+            tmp_path,
+            insight="",
+            refs=[],
+            corrupt_insights=True,
+            proposer_calls=proposer_calls,
+        )
+
+    assert proposer_calls == []
 
 
 def test_run_aborts_before_executor_when_proposer_contract_fails(
