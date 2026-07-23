@@ -4,6 +4,7 @@ import math
 
 from simpleloop import loop as loop_mod
 from simpleloop import plot as plot_mod
+from simpleloop.judger import _parse as parse_judgment
 from simpleloop.plot import build_series
 from simpleloop.store import Store
 
@@ -267,18 +268,30 @@ def test_record_failure_refreshes_progress_plot(monkeypatch, tmp_path):
     refreshed = []
     monkeypatch.setattr(loop_mod, "_refresh_progress_plot", refreshed.append)
 
-    loop_mod._record_failure(
-        store,
-        round_id=0,
-        proposal="proposal",
-        reason="executor failed",
-        base_sha="base",
-    )
+    try:
+        parse_judgment({
+            "score": 0.5,
+            "risk": "low",
+            "feedback": "FULL_TECHNICAL_SENTINEL",
+            "feedback_for_proposer": "",
+        })
+    except ValueError as exc:
+        loop_mod._record_failure(
+            store,
+            round_id=0,
+            proposal="proposal",
+            reason="judger failed: " + str(exc),
+            base_sha="base",
+        )
 
     assert refreshed == [store]
     history = store.history()
     assert len(history) == 1
-    assert history[0]["feedback_for_proposer"] == "[loop failure] executor failed"
+    assert history[0]["feedback_for_proposer"] == (
+        "[loop failure] round failed before a usable result was produced"
+    )
+    assert "FULL_TECHNICAL_SENTINEL" not in history[0]["feedback_for_proposer"]
+    assert "FULL_TECHNICAL_SENTINEL" in history[0]["feedback"]
 
 
 def test_noop_continue_refreshes_plot_and_report(monkeypatch, tmp_path):

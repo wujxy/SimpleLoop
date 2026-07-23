@@ -397,12 +397,15 @@ def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
     crash (L192) has neither; an executor/judger crash (L209/L251) passes the
     proposer's reflection/decision through so the audit trail is complete."""
     failure_feedback = f"[loop failure] {reason}"
+    proposer_failure = (
+        "[loop failure] round failed before a usable result was produced"
+    )
     store.append(round_id, proposal, sha, 0.0, failure_feedback, eval_block,
                  eval_metrics=eval_metrics or {}, risk="high",
                  changed_paths=changed_paths or [],
                  reflection=reflection, decision=decision,
                  accepted=accepted, base_sha=base_sha,
-                 feedback_for_proposer=failure_feedback)
+                 feedback_for_proposer=proposer_failure)
     _refresh_progress_plot(store)
 
 
@@ -532,6 +535,9 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
                        changed_paths: list[str] | None = None,
                        accepted: bool = False) -> dict:
     failure_feedback = f"[loop failure] {reason[:200]}"
+    proposer_failure = (
+        "[loop failure] candidate failed before a usable result was produced"
+    )
     return {
         "candidate": candidate_id,
         "family": proposal.family,
@@ -541,7 +547,7 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
         "score": 0.0,
         "risk": "high",
         "feedback": failure_feedback,
-        "feedback_for_proposer": failure_feedback,
+        "feedback_for_proposer": proposer_failure,
         "eval_block": eval_block,
         "metrics": eval_metrics or {},
         "changed_paths": changed_paths or [],

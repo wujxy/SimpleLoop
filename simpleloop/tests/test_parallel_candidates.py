@@ -12,7 +12,7 @@ from simpleloop import memory as memory_mod
 from simpleloop import views
 from simpleloop.agent import Agent, AgentError, AgentResult
 from simpleloop.executor import ExecResult
-from simpleloop.judger import Judgment
+from simpleloop.judger import Judgment, _parse as parse_judgment
 from simpleloop.loop import _run_candidates, _select_winner
 from simpleloop.proposer import Proposal, ProposalBatch
 from simpleloop.proposer import _parse_batch
@@ -606,7 +606,12 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
         return ExecResult(sha="candidate", reason=None, changed_paths=["a.cc"])
 
     def fake_judge(*_args, **_kwargs):
-        raise ValueError("bad structured feedback")
+        return parse_judgment({
+            "score": 0.5,
+            "risk": "low",
+            "feedback": "FULL_TECHNICAL_SENTINEL",
+            "feedback_for_proposer": "",
+        })
 
     monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(loop_mod.judger_mod, "judge", fake_judge)
@@ -619,9 +624,11 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
 
     assert candidates[0]["score"] == 0.0
     assert candidates[0]["feedback_for_proposer"] == (
-        "[loop failure] bad structured feedback"
+        "[loop failure] candidate failed before a usable result was produced"
     )
-    assert "candidate r2-c0 failed: bad structured feedback" in capsys.readouterr().out
+    assert "FULL_TECHNICAL_SENTINEL" not in candidates[0]["feedback_for_proposer"]
+    assert "FULL_TECHNICAL_SENTINEL" in candidates[0]["feedback"]
+    assert "candidate r2-c0 failed:" in capsys.readouterr().out
 
 
 def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
