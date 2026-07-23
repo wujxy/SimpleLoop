@@ -25,12 +25,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .agent import Agent
+from .agent import Agent, normalize_free_text
 from . import views
 from . import memory as memory_mod
 
 
-_STRUCTURED_TEXT_MARGIN = 300
+_STRUCTURED_TEXT_MARGIN = 500
 _REFLECTION_GENERATION_LIMIT = 600
 _INSIGHT_GENERATION_LIMIT = 500
 _INSIGHT_REF_GENERATION_LIMIT = 32
@@ -76,7 +76,7 @@ def _proposal_history_field(record: dict) -> tuple[str, str]:
 
 
 def _proposer_schema(candidates_per_round: int) -> dict:
-    """Accept exact structure while leaving N+300 headroom for free text."""
+    """Require exact structure while leaving free-text length to the parser."""
     return {
         "type": "object",
         "additionalProperties": False,
@@ -84,17 +84,14 @@ def _proposer_schema(candidates_per_round: int) -> dict:
         "properties": {
             "reflection": {
                 "type": "string",
-                "maxLength": _REFLECTION_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
             },
             "insight": {
                 "type": "string",
-                "maxLength": _INSIGHT_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
             },
             "insight_refs": {
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "maxLength": _INSIGHT_REF_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
                 },
             },
             "proposals": {
@@ -109,7 +106,6 @@ def _proposer_schema(candidates_per_round: int) -> dict:
                         "family": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": _FAMILY_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
                             "pattern": r"\S",
                         },
                         "decision": {
@@ -119,7 +115,6 @@ def _proposer_schema(candidates_per_round: int) -> dict:
                         "proposal": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": _PROPOSAL_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
                             "pattern": r"\S",
                         },
                     },
@@ -355,16 +350,22 @@ def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
     reflection = data.get("reflection")
     if not isinstance(reflection, str):
         raise ValueError("reflection must be a string")
-    reflection = reflection.strip()[
-        :_REFLECTION_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN
-    ]
+    reflection = normalize_free_text(
+        reflection,
+        limit=_REFLECTION_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
+        label="proposer",
+        field="reflection",
+    )
 
     insight = data.get("insight")
     if not isinstance(insight, str):
         raise ValueError("insight must be a string")
-    insight = insight.strip()[
-        :_INSIGHT_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN
-    ]
+    insight = normalize_free_text(
+        insight,
+        limit=_INSIGHT_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
+        label="proposer",
+        field="insight",
+    )
 
     raw_insight_refs = data.get("insight_refs")
     if not isinstance(raw_insight_refs, list) or not all(
@@ -372,8 +373,13 @@ def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
     ):
         raise ValueError("insight_refs must be a list of strings")
     insight_refs = [
-        ref.strip()[:_INSIGHT_REF_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN]
-        for ref in raw_insight_refs
+        normalize_free_text(
+            ref,
+            limit=_INSIGHT_REF_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
+            label="proposer",
+            field=f"insight_refs[{i}]",
+        )
+        for i, ref in enumerate(raw_insight_refs)
     ]
 
     raw_proposals = data.get("proposals")
@@ -398,9 +404,12 @@ def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
         family = item.get("family")
         if not isinstance(family, str) or not family.strip():
             raise ValueError(f"proposals[{i}].family must be a non-empty string")
-        family = family.strip()[
-            :_FAMILY_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN
-        ]
+        family = normalize_free_text(
+            family,
+            limit=_FAMILY_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
+            label="proposer",
+            field=f"proposals[{i}].family",
+        )
         family_key = family.casefold()
         if family_key in seen_families:
             raise ValueError(f"proposals[{i}] has duplicate family: {family}")
@@ -417,9 +426,12 @@ def _parse_batch(data: dict, *, candidates_per_round: int) -> ProposalBatch:
                 f"proposals[{i}].proposal must be a non-empty string")
 
         proposals.append(Proposal(
-            proposal=proposal.strip()[
-                :_PROPOSAL_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN
-            ],
+            proposal=normalize_free_text(
+                proposal,
+                limit=_PROPOSAL_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
+                label="proposer",
+                field=f"proposals[{i}].proposal",
+            ),
             decision=decision,
             reflection=reflection,
             family=family,

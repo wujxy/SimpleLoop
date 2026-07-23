@@ -94,23 +94,23 @@ def test_config_parallel_rejects_invalid_values(tmp_path: Path, field: str, valu
         config_mod.load(_write_config(tmp_path, {field: value}))
 
 
-def test_proposer_schema_uses_generation_limit_plus_margin_and_exact_count():
+def test_proposer_schema_keeps_structure_without_text_max_lengths():
     schema = _proposer_schema(3)
     proposals = schema["properties"]["proposals"]
-    assert proposals["minItems"] == 3
-    assert proposals["maxItems"] == 3
+    assert proposals["minItems"] == proposals["maxItems"] == 3
     assert schema["required"] == [
         "reflection", "insight", "insight_refs", "proposals",
     ]
-    assert schema["properties"]["insight"]["type"] == "string"
-    assert schema["properties"]["insight_refs"]["type"] == "array"
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["reflection"]["maxLength"] == 900
+    assert "maxLength" not in schema["properties"]["reflection"]
+    assert "maxLength" not in schema["properties"]["insight"]
+    assert "maxLength" not in schema["properties"]["insight_refs"]["items"]
     item_properties = proposals["items"]["properties"]
-    assert item_properties["proposal"]["maxLength"] == 1100
-    assert item_properties["family"]["maxLength"] == 364
+    assert "maxLength" not in item_properties["family"]
+    assert "maxLength" not in item_properties["proposal"]
     assert item_properties["proposal"]["pattern"] == r"\S"
     assert item_properties["family"]["pattern"] == r"\S"
+    assert item_properties["decision"]["enum"] == ["continue", "switch"]
 
 
 def test_proposer_schema_uses_batch_shape_when_k_is_one():
@@ -147,24 +147,84 @@ def test_parse_batch_accepts_new_shape():
     assert batch.insight_refs == ["r0c0", "r1c1"]
 
 
-def test_parse_batch_truncates_all_free_text_at_generation_limit_plus_300():
-    reflection = "r" * 901
-    proposal = "p" * 1101
-    family = "f" * 365
+def test_parse_batch_accepts_n_plus_500_without_warning(capsys):
     batch = _parse_batch(
         {
-            "reflection": reflection,
-            "insight": "",
-            "insight_refs": [],
+            "reflection": "r" * 1100,
+            "insight": "i" * 1000,
+            "insight_refs": ["x" * 532],
             "proposals": [
-                {"family": family, "decision": "switch", "proposal": proposal},
+                {
+                    "family": "f" * 564,
+                    "decision": "switch",
+                    "proposal": "p" * 1300,
+                },
             ],
         },
         candidates_per_round=1,
     )
-    assert batch.reflection == reflection[:900]
-    assert batch.proposals[0].proposal == proposal[:1100]
-    assert batch.proposals[0].family == family[:364]
+
+    assert len(batch.reflection) == 1100
+    assert len(batch.insight) == 1000
+    assert len(batch.insight_refs[0]) == 532
+    assert len(batch.proposals[0].family) == 564
+    assert len(batch.proposals[0].proposal) == 1300
+    assert capsys.readouterr().out == ""
+
+
+def test_parse_batch_warns_and_truncates_every_free_text_field(capsys):
+    batch = _parse_batch(
+        {
+            "reflection": "r" * 1131,
+            "insight": "i" * 1001,
+            "insight_refs": ["x" * 533],
+            "proposals": [
+                {
+                    "family": "f" * 565,
+                    "decision": "continue",
+                    "proposal": "p" * 1301,
+                },
+            ],
+        },
+        candidates_per_round=1,
+    )
+
+    assert len(batch.reflection) == 1100
+    assert len(batch.insight) == 1000
+    assert len(batch.insight_refs[0]) == 532
+    assert len(batch.proposals[0].family) == 564
+    assert len(batch.proposals[0].proposal) == 1300
+    output = capsys.readouterr().out
+    assert "reflection length 1131 exceeds 1100" in output
+    assert "insight length 1001 exceeds 1000" in output
+    assert "insight_refs[0] length 533 exceeds 532" in output
+    assert "proposals[0].family length 565 exceeds 564" in output
+    assert "proposals[0].proposal length 1301 exceeds 1300" in output
+
+
+def test_parse_batch_rejects_families_equal_after_truncation():
+    prefix = "x" * 564
+    with pytest.raises(ValueError, match="duplicate family"):
+        _parse_batch(
+            {
+                "reflection": "r",
+                "insight": "",
+                "insight_refs": [],
+                "proposals": [
+                    {
+                        "family": prefix + "a",
+                        "decision": "switch",
+                        "proposal": "p0",
+                    },
+                    {
+                        "family": prefix + "b",
+                        "decision": "continue",
+                        "proposal": "p1",
+                    },
+                ],
+            },
+            candidates_per_round=2,
+        )
 
 
 def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
