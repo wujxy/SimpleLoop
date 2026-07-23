@@ -26,8 +26,12 @@ _FORWARDED_ENV = {
     "SSL_CERT_DIR",
 }
 _OVERRIDE_ENV = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS"}
-_BLOCKED_HOST_KEYS = {"APPTAINER_BIND", "APPTAINER_BINDPATH"}
-_BLOCKED_PREFIXES = ("APPTAINERENV_", "SINGULARITYENV_")
+_BLOCKED_PREFIXES = (
+    "APPTAINER_",
+    "APPTAINERENV_",
+    "SINGULARITY_",
+    "SINGULARITYENV_",
+)
 _PREFLIGHT_SCRIPT = """
 for tool in bash git gcc g++ make cmake node claude; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -68,7 +72,7 @@ class ApptainerRuntime:
         cwd: str | Path,
     ) -> list[str]:
         """Return one shell-free Apptainer argv for a payload command."""
-        argv = [self.executable, "exec", "--cleanenv"]
+        argv = [self.executable, "exec", "--cleanenv", "--no-eval"]
         for bind in self.binds:
             if bind != self.run_dir:
                 argv.extend(["--bind", f"{bind}:{bind}"])
@@ -91,8 +95,7 @@ class ApptainerRuntime:
         env = {
             key: value
             for key, value in os.environ.items()
-            if key not in _BLOCKED_HOST_KEYS
-            and not key.startswith(_BLOCKED_PREFIXES)
+            if not key.startswith(_BLOCKED_PREFIXES)
         }
         payload_env = {
             key: os.environ[key]
@@ -174,7 +177,17 @@ class ApptainerRuntime:
                 raise RuntimePreflightError(
                     f"runtime bind directory does not exist: {bind}"
                 )
+            self._validate_bind_path(bind, "runtime bind directory")
         if not self.run_dir.is_dir():
             raise RuntimePreflightError(
                 f"runtime run directory does not exist: {self.run_dir}"
+            )
+        self._validate_bind_path(self.run_dir, "runtime run directory")
+
+    @staticmethod
+    def _validate_bind_path(path: Path, label: str) -> None:
+        if ":" in str(path) or "," in str(path):
+            raise RuntimePreflightError(
+                f"{label} contains an unsupported bind separator "
+                f"(':' or ','): {path}"
             )

@@ -13,13 +13,14 @@
 - Apptainer is mandatory. Do not retain a host-execution fallback, compatibility flag, or environment escape hatch.
 - Keep host-side Git clone/worktree/gating/history/plot logic unchanged; only Claude and harness evaluation execute in the SIF.
 - Use one runtime object and one argv builder for all three agents and all evaluation commands.
-- Always use `apptainer exec --cleanenv`, `shell=False`, same-path configured binds, an automatic read/write run-directory bind, and role-specific `--cwd`.
+- Always use `apptainer exec --cleanenv --no-eval`, `shell=False`, same-path configured binds, an automatic read/write run-directory bind, and role-specific `--cwd`.
 - Do not use `--containall` or `--no-home`; normal home and network behavior remain available.
 - Prevent pre-existing `APPTAINERENV_*`, `SINGULARITYENV_*`, `APPTAINER_BIND`, and `APPTAINER_BINDPATH` variables from bypassing the fixed runtime policy.
 - Only inject the approved Claude token/auth/endpoint, proxy, and certificate variables into the container. Never print their values.
 - Keep the current executor prompt and debugging autonomy; do not add environment-investigation budgets or prohibitions.
 - A configured baseline evaluation is an environment acceptance test and must pass before the first proposer. A task without eval commands stops after successful tool preflight.
 - Config loading remains strict: the SIF and bind directories must already exist. Consequently, example docs must build the adjacent SIF before `simpleloop validate`; repository tests inspect unbuilt example YAML as data rather than loading it through `config.load`.
+- Reject configured bind and run-directory paths containing `:` or `,`, which cannot be represented unambiguously by the MVP `--bind` syntax.
 - Definition files are independent regular files, not symlinks, and do not copy repositories, JUNO, data, maps, or other large resources into the image.
 - `simpleloop image build` is a thin synchronous wrapper; it does not generate definitions, retry, manage caches, or build implicitly during `run`.
 

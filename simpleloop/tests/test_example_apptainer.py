@@ -80,6 +80,15 @@ def test_definitions_do_not_copy_repositories_or_large_resources():
         )[0]
 
 
+def test_python_examples_provide_the_unversioned_python_command():
+    for directory in EXAMPLE_DIRS[:2]:
+        text = (directory / "apptainer.def").read_text(
+            encoding="utf-8"
+        )
+        assert "python-unversioned-command" in text
+        assert "command -v python" in text
+
+
 def test_all_example_configs_reference_adjacent_image():
     for path in TASK_CONFIGS:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))

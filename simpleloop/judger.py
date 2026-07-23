@@ -355,9 +355,14 @@ def run_eval(
         out = completed.stdout.strip()
         err = completed.stderr.strip()
         status = "OK" if completed.returncode == 0 else f"EXIT {completed.returncode}"
-        body = out if out else err
+        if out and err:
+            body = f"stdout:\n{out}\nstderr:\n{err}"
+            metric_source = f"{out}\n{err}"
+        else:
+            body = out or err
+            metric_source = body
         blocks.append(f"$ {cmd}  [{status}]\n{body[:_OUT_CAP]}")
-        full_text.append(body)
+        full_text.append(metric_source)
         returncodes.append(completed.returncode)
     text = "\n\n".join(blocks)
     combined = "\n".join(full_text)

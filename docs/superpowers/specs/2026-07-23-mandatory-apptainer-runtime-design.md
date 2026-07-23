@@ -70,7 +70,8 @@ runtime:
 - `image`: required non-empty path to a readable SIF image. A relative value is
   resolved relative to the task config file.
 - `binds`: optional list of absolute existing directory paths, defaulting to an
-  empty list.
+  empty list. Paths containing `:` or `,` are rejected because those characters
+  are separators in Apptainer's `--bind` syntax.
 
 Unknown runtime fields are configuration errors, consistent with SimpleLoop's
 existing strict config validation.
@@ -107,6 +108,7 @@ constructs an argv equivalent to:
 ```bash
 apptainer exec \
   --cleanenv \
+  --no-eval \
   --bind /cvmfs,/data/juno,/datafs/users/wujxy/agent-sci/omilrec_opt \
   --bind <run_dir>:<run_dir> \
   --cwd <CWD> \
@@ -131,6 +133,7 @@ The following are product defaults, not configuration options:
 - executable: `apptainer`;
 - operation: `exec`;
 - clean host environment: `--cleanenv`;
+- no shell re-evaluation of injected environment values: `--no-eval`;
 - unchanged absolute bind destinations;
 - automatic read/write run-directory bind;
 - role-specific `--cwd`;
@@ -201,7 +204,8 @@ supported container-environment mechanism:
 
 Values are never printed. The complete host `os.environ` is no longer the
 payload environment. File-based Claude authentication remains available through
-the normal home mount.
+the normal home mount. `--no-eval` ensures allowlisted values containing shell
+metacharacters are passed byte-for-byte rather than evaluated by Apptainer.
 
 No restrictive executor debugging rules are added. Once the runtime is
 validated, the executor remains responsible for choosing an appropriate

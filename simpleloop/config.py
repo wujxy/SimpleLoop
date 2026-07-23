@@ -178,6 +178,11 @@ def _resolve_runtime(raw: object, config_path: Path) -> tuple[str, list[str]]:
             raise ConfigError(
                 f"runtime.binds[{index}]: not an existing directory: {bind}"
             )
+        if ":" in str(bind) or "," in str(bind):
+            raise ConfigError(
+                f"runtime.binds[{index}]: contains an unsupported bind "
+                f"separator (':' or ','): {bind}"
+            )
         binds.append(str(bind))
     return str(image), binds
 

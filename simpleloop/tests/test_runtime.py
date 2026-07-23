@@ -170,6 +170,7 @@ def test_exec_argv_keeps_paths_and_payload_arguments_atomic(tmp_path: Path):
         "/usr/bin/apptainer",
         "exec",
         "--cleanenv",
+        "--no-eval",
         "--bind",
         f"{resource}:{resource}",
         "--bind",
@@ -213,6 +214,9 @@ def test_subprocess_env_strips_container_injection_and_forwards_allowlist(
             "SINGULARITYENV_LD_LIBRARY_PATH": "/worse/lib",
             "APPTAINER_BIND": "/unexpected",
             "APPTAINER_BINDPATH": "/also-unexpected",
+            "APPTAINER_NO_HOME": "1",
+            "APPTAINER_CONTAINALL": "1",
+            "SINGULARITY_BIND": "/legacy-unexpected",
             "ANTHROPIC_BASE_URL": "https://endpoint.example",
             "UNRELATED_SECRET": "do-not-forward-as-payload",
         },
@@ -228,6 +232,9 @@ def test_subprocess_env_strips_container_injection_and_forwards_allowlist(
     assert env["LD_LIBRARY_PATH"] == "/bad/lib"
     assert "APPTAINER_BIND" not in env
     assert "APPTAINER_BINDPATH" not in env
+    assert "APPTAINER_NO_HOME" not in env
+    assert "APPTAINER_CONTAINALL" not in env
+    assert "SINGULARITY_BIND" not in env
     assert "APPTAINERENV_PYTHONPATH" not in env
     assert "SINGULARITYENV_LD_LIBRARY_PATH" not in env
     assert (
@@ -273,6 +280,65 @@ def test_subprocess_env_ignores_unapproved_override(tmp_path: Path):
         {"PYTHONPATH": "/injected"}
     )
     assert "APPTAINERENV_PYTHONPATH" not in env
+
+
+def test_subprocess_env_preserves_allowlisted_value_for_no_eval(
+    monkeypatch,
+    tmp_path: Path,
+):
+    value = '$(touch /tmp/should-not-run)`id`:$HOME:"quoted"'
+    monkeypatch.setattr(
+        runtime_mod.os,
+        "environ",
+        {"ANTHROPIC_AUTH_TOKEN": value},
+    )
+
+    env = _make_runtime(tmp_path).subprocess_env()
+
+    assert env["APPTAINERENV_ANTHROPIC_AUTH_TOKEN"] == value
+
+
+@pytest.mark.parametrize("separator", [":", ","])
+def test_runtime_config_rejects_bind_separator(
+    tmp_path: Path,
+    separator: str,
+):
+    image = tmp_path / "runtime.sif"
+    image.write_bytes(b"test")
+    resource = tmp_path / f"resource{separator}name"
+    resource.mkdir()
+
+    with pytest.raises(config_mod.ConfigError, match="unsupported.*separator"):
+        config_mod.load(
+            _write_task(
+                tmp_path,
+                {"image": str(image), "binds": [str(resource)]},
+            )
+        )
+
+
+@pytest.mark.parametrize("separator", [":", ","])
+def test_preflight_rejects_run_directory_bind_separator(
+    monkeypatch,
+    tmp_path: Path,
+    separator: str,
+):
+    image = tmp_path / "runtime.sif"
+    image.write_bytes(b"test")
+    run_dir = tmp_path / f"run{separator}name"
+    run_dir.mkdir()
+    runtime = ApptainerRuntime(image, [], run_dir)
+    monkeypatch.setattr(
+        runtime_mod.shutil,
+        "which",
+        lambda _name: "/usr/bin/apptainer",
+    )
+
+    with pytest.raises(
+        RuntimePreflightError,
+        match="unsupported.*separator",
+    ):
+        runtime.preflight()
 
 
 def test_preflight_reports_missing_host_apptainer(
@@ -494,6 +560,28 @@ def test_run_eval_records_each_nonzero_status(monkeypatch, tmp_path: Path):
     assert result.returncodes == (0, 9)
     assert result.commands_ok is False
     assert "[EXIT 9]" in result.text
+
+
+def test_run_eval_preserves_stdout_and_stderr_on_failure(
+    monkeypatch,
+    tmp_path: Path,
+):
+    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    monkeypatch.setattr(
+        judger_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            7,
+            "build progress",
+            "compiler diagnostic",
+        ),
+    )
+
+    result = judger_mod.run_eval(["build"], tmp_path, runtime)
+
+    assert "stdout:\nbuild progress" in result.text
+    assert "stderr:\ncompiler diagnostic" in result.text
 
 
 @pytest.mark.parametrize(

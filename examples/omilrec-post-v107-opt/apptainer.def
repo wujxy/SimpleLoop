@@ -10,7 +10,7 @@ From: almalinux:9
     dnf install -y \
         bash ca-certificates coreutils curl diffutils findutils git \
         gcc gcc-c++ make cmake patch procps-ng which \
-        python3 python3-pip tar xz
+        python3 python3-pip python-unversioned-command tar xz
     curl -fsSLO https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz
     tar -xJf node-v22.19.0-linux-x64.tar.xz -C /usr/local --strip-components=1
     rm -f node-v22.19.0-linux-x64.tar.xz
@@ -32,5 +32,6 @@ From: almalinux:9
     command -v cmake
     command -v node
     command -v claude
+    command -v python
     command -v python3
     command -v pytest
