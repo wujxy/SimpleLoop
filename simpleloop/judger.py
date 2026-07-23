@@ -102,7 +102,7 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
           baseline_metrics: dict | None = None,
           metrics_schema: dict | None = None,
           label: str = "judger") -> Judgment:
-    """Grade one round. Returns Judgment(score, risk, feedback).
+    """Grade one round. Returns both full and proposer-facing feedback.
 
     eval_block is the harness-run eval output (run in the worktree before this
     call). metrics/prior_metrics/baseline_metrics are the harness-parsed

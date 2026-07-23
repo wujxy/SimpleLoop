@@ -25,7 +25,8 @@ def _parallel_history() -> list[dict]:
                 "accepted": True,
                 "metrics": {"SPEED_MS": 120.0},
                 "risk": "low",
-                "feedback": "slower",
+                "feedback": "FULL_TECHNICAL_SLOWER",
+                "feedback_for_proposer": "Hoisting was slower.",
                 "changed_paths": ["src/a.cc"],
                 "eval_block": "must not be returned",
             },
@@ -38,7 +39,8 @@ def _parallel_history() -> list[dict]:
                 "accepted": True,
                 "metrics": {"SPEED_MS": 90.0},
                 "risk": "low",
-                "feedback": "faster",
+                "feedback": "FULL_TECHNICAL_FASTER",
+                "feedback_for_proposer": "Layout improved this workload.",
                 "changed_paths": ["src/b.cc"],
                 "eval_block": "must not be returned",
             },
@@ -59,10 +61,11 @@ def test_resolve_parallel_episode_returns_only_compact_fields():
         "accepted": True,
         "metrics": {"SPEED_MS": 90.0},
         "risk": "low",
-        "feedback": "faster",
+        "feedback_for_proposer": "Layout improved this workload.",
         "changed_paths": ["src/b.cc"],
     }
     assert "eval_block" not in episode
+    assert "feedback" not in episode
 
 
 def test_resolve_serial_episode_normalizes_candidate_zero():
@@ -85,6 +88,8 @@ def test_resolve_serial_episode_normalizes_candidate_zero():
     assert episode["proposal"] == "legacy proposal"
     assert episode["candidate_sha"] == "legacy-sha"
     assert episode["selected"] is True
+    assert episode["feedback_for_proposer"] == ""
+    assert "feedback" not in episode
 
 
 @pytest.mark.parametrize("ref", ["r2", "2c1", "r-1c0", "r2c-1", "r2c9"])
@@ -187,6 +192,8 @@ def test_memory_show_cli_resolves_from_explicit_run_dir(
     output = json.loads(capsys.readouterr().out)
     assert output["ref"] == "r2c1"
     assert output["candidate_sha"] == "sha-1"
+    assert output["feedback_for_proposer"] == "Layout improved this workload."
+    assert "feedback" not in output
     assert "eval_block" not in output
 
 

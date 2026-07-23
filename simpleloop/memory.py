@@ -75,7 +75,7 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
         "accepted": bool(candidate.get("accepted")),
         "metrics": candidate.get("metrics") or {},
         "risk": candidate.get("risk"),
-        "feedback": candidate.get("feedback") or "",
+        "feedback_for_proposer": candidate.get("feedback_for_proposer") or "",
         "changed_paths": candidate.get("changed_paths") or [],
     }
 
