@@ -120,6 +120,21 @@ def test_write_progress_pngs_creates_overview_and_nine_details(tmp_path):
         assert path.stat().st_size > 5_000
 
 
+def test_objective_panel_title_retains_configured_direction():
+    plt = plot_mod._prepare_pyplot()
+    figure, axis = plt.subplots()
+    try:
+        plot_mod._render_panel(
+            axis,
+            build_series(HISTORY, SCHEMA, CONTEXT),
+            "objective",
+            "round",
+        )
+        assert "lower is better" in axis.get_title()
+    finally:
+        plt.close(figure)
+
+
 def test_one_detail_failure_preserves_old_file_and_other_outputs(
     monkeypatch, tmp_path,
 ):

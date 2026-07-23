@@ -360,7 +360,15 @@ def _render_panel(axis, series: PlotSeries, y_kind: str, x_kind: str) -> None:
 
     axis.set_xlabel(_x_label(x_kind))
     axis.set_ylabel(_y_label(series, y_kind))
-    axis.set_title(f"{_y_label(series, y_kind)} vs {_x_label(x_kind)}")
+    title = _y_label(series, y_kind)
+    if y_kind == "objective":
+        direction = (
+            "lower is better" if series.lower_is_better is True
+            else "higher is better" if series.lower_is_better is False
+            else "direction not configured"
+        )
+        title = f"{title} ({direction})"
+    axis.set_title(f"{title} vs {_x_label(x_kind)}")
     axis.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
     if y_kind == "score":
         axis.set_ylim(0.0, 1.0)
