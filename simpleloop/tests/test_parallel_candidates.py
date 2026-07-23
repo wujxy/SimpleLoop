@@ -450,7 +450,49 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
 
     projected = views.for_proposer(rows)
     assert projected[0]["selected_sha"] == "b"
-    assert "Implemented:" in projected[0]["candidates"][0]["feedback"]
+    assert projected[0]["candidates"][0]["feedback_for_proposer"] == (
+        "Hoisting did not help this workload."
+    )
+    assert "feedback" not in projected[0]["candidates"][0]
+
+
+def test_proposer_prompt_uses_only_feedback_for_proposer(tmp_path: Path):
+    class CapturingAgent:
+        prompt = ""
+
+        def run_json(self, prompt, **_kwargs):
+            self.prompt = prompt
+            return {
+                "reflection": "r",
+                "insight": "",
+                "insight_refs": [],
+                "proposals": [
+                    {"family": "layout", "decision": "switch", "proposal": "p"},
+                ],
+            }
+
+    agent = CapturingAgent()
+    propose(
+        agent,
+        goal="g",
+        editable=["src/**"],
+        frozen=[],
+        history=[{
+            "round": 0,
+            "proposal": "old proposal",
+            "sha": "old-sha",
+            "score": 0.5,
+            "feedback": "FULL_TECHNICAL_SENTINEL",
+            "feedback_for_proposer": "SHORT_SEARCH_SENTINEL",
+        }],
+        insights=[],
+        base_sha="base",
+        cwd=tmp_path,
+    )
+
+    assert "SHORT_SEARCH_SENTINEL" in agent.prompt
+    assert "FULL_TECHNICAL_SENTINEL" not in agent.prompt
+    assert "feedback_for_proposer=" in agent.prompt
 
 
 def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Path):

@@ -2,7 +2,7 @@
 
 Sees: task goal, safety (editable/frozen), the authoritative accepted base SHA,
 and round history (proposal/candidate sha/accepted/base sha/score/metrics/
-changed_paths/feedback for each prior round). Its cwd is the
+changed_paths/feedback_for_proposer for each prior round). Its cwd is the
 PER-RUN working repo — the same clone the executor commits each round into —
 so every prior round's sha is a valid object it can `git show`/`git diff` to
 self-audit whether a direction was attempted and accepted (see the diff that
@@ -135,8 +135,9 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             gate_block: str = "") -> ProposalBatch:
     """Return ProposalBatch for the next round."""
     # Project history through the proposer's view: this strips eval_block (the
-    # judger's axis — the judger summarizes it into `feedback` for us). The
-    # proposer only sees each prior round's proposal + score + tight feedback.
+    # judger's axis — the judger summarizes it into `feedback_for_proposer` for
+    # us). The proposer only sees each prior round's proposal + score + concise
+    # search lesson.
     visible = views.for_proposer(history)
     insights_block = memory_mod.render_insights(insights)
     if visible:
@@ -165,7 +166,7 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                         f"{' '.join(cm_parts)} | changed: {','.join(c_paths) if c_paths else '(none)'} | "
                         f"score={c.get('score')} | risk={c.get('risk','?')} | "
                         f"landing={c.get('landing_state')} | "
-                        f"feedback=\"{c.get('feedback','')}\" | "
+                        f"feedback_for_proposer=\"{c.get('feedback_for_proposer','')}\" | "
                         f'{proposal_label}="{proposal_text}"'
                     )
                 hist_lines.append(
@@ -182,7 +183,7 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
                     f"accepted={accepted_str} | base_sha={round_base} | {metrics_str} | "
                     f"changed: {paths_str} | score={r['score']} | risk={r.get('risk','?')} | "
                     f"landing={landing} | "
-                    f"feedback=\"{r['feedback']}\" | "
+                    f"feedback_for_proposer=\"{r.get('feedback_for_proposer','')}\" | "
                     f'{proposal_label}="{proposal_text}"'
                 )
         hist_block = "\n".join(hist_lines)

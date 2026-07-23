@@ -1,8 +1,8 @@
 """Per-role projection functions.
 
 The store holds the full raw record per round:
-    {round, proposal, sha, score, risk, feedback, eval_block, metrics,
-     changed_paths}
+    {round, proposal, sha, score, risk, feedback, feedback_for_proposer,
+     eval_block, metrics, changed_paths}
 
 Each role sees only the fields it should, via these projections. The store stays
 the single source of truth (full record, for the judger's prior/baseline eval
@@ -52,7 +52,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
     """What the proposer sees of each prior round.
 
     Projects round/generation history with candidate shas, selected state, score,
-    risk, metrics, changed_paths, feedback, and concise diagnostic narrative.
+    risk, metrics, changed_paths, and the concise proposer-facing lesson.
 
     Includes:
       - sha (full candidate commit): so the proposer can self-audit whether a
@@ -96,7 +96,9 @@ def for_proposer(history: list[dict]) -> list[dict]:
                         "metrics": c.get("metrics") or {},
                         "changed_paths": c.get("changed_paths") or [],
                         "landing_state": _landing_state(c.get("feedback", "")),
-                        "feedback": c.get("feedback", ""),
+                        "feedback_for_proposer": (
+                            c.get("feedback_for_proposer") or ""
+                        ),
                     }
                     for c in (r.get("candidates") or [])
                 ],
@@ -113,7 +115,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
             "metrics": r.get("metrics") or {},
             "changed_paths": r.get("changed_paths") or [],
             "landing_state": _landing_state(r.get("feedback", "")),
-            "feedback": r["feedback"],
+            "feedback_for_proposer": r.get("feedback_for_proposer") or "",
         })
     return out
 

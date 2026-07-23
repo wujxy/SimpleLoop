@@ -39,11 +39,13 @@ def test_for_proposer_projects_landing_state():
         {"round": 0, "proposal": "p0", "sha": "aaaa1111bbbb2222", "score": 0.7,
          "accepted": True, "base_sha": "aaaa1111bbbb2222",
          "risk": "low", "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z", "eval_block": "e0",
+         "feedback_for_proposer": "The mechanism remains promising.",
          "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]},
         {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444", "score": 0.05,
          "accepted": False, "base_sha": "aaaa1111bbbb2222", "risk": "low",
          "feedback": "LANDED_STATE: not-implemented correctness FAIL",
+         "feedback_for_proposer": "This attempt failed correctness.",
          "eval_block": "e1",
          "metrics": {"CORRECTNESS": False},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]},
@@ -56,18 +58,32 @@ def test_for_proposer_projects_landing_state():
          "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
          "landing_state": "not-implemented",
-         "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z"},
+         "feedback_for_proposer": "The mechanism remains promising."},
         {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444",
          "accepted": False, "base_sha": "aaaa1111bbbb2222",
          "score": 0.05, "risk": "low",
          "metrics": {"CORRECTNESS": False},
          "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
          "landing_state": "not-implemented",
-         "feedback": "LANDED_STATE: not-implemented correctness FAIL"},
+         "feedback_for_proposer": "This attempt failed correctness."},
     ]
     # belt-and-braces: the noisy/raw fields never leak
     for row in out:
         assert "eval_block" not in row
+        assert "feedback" not in row
+
+
+def test_for_proposer_legacy_feedback_does_not_fall_back_to_full_text():
+    projected = views.for_proposer([{
+        "round": 0,
+        "proposal": "legacy",
+        "sha": "sha",
+        "score": 0.2,
+        "feedback": "FULL_TECHNICAL_SENTINEL",
+    }])
+
+    assert projected[0]["feedback_for_proposer"] == ""
+    assert "feedback" not in projected[0]
 
 
 def test_for_proposer_empty_history():
@@ -95,6 +111,7 @@ def _serial_history_record(round_id: int, proposal: str) -> dict:
         "metrics": {"SPEED_MS": 500.0 + round_id},
         "changed_paths": ["src/a.cc"],
         "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{round_id}\nResult: y{round_id}\nAnalysis: z{round_id}",
+        "feedback_for_proposer": f"short lesson {round_id}",
         "eval_block": "raw output",
     }
 
@@ -120,6 +137,7 @@ def _parallel_history_record(round_id: int, proposals: list[str]) -> dict:
                 "metrics": {"SPEED_MS": 600.0 - candidate_id},
                 "changed_paths": [f"src/c{candidate_id}.cc"],
                 "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{candidate_id}\nResult: y{candidate_id}\nAnalysis: z{candidate_id}",
+                "feedback_for_proposer": f"short candidate lesson {candidate_id}",
                 "eval_block": "raw output",
             }
             for candidate_id, proposal in enumerate(proposals)
