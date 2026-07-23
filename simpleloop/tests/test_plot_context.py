@@ -83,8 +83,20 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
         "frozen_paths": [],
         "eval_commands": [],
         "metrics": SCHEMA,
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [],
     }
     contexts = []
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
 
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
@@ -97,6 +109,7 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
             return "baseline"
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(
         loop_mod,

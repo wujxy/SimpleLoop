@@ -20,6 +20,8 @@ still runs and scores each, but its feedback no longer chooses the next proposal
 from __future__ import annotations
 
 import json
+import math
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -36,7 +38,12 @@ from . import proposer as proposer_mod
 from . import views
 from .store import Store
 from .telemetry import RunTelemetry
+from .runtime import ApptainerRuntime
 from .workspace import Workspace
+
+
+class BaselineAcceptanceError(RuntimeError):
+    """Raised when the configured runtime cannot pass the task baseline."""
 
 
 def run(config_path: str | Path, run_dir: str | Path,
@@ -61,6 +68,15 @@ def run(config_path: str | Path, run_dir: str | Path,
     run_dir_path = Path(run_dir).resolve()
     run_dir_path.mkdir(parents=True, exist_ok=True)
     telemetry = RunTelemetry(run_dir_path, resume=continue_run)
+    runtime = ApptainerRuntime(
+        image=cfg["runtime_image"],
+        binds=cfg["runtime_binds"],
+        run_dir=run_dir_path,
+    )
+    for line in runtime.summary_lines():
+        print(line, flush=True)
+    runtime.preflight()
+    print("preflight: PASS", flush=True)
 
     static_proposals = _load_proposals(proposals)
     if static_proposals is not None and continue_run:
@@ -89,13 +105,16 @@ def run(config_path: str | Path, run_dir: str | Path,
     # spanning many call sites, and the executor must finish the WHOLE proposal in
     # one round (no half-work).
     timeout = cfg.get("agent_timeout_seconds", 3600)
-    proposer_agent = Agent(command="claude", timeout_seconds=timeout,
+    proposer_agent = Agent(runtime=runtime, command="claude",
+                           timeout_seconds=timeout,
                            allowed_tools="Read,Bash",
                            usage_observer=telemetry.record_usage)
-    executor_agent = Agent(command="claude", timeout_seconds=timeout,
+    executor_agent = Agent(runtime=runtime, command="claude",
+                           timeout_seconds=timeout,
                            allowed_tools="Read,Edit,Write,Bash",
                            usage_observer=telemetry.record_usage)
-    judger_agent = Agent(command="claude", timeout_seconds=timeout,
+    judger_agent = Agent(runtime=runtime, command="claude",
+                         timeout_seconds=timeout,
                          allowed_tools="Read,Bash",
                          usage_observer=telemetry.record_usage)
     workspace = Workspace(
@@ -113,11 +132,9 @@ def run(config_path: str | Path, run_dir: str | Path,
     print(f"[{stamp()}] baseline sha: {parent_sha}", flush=True)
 
     # Baseline eval: run the eval commands once on the unoptimized baseline
-    # commit so every round's judger has a "vs baseline" axis. Without it the
-    # judger only sees each round's absolute number and can't tell a real
-    # optimization from a round that merely beats a weak prior round. Best-effort:
-    # a baseline-eval failure does NOT kill the run (the judger falls back to
-    # prior-round-only comparison). Skipped entirely when no eval is configured.
+    # commit so every round's judger has a "vs baseline" axis. It is also the
+    # runtime acceptance test: a failure aborts before any optimization role is
+    # called. Skipped entirely when no eval is configured.
     # Returns both the raw text (kept for the record) and the parsed metrics
     # (the authoritative baseline numbers the judger's FACTS block cites).
     metrics_schema = cfg.get("metrics")
@@ -160,12 +177,13 @@ def run(config_path: str | Path, run_dir: str | Path,
         # only used if start_round == 0, which continue mode excludes, but the
         # judger may cite baseline numbers so keep them available.
         baseline_eval_block, baseline_metrics = _eval_baseline(
-            workspace, cfg, workspace.baseline_sha())
+            workspace, cfg, workspace.baseline_sha(), runtime)
         if last_accepted is None:
             prior_metrics = baseline_metrics
             prior_eval_block = baseline_eval_block or ""
     else:
-        baseline_eval_block, baseline_metrics = _eval_baseline(workspace, cfg, parent_sha)
+        baseline_eval_block, baseline_metrics = _eval_baseline(
+            workspace, cfg, parent_sha, runtime)
         telemetry.set_baseline(baseline_metrics)
         # round 0's "prior round" is the baseline. Updated to each round's eval after
         # that round is recorded. Both the raw text (for the record) and the parsed
@@ -226,7 +244,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                 proposals_batch, round_id, parent_sha, cfg, workspace,
                 executor_agent, judger_agent, prior_metrics, baseline_metrics,
                 metrics_schema, gate_lines,
-                runtime=executor_agent.runtime,
+                runtime=runtime,
                 telemetry=telemetry,
             )
             winner = _select_winner(
@@ -299,7 +317,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                 eval_result = judger_mod.run_eval(
                     cfg["eval_commands"],
                     cwd=worktree,
-                    runtime=executor_agent.runtime,
+                    runtime=runtime,
                     metrics_schema=metrics_schema,
                 )
                 eval_block = eval_result.text
@@ -688,16 +706,58 @@ def _resume_chain(history: list[dict], baseline_sha: str,
     return baseline_sha, None
 
 
-def _eval_baseline(workspace: Workspace, cfg: dict, baseline_sha: str) -> tuple[str | None, dict]:
+def _require_baseline_acceptance(
+    result: judger_mod.EvalResult,
+    metrics_schema: dict | None,
+) -> None:
+    """Reject an unusable baseline before any optimization agent is called."""
+    failed_codes = [code for code in result.returncodes if code != 0]
+    if failed_codes:
+        raise BaselineAcceptanceError(
+            "baseline evaluation command failed with exit "
+            f"{failed_codes[0]}:\n{result.text[:8000]}"
+        )
+    if not metrics_schema:
+        return
+
+    objective = metrics_schema["objective"]["key"]
+    value = result.metrics.get(objective)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise BaselineAcceptanceError(
+            f"baseline objective {objective} is missing or not finite:\n"
+            f"{result.text[:8000]}"
+        )
+
+    failed_gates = [
+        gate["key"]
+        for gate in metrics_schema.get("gates", [])
+        if result.metrics.get(gate["key"]) is not True
+    ]
+    if failed_gates:
+        raise BaselineAcceptanceError(
+            "baseline gate(s) did not pass: "
+            f"{', '.join(failed_gates)}:\n{result.text[:8000]}"
+        )
+
+
+def _eval_baseline(
+    workspace: Workspace,
+    cfg: dict,
+    baseline_sha: str,
+    runtime: ApptainerRuntime,
+) -> tuple[str | None, dict]:
     """Run the eval commands once on the unoptimized baseline commit.
 
     Returns (eval_block, metrics) — the raw text (kept for the record) and the
     parsed metrics dict (the authoritative baseline numbers the judger's FACTS
-    block cites). (None, {}) if no eval is configured or the baseline eval
-    failed. Best-effort: failures are logged and swallowed — the run continues
-    with prior-round-only comparison. Uses a throwaway worktree on the baseline
-    SHA (the bare per-run clone has no working tree, same reason the per-round
-    eval uses a worktree).
+    block cites). (None, {}) if no eval is configured. A failed command,
+    missing objective, or failed gate aborts the run. Uses a throwaway worktree
+    on the baseline SHA (the bare per-run clone has no working tree, same reason
+    the per-round eval uses a worktree).
     """
     if not cfg["eval_commands"]:
         return None, {}
@@ -706,14 +766,36 @@ def _eval_baseline(workspace: Workspace, cfg: dict, baseline_sha: str) -> tuple[
     wt = None
     try:
         wt = workspace.add_worktree("baseline", baseline_sha)
-        block, metrics = judger_mod.run_eval(
-            cfg["eval_commands"], cwd=wt, metrics_schema=cfg.get("metrics"))
+        bind_paths = [
+            *(str(path) for path in runtime.binds
+              if path != runtime.run_dir),
+            str(runtime.run_dir),
+        ]
+        context = (
+            f"image: {runtime.image}\n"
+            f"binds: {', '.join(bind_paths)}\n"
+            f"cwd: {wt}"
+        )
+        try:
+            result = judger_mod.run_eval(
+                cfg["eval_commands"],
+                cwd=wt,
+                runtime=runtime,
+                metrics_schema=cfg.get("metrics"),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise BaselineAcceptanceError(
+                "baseline evaluation failed to run: "
+                f"{exc}\n{context}"
+            ) from exc
+        try:
+            _require_baseline_acceptance(result, cfg.get("metrics"))
+        except BaselineAcceptanceError as exc:
+            raise BaselineAcceptanceError(
+                f"{exc}\n{context}"
+            ) from exc
         print(f"[{stamp()}] baseline eval done.", flush=True)
-        return block, metrics
-    except Exception as exc:  # worktree add or eval failure
-        print(f"[{stamp()}] baseline eval failed (judger will use prior-round-only "
-              f"comparison): {exc}", flush=True)
-        return None, {}
+        return result.text, result.metrics
     finally:
         if wt is not None:
             workspace.remove_worktree("baseline")

@@ -22,7 +22,19 @@ def test_fresh_run_does_not_create_final_report(monkeypatch, tmp_path):
         "frozen_paths": [],
         "eval_commands": [],
         "metrics": None,
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [],
     }
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
 
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
@@ -35,6 +47,7 @@ def test_fresh_run_does_not_create_final_report(monkeypatch, tmp_path):
             return "baseline"
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "_eval_baseline", lambda *_args: ("", {}))
 

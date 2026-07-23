@@ -320,7 +320,19 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
         "frozen_paths": [],
         "eval_commands": [],
         "metrics": SCHEMA,
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [],
     }
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
 
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
@@ -333,6 +345,7 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
             return "baseline"
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
 
     summary = loop_mod.run("config.yaml", run_dir, continue_run=True)

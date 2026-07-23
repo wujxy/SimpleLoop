@@ -24,8 +24,20 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
             "objective": {"key": "SPEED_MS", "lower_is_better": True},
             "gates": [],
         },
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [],
     }
     observers = []
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -42,6 +54,7 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
             return "baseline"
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(

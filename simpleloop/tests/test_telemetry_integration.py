@@ -87,6 +87,7 @@ def test_run_candidates_attaches_persisted_snapshot_after_each_worker(
         {},
         None,
         "",
+        object(),
         tracker,
     )
 

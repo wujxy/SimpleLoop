@@ -12,6 +12,7 @@ from pathlib import Path
 from . import loop
 from . import config as config_mod
 from . import memory
+from .runtime import RuntimePreflightError
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -93,6 +94,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  max_workers: {cfg['max_workers']}")
         print(f"  eval commands: {len(cfg['eval_commands'])}")
         print(f"  repo: {cfg['repo_path']} @ {cfg['baseline_ref']}")
+        print(f"  runtime image: {cfg['runtime_image']}")
+        binds = ", ".join(cfg["runtime_binds"]) or "(none)"
+        print(f"  runtime binds: {binds}")
         return
 
     if args.command == "run":
@@ -102,6 +106,12 @@ def main(argv: list[str] | None = None) -> None:
                                continue_run=args.continue_run)
         except config_mod.ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except RuntimePreflightError as exc:
+            print(f"Runtime error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        except loop.BaselineAcceptanceError as exc:
+            print(f"Baseline error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         except ValueError as exc:
             # bad --proposals file (wrong shape / empty entry) or a static batch

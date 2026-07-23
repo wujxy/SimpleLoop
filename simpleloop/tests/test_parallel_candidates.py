@@ -841,7 +841,19 @@ def _run_insight_integration(
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "eval_commands": [],
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [],
     }
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
 
     class FakeAgent:
         def __init__(self, **_kwargs):
@@ -891,6 +903,7 @@ def _run_insight_integration(
         }]
 
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "_eval_baseline", lambda *_args: ("", {}))
@@ -1003,7 +1016,19 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "eval_commands": [],
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [],
     }
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
 
     class FakeAgent:
         def __init__(self, **_kwargs):
@@ -1041,6 +1066,7 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         raise AssertionError("executor must not run")
 
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "Store", FakeStore)

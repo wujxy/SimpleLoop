@@ -8,8 +8,11 @@ import pytest
 import yaml
 
 from simpleloop import config as config_mod
+from simpleloop import cli as cli_mod
 from simpleloop import judger as judger_mod
+from simpleloop import loop as loop_mod
 from simpleloop import runtime as runtime_mod
+from simpleloop.judger import EvalResult
 from simpleloop.runtime import ApptainerRuntime, RuntimePreflightError
 
 
@@ -491,3 +494,208 @@ def test_run_eval_records_each_nonzero_status(monkeypatch, tmp_path: Path):
     assert result.returncodes == (0, 9)
     assert result.commands_ok is False
     assert "[EXIT 9]" in result.text
+
+
+@pytest.mark.parametrize(
+    ("result", "schema", "message"),
+    [
+        (EvalResult("$ eval [EXIT 3]", {}, (3,)), None, "exit 3"),
+        (
+            EvalResult(
+                "missing objective",
+                {"CORRECTNESS": True},
+                (0,),
+            ),
+            {
+                "objective": {
+                    "key": "SPEED_MS",
+                    "lower_is_better": True,
+                },
+                "gates": [{"key": "CORRECTNESS"}],
+            },
+            "SPEED_MS",
+        ),
+        (
+            EvalResult(
+                "failed gate",
+                {"SPEED_MS": 10.0, "CORRECTNESS": False},
+                (0,),
+            ),
+            {
+                "objective": {
+                    "key": "SPEED_MS",
+                    "lower_is_better": True,
+                },
+                "gates": [{"key": "CORRECTNESS"}],
+            },
+            "CORRECTNESS",
+        ),
+    ],
+)
+def test_require_baseline_acceptance_rejects_bad_results(
+    result: EvalResult,
+    schema: dict | None,
+    message: str,
+):
+    with pytest.raises(
+        loop_mod.BaselineAcceptanceError,
+        match=message,
+    ):
+        loop_mod._require_baseline_acceptance(result, schema)
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf")])
+def test_require_baseline_acceptance_rejects_unusable_objective(value):
+    schema = {
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [],
+    }
+    result = EvalResult("bad objective", {"SPEED_MS": value}, (0,))
+
+    with pytest.raises(
+        loop_mod.BaselineAcceptanceError,
+        match="SPEED_MS",
+    ):
+        loop_mod._require_baseline_acceptance(result, schema)
+
+
+def test_require_baseline_acceptance_accepts_commands_without_schema():
+    loop_mod._require_baseline_acceptance(
+        EvalResult("ok", {}, (0, 0)),
+        None,
+    )
+
+
+def test_require_baseline_acceptance_accepts_objective_and_all_gates():
+    schema = {
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [{"key": "A"}, {"key": "B"}],
+    }
+    loop_mod._require_baseline_acceptance(
+        EvalResult(
+            "ok",
+            {"SPEED_MS": 10.0, "A": True, "B": True},
+            (0,),
+        ),
+        schema,
+    )
+
+
+def test_run_preflights_before_agent_or_workspace(
+    monkeypatch,
+    tmp_path: Path,
+):
+    events = []
+
+    class FakeRuntime:
+        def __init__(self, **kwargs):
+            events.append("runtime.init")
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            events.append("preflight")
+
+    class FakeAgent:
+        def __init__(self, *, runtime, **kwargs):
+            events.append("agent")
+            self.runtime = runtime
+
+    class FakeWorkspace:
+        def __init__(self, *, run_dir, **kwargs):
+            self.repo = Path(run_dir) / "repo"
+
+        def setup(self):
+            events.append("workspace.setup")
+            self.repo.mkdir()
+
+        def baseline_sha(self):
+            return "baseline-sha"
+
+    cfg = {
+        "goal": "test",
+        "editable_paths": ["src/**"],
+        "frozen_paths": [],
+        "max_rounds": 0,
+        "candidates_per_round": 1,
+        "max_workers": 1,
+        "agent_timeout_seconds": 60,
+        "runtime_image": str(tmp_path / "runtime.sif"),
+        "runtime_binds": [],
+        "eval_commands": [],
+        "metrics": None,
+        "repo_path": str(tmp_path / "source"),
+        "baseline_ref": "HEAD",
+    }
+    monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
+    monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+
+    loop_mod.run("task.yaml", tmp_path / "run")
+
+    assert events.count("preflight") == 1
+    assert events.index("preflight") < events.index("agent")
+    assert events.index("preflight") < events.index("workspace.setup")
+
+
+def test_validate_prints_normalized_runtime(monkeypatch, capsys):
+    monkeypatch.setattr(
+        config_mod,
+        "load",
+        lambda _path: {
+            "goal": "test",
+            "max_rounds": 1,
+            "candidates_per_round": 1,
+            "max_workers": 1,
+            "eval_commands": [],
+            "repo_path": "/repo",
+            "baseline_ref": "HEAD",
+            "runtime_image": "/images/runtime.sif",
+            "runtime_binds": ["/cvmfs", "/data/juno"],
+        },
+    )
+
+    cli_mod.main(["validate", "--config", "task.yaml"])
+
+    out = capsys.readouterr().out
+    assert "runtime image: /images/runtime.sif" in out
+    assert "runtime binds: /cvmfs, /data/juno" in out
+
+
+@pytest.mark.parametrize(
+    ("error", "prefix"),
+    [
+        (RuntimePreflightError("missing cmake"), "Runtime error:"),
+        (
+            loop_mod.BaselineAcceptanceError("CORRECTNESS failed"),
+            "Baseline error:",
+        ),
+    ],
+)
+def test_run_cli_reports_runtime_failures_without_traceback(
+    monkeypatch,
+    capsys,
+    error: Exception,
+    prefix: str,
+):
+    monkeypatch.setattr(
+        loop_mod,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(
+            [
+                "run",
+                "--config",
+                "task.yaml",
+                "--run-dir",
+                "run",
+            ]
+        )
+
+    assert exc.value.code == 1
+    assert prefix in capsys.readouterr().err
