@@ -205,9 +205,39 @@ def test_for_judger_carries_eval_axes_not_history():
 
 # --- judger._parse: four-field contract + fallback (risk now required) ---
 
+def test_parse_preserves_feedback_for_proposer():
+    jd = _parse({
+        "score": 0.5,
+        "risk": "low",
+        "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z",
+        "feedback_for_proposer": "The mechanism remains inconclusive.",
+    })
+    assert jd.feedback_for_proposer == "The mechanism remains inconclusive."
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", 7])
+def test_parse_rejects_invalid_feedback_for_proposer(value):
+    with pytest.raises(ValueError):
+        _parse({
+            "score": 0.5,
+            "risk": "low",
+            "feedback": "full",
+            "feedback_for_proposer": value,
+        })
+
+
+def test_judger_schema_requires_feedback_for_proposer():
+    schema = _judger_schema()
+    assert schema["required"] == [
+        "score", "risk", "feedback", "feedback_for_proposer",
+    ]
+    assert schema["properties"]["feedback_for_proposer"]["pattern"] == r"\S"
+
+
 def test_parse_four_field_contract():
     jd = _parse({"score": 0.83, "risk": "low",
-                 "feedback": "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: 843ms vs 945ms -11%\nAnalysis: cache locality improvement"})
+                 "feedback": "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: 843ms vs 945ms -11%\nAnalysis: cache locality improvement",
+                 "feedback_for_proposer": "Precomputation remains promising."})
     assert isinstance(jd, Judgment)
     assert jd.score == 0.83
     assert jd.risk == "low"
@@ -218,30 +248,39 @@ def test_parse_rejects_missing_risk():
     """risk is required for best selection (high-risk rounds never ship).
     Older judger output without risk must fail loudly, not silently default."""
     with pytest.raises(ValueError):
-        _parse({"score": 0.5, "feedback": "short"})
+        _parse({"score": 0.5, "feedback": "short",
+                "feedback_for_proposer": "short lesson"})
 
 
 def test_parse_rejects_bad_risk():
     with pytest.raises(ValueError):
-        _parse({"score": 0.5, "risk": "maybe", "feedback": "x"})
+        _parse({"score": 0.5, "risk": "maybe", "feedback": "x",
+                "feedback_for_proposer": "short lesson"})
     with pytest.raises(ValueError):
-        _parse({"score": 0.5, "risk": "", "feedback": "x"})
+        _parse({"score": 0.5, "risk": "", "feedback": "x",
+                "feedback_for_proposer": "short lesson"})
 
 
 def test_parse_rejects_bad_score():
     with pytest.raises(ValueError):
-        _parse({"score": 1.5, "risk": "low", "feedback": "x"})
+        _parse({"score": 1.5, "risk": "low", "feedback": "x",
+                "feedback_for_proposer": "short lesson"})
     with pytest.raises(ValueError):
-        _parse({"score": "nan", "risk": "low", "feedback": "x"})
+        _parse({"score": "nan", "risk": "low", "feedback": "x",
+                "feedback_for_proposer": "short lesson"})
 
 
 @pytest.mark.parametrize(
     "data",
     [
-        {"score": 0.5, "risk": "low", "feedback": "x", "extra": 1},
-        {"score": "0.5", "risk": "low", "feedback": "x"},
-        {"score": True, "risk": "low", "feedback": "x"},
-        {"score": 0.5, "risk": 1, "feedback": "x"},
+        {"score": 0.5, "risk": "low", "feedback": "x",
+         "feedback_for_proposer": "short lesson", "extra": 1},
+        {"score": "0.5", "risk": "low", "feedback": "x",
+         "feedback_for_proposer": "short lesson"},
+        {"score": True, "risk": "low", "feedback": "x",
+         "feedback_for_proposer": "short lesson"},
+        {"score": 0.5, "risk": 1, "feedback": "x",
+         "feedback_for_proposer": "short lesson"},
     ],
 )
 def test_parse_rejects_values_outside_exact_schema_contract(data):
@@ -251,19 +290,24 @@ def test_parse_rejects_values_outside_exact_schema_contract(data):
 
 def test_parse_rejects_empty_feedback():
     with pytest.raises(ValueError):
-        _parse({"score": 0.5, "risk": "low", "feedback": "   "})
+        _parse({"score": 0.5, "risk": "low", "feedback": "   ",
+                "feedback_for_proposer": "short lesson"})
 
 
 def test_judger_schema_uses_generation_limit_plus_margin():
     schema = _judger_schema()
     assert schema["additionalProperties"] is False
-    assert schema["required"] == ["score", "risk", "feedback"]
+    assert schema["required"] == [
+        "score", "risk", "feedback", "feedback_for_proposer",
+    ]
     assert schema["properties"]["score"] == {
         "type": "number", "minimum": 0.0, "maximum": 1.0,
     }
     assert schema["properties"]["risk"]["enum"] == ["low", "medium", "high"]
     assert schema["properties"]["feedback"]["maxLength"] == 800
     assert schema["properties"]["feedback"]["pattern"] == r"\S"
+    assert schema["properties"]["feedback_for_proposer"]["maxLength"] == 600
+    assert schema["properties"]["feedback_for_proposer"]["pattern"] == r"\S"
 
 
 def test_judge_passes_schema_and_custom_label(tmp_path: Path):
@@ -276,7 +320,8 @@ def test_judge_passes_schema_and_custom_label(tmp_path: Path):
             self.prompt = prompt
             self.schema = json_schema
             self.label = label
-            return {"score": 0.5, "risk": "low", "feedback": "x" * 800}
+            return {"score": 0.5, "risk": "low", "feedback": "x" * 800,
+                    "feedback_for_proposer": "short lesson"}
 
     agent = CapturingAgent()
     judgment = judge(
@@ -295,17 +340,20 @@ def test_judge_passes_schema_and_custom_label(tmp_path: Path):
     assert judgment.feedback == "x" * 800
     assert agent.schema == _judger_schema()
     assert '"feedback": "<300-500 chars, four-part>"' in agent.prompt
+    assert '"feedback_for_proposer"' in agent.prompt
     assert agent.label == "judger r1-c0"
 
 
 def test_parse_accepts_feedback_through_tolerance_limit():
     feedback = "x" * 800
-    assert _parse({"score": 0.5, "risk": "low", "feedback": feedback}).feedback == feedback
+    assert _parse({"score": 0.5, "risk": "low", "feedback": feedback,
+                   "feedback_for_proposer": "short lesson"}).feedback == feedback
 
 
 def test_parse_truncates_feedback_above_tolerance_limit():
     feedback = "x" * 801
-    judgment = _parse({"score": 0.5, "risk": "low", "feedback": feedback})
+    judgment = _parse({"score": 0.5, "risk": "low", "feedback": feedback,
+                       "feedback_for_proposer": "short lesson"})
     assert judgment.feedback == feedback[:800]
 
 
@@ -391,7 +439,8 @@ def test_parse_accepts_landed_state_prefixed_feedback():
     as any other feedback string — the prefix is a convention the proposer reads,
     not a field _parse extracts."""
     jd = _parse({"score": 0.05, "risk": "low",
-                 "feedback": "LANDED_STATE: already-implemented empty diff, 459.3ms"})
+                 "feedback": "LANDED_STATE: already-implemented empty diff, 459.3ms",
+                 "feedback_for_proposer": "The mechanism was already present."})
     assert jd.score == 0.05
     assert jd.risk == "low"
     assert jd.feedback == "LANDED_STATE: already-implemented empty diff, 459.3ms"
@@ -401,7 +450,8 @@ def test_parse_accepts_legacy_feedback_without_prefix():
     """Backward compat: older rounds' feedback (no LANDED_STATE prefix) still
     parses — _parse never looked at the prefix, and it must keep not looking."""
     jd = _parse({"score": 0.83, "risk": "low",
-                 "feedback": "843ms vs 945ms -11%"})
+                 "feedback": "843ms vs 945ms -11%",
+                 "feedback_for_proposer": "The mechanism improved speed."})
     assert jd.feedback == "843ms vs 945ms -11%"
 def test_candidate_acceptance_requires_every_declared_gate_to_pass():
     from simpleloop import loop as loop_mod

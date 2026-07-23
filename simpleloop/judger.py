@@ -27,7 +27,8 @@ When there's no SHA (gate rejected / no change), the judger is still called but
 shown the rejection reason instead of a diff, and asked for a low score + feedback
 telling the proposer to avoid that direction.
 
-Delivers: {"score": 0.0-1.0, "risk": "low"|"medium"|"high", "feedback": "..."}.
+Delivers: {"score": 0.0-1.0, "risk": "low"|"medium"|"high",
+"feedback": "...", "feedback_for_proposer": "..."}.
 `feedback` begins with a `LANDED_STATE: <already-implemented|not-implemented|
 gate-rejected>` tag so the proposer can self-audit whether a direction is already
 landed without guessing from prose. The judger does NOT propose the next
@@ -47,6 +48,7 @@ from .workspace import Workspace
 
 _STRUCTURED_TEXT_MARGIN = 300
 _FEEDBACK_GENERATION_LIMIT = 500
+_FEEDBACK_FOR_PROPOSER_GENERATION_LIMIT = 300
 
 
 @dataclass
@@ -54,6 +56,7 @@ class Judgment:
     score: float
     risk: str                      # low|medium|high - latent-correctness risk of the refactor
     feedback: str                  # 300-500 chars: four-part diagnostic for proposer + final report
+    feedback_for_proposer: str     # concise mechanism-level search context
 
 
 def _judger_schema() -> dict:
@@ -61,7 +64,7 @@ def _judger_schema() -> dict:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["score", "risk", "feedback"],
+        "required": ["score", "risk", "feedback", "feedback_for_proposer"],
         "properties": {
             "score": {
                 "type": "number",
@@ -76,6 +79,15 @@ def _judger_schema() -> dict:
                 "type": "string",
                 "minLength": 1,
                 "maxLength": _FEEDBACK_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
+                "pattern": r"\S",
+            },
+            "feedback_for_proposer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": (
+                    _FEEDBACK_FOR_PROPOSER_GENERATION_LIMIT
+                    + _STRUCTURED_TEXT_MARGIN
+                ),
                 "pattern": r"\S",
             },
         },
@@ -207,8 +219,8 @@ Judging guidance:
 - `risk` is your read of the refactor's LATENT correctness risk (not the measured speed - the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-faithful move with the same operators/evaluation order/types. Be concrete in feedback about WHY the risk level.
 
 Final delivery contract (mandatory):
-- Your final response MUST be exactly one parseable JSON object with three keys:
-  {{"score": <0.0-1.0>, "risk": "<low|medium|high>", "feedback": "<300-500 chars, four-part>"}}
+- Your final response MUST be exactly one parseable JSON object with four keys:
+  {{"score": <0.0-1.0>, "risk": "<low|medium|high>", "feedback": "<300-500 chars, four-part>", "feedback_for_proposer": "<one or two concise sentences>"}}
 - A ```json code fence is acceptable; any prose, heading, commentary, or natural-language summary outside the JSON is forbidden.
 - `feedback` must be 300-500 chars, four labeled parts (1-2 sentences each):
   LANDING_STATE: <not-implemented|already-implemented|gate-rejected>
@@ -216,6 +228,12 @@ Final delivery contract (mandatory):
   Result: <one sentence - the key metric + vs-prior delta + gate pass/fail>
   Analysis: <two sentences - why it succeeded/regressed/failed, and the key heuristic; do not pick the next direction>
 - LANDING_STATE: `not-implemented` (a real diff/commit this round), `already-implemented` (executor made no change, reason="executor made no changes"), `gate-rejected` (changes made but frozen_paths gate rejected them).
+- `feedback_for_proposer` is a short search-context note for later proposal
+  generation. In one or two concise sentences, capture the smallest reusable
+  lesson about the attempted mechanism. When the evidence permits, distinguish
+  what the result says about the mechanism from what may be specific to this
+  implementation. Keep implementation diagnosis in `feedback`; this note does
+  not need to repeat metrics already provided by the harness.
 - Do not suggest the next direction; give current-state diagnostics only.
 - If evidence is incomplete or contradictory, still return the JSON object with a low score and explain the uncertainty in `feedback`.
 """
@@ -259,9 +277,11 @@ def _delta_line(key: str, axis: str, this, other, lower_is_better: bool) -> str:
 
 
 def _parse(data: dict) -> Judgment:
-    if not isinstance(data, dict) or set(data) != {"score", "risk", "feedback"}:
+    required = {"score", "risk", "feedback", "feedback_for_proposer"}
+    if not isinstance(data, dict) or set(data) != required:
         raise ValueError(
-            "judger response must contain only score, risk, and feedback")
+            "judger response must contain only score, risk, feedback, and "
+            "feedback_for_proposer")
     raw_score = data["score"]
     if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
         raise ValueError(f"judger 'score' must be a number 0-1: {data}")
@@ -276,11 +296,24 @@ def _parse(data: dict) -> Judgment:
     feedback = data["feedback"]
     if not isinstance(feedback, str) or not feedback.strip():
         raise ValueError(f"judger 'feedback' must be a non-empty string (300-500 chars, four-part): {data}")
+    feedback_for_proposer = data["feedback_for_proposer"]
+    if (
+        not isinstance(feedback_for_proposer, str)
+        or not feedback_for_proposer.strip()
+    ):
+        raise ValueError(
+            "judger 'feedback_for_proposer' must be a non-empty string: "
+            f"{data}"
+        )
     return Judgment(
         score=score,
         risk=risk,
         feedback=feedback.strip()[
             :_FEEDBACK_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN
+        ],
+        feedback_for_proposer=feedback_for_proposer.strip()[
+            :_FEEDBACK_FOR_PROPOSER_GENERATION_LIMIT
+            + _STRUCTURED_TEXT_MARGIN
         ],
     )
 
