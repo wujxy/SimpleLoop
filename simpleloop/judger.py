@@ -42,11 +42,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .agent import Agent
+from .agent import Agent, normalize_free_text
 from .workspace import Workspace
 
 
-_STRUCTURED_TEXT_MARGIN = 300
+_STRUCTURED_TEXT_MARGIN = 500
 _FEEDBACK_GENERATION_LIMIT = 500
 _FEEDBACK_FOR_PROPOSER_GENERATION_LIMIT = 300
 
@@ -60,7 +60,7 @@ class Judgment:
 
 
 def _judger_schema() -> dict:
-    """Keep strict structure while accepting N+300 feedback headroom."""
+    """Require strict structure while leaving free-text length to the parser."""
     return {
         "type": "object",
         "additionalProperties": False,
@@ -78,16 +78,11 @@ def _judger_schema() -> dict:
             "feedback": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": _FEEDBACK_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
                 "pattern": r"\S",
             },
             "feedback_for_proposer": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": (
-                    _FEEDBACK_FOR_PROPOSER_GENERATION_LIMIT
-                    + _STRUCTURED_TEXT_MARGIN
-                ),
                 "pattern": r"\S",
             },
         },
@@ -128,7 +123,7 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
         label=label,
         json_schema=_judger_schema(),
     )
-    return _parse(data)
+    return _parse(data, label=label)
 
 
 def _build_prompt(goal: str, proposal: str, diff: str, eval_block: str,
@@ -276,7 +271,7 @@ def _delta_line(key: str, axis: str, this, other, lower_is_better: bool) -> str:
     return f"  Delta vs {axis:<8}: {key} {sign}  ({tag})"
 
 
-def _parse(data: dict) -> Judgment:
+def _parse(data: dict, *, label: str = "judger") -> Judgment:
     required = {"score", "risk", "feedback", "feedback_for_proposer"}
     if not isinstance(data, dict) or set(data) != required:
         raise ValueError(
@@ -308,13 +303,21 @@ def _parse(data: dict) -> Judgment:
     return Judgment(
         score=score,
         risk=risk,
-        feedback=feedback.strip()[
-            :_FEEDBACK_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN
-        ],
-        feedback_for_proposer=feedback_for_proposer.strip()[
-            :_FEEDBACK_FOR_PROPOSER_GENERATION_LIMIT
-            + _STRUCTURED_TEXT_MARGIN
-        ],
+        feedback=normalize_free_text(
+            feedback,
+            limit=_FEEDBACK_GENERATION_LIMIT + _STRUCTURED_TEXT_MARGIN,
+            label=label,
+            field="feedback",
+        ),
+        feedback_for_proposer=normalize_free_text(
+            feedback_for_proposer,
+            limit=(
+                _FEEDBACK_FOR_PROPOSER_GENERATION_LIMIT
+                + _STRUCTURED_TEXT_MARGIN
+            ),
+            label=label,
+            field="feedback_for_proposer",
+        ),
     )
 
 

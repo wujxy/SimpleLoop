@@ -334,7 +334,7 @@ def test_parse_rejects_empty_feedback():
                 "feedback_for_proposer": "short lesson"})
 
 
-def test_judger_schema_uses_generation_limit_plus_margin():
+def test_judger_schema_keeps_structure_without_text_max_lengths():
     schema = _judger_schema()
     assert schema["additionalProperties"] is False
     assert schema["required"] == [
@@ -344,13 +344,13 @@ def test_judger_schema_uses_generation_limit_plus_margin():
         "type": "number", "minimum": 0.0, "maximum": 1.0,
     }
     assert schema["properties"]["risk"]["enum"] == ["low", "medium", "high"]
-    assert schema["properties"]["feedback"]["maxLength"] == 800
+    assert "maxLength" not in schema["properties"]["feedback"]
     assert schema["properties"]["feedback"]["pattern"] == r"\S"
-    assert schema["properties"]["feedback_for_proposer"]["maxLength"] == 600
+    assert "maxLength" not in schema["properties"]["feedback_for_proposer"]
     assert schema["properties"]["feedback_for_proposer"]["pattern"] == r"\S"
 
 
-def test_judge_passes_schema_and_custom_label(tmp_path: Path):
+def test_judge_passes_schema_and_custom_label(tmp_path: Path, capsys):
     class CapturingAgent:
         schema = None
         label = None
@@ -360,7 +360,7 @@ def test_judge_passes_schema_and_custom_label(tmp_path: Path):
             self.prompt = prompt
             self.schema = json_schema
             self.label = label
-            return {"score": 0.5, "risk": "low", "feedback": "x" * 800,
+            return {"score": 0.5, "risk": "low", "feedback": "x" * 1001,
                     "feedback_for_proposer": "short lesson"}
 
     agent = CapturingAgent()
@@ -377,24 +377,52 @@ def test_judge_passes_schema_and_custom_label(tmp_path: Path):
         label="judger r1-c0",
     )
 
-    assert judgment.feedback == "x" * 800
+    assert judgment.feedback == "x" * 1000
     assert agent.schema == _judger_schema()
     assert '"feedback": "<300-500 chars, four-part>"' in agent.prompt
     assert '"feedback_for_proposer"' in agent.prompt
     assert agent.label == "judger r1-c0"
+    assert capsys.readouterr().out == (
+        "[judger r1-c0] warning: feedback length 1001 exceeds 1000; "
+        "truncated to 1000\n"
+    )
 
 
-def test_parse_accepts_feedback_through_tolerance_limit():
-    feedback = "x" * 800
-    assert _parse({"score": 0.5, "risk": "low", "feedback": feedback,
-                   "feedback_for_proposer": "short lesson"}).feedback == feedback
+def test_parse_accepts_judger_n_plus_500_without_warning(capsys):
+    judgment = _parse(
+        {
+            "score": 0.5,
+            "risk": "low",
+            "feedback": "f" * 1000,
+            "feedback_for_proposer": "p" * 800,
+        },
+        label="judger r1-c0",
+    )
+
+    assert len(judgment.feedback) == 1000
+    assert len(judgment.feedback_for_proposer) == 800
+    assert capsys.readouterr().out == ""
 
 
-def test_parse_truncates_feedback_above_tolerance_limit():
-    feedback = "x" * 801
-    judgment = _parse({"score": 0.5, "risk": "low", "feedback": feedback,
-                       "feedback_for_proposer": "short lesson"})
-    assert judgment.feedback == feedback[:800]
+def test_parse_warns_and_truncates_judger_text_with_candidate_label(capsys):
+    judgment = _parse(
+        {
+            "score": 0.5,
+            "risk": "low",
+            "feedback": "f" * 1001,
+            "feedback_for_proposer": "p" * 801,
+        },
+        label="judger r14-c2",
+    )
+
+    assert len(judgment.feedback) == 1000
+    assert len(judgment.feedback_for_proposer) == 800
+    assert capsys.readouterr().out == (
+        "[judger r14-c2] warning: feedback length 1001 exceeds 1000; "
+        "truncated to 1000\n"
+        "[judger r14-c2] warning: feedback_for_proposer length 801 exceeds 800; "
+        "truncated to 800\n"
+    )
 
 
 
