@@ -147,7 +147,7 @@ def run(config_path: str | Path, run_dir: str | Path,
             print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
                   f"max_rounds={n_rounds} -- nothing to do. Bump loop.max_rounds in "
                   f"the config to add more rounds.", flush=True)
-            _refresh_progress_plot(store)
+            _refresh_progress_plot(store, telemetry.plot_context())
             store.write_final_report(cfg["goal"])
             return _summary(store, workspace, run_dir_path)
         parent_sha, last_accepted = _resume_chain(
@@ -257,7 +257,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                 memory_mod.append_insight(
                     insights_path, round_id, insight_text, insight_refs,
                 )
-            _refresh_progress_plot(store)
+            _refresh_progress_plot(store, telemetry.plot_context())
             parent_sha = next_base_sha
             continue
 
@@ -360,7 +360,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                      accepted=accepted, base_sha=next_base_sha,
                      feedback_for_proposer=judgment.feedback_for_proposer,
                      telemetry=telemetry.snapshot(persist=True))
-        _refresh_progress_plot(store)
+        _refresh_progress_plot(store, telemetry.plot_context())
         if accepted:
             prior_eval_block = eval_block or prior_eval_block
             prior_metrics = eval_metrics or prior_metrics
@@ -384,13 +384,18 @@ def _summary(store: Store, workspace: Workspace, run_dir_path: Path) -> dict:
     }
 
 
-def _refresh_progress_plot(store: Store) -> None:
+def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> None:
     try:
         history = store.history()
     except Exception as exc:
         print(f"[plot] warning: could not read {store.path}: {exc}", flush=True)
         return
-    plot_mod.write_progress_png(store.run_dir, history, store.metrics_schema)
+    if plot_context is None:
+        plot_mod.write_progress_png(store.run_dir, history, store.metrics_schema)
+    else:
+        plot_mod.write_progress_pngs(
+            store.run_dir, history, store.metrics_schema, plot_context,
+        )
 
 
 def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
@@ -419,7 +424,10 @@ def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
                  feedback_for_proposer=proposer_failure,
                  telemetry=(telemetry_tracker.snapshot(persist=True)
                             if telemetry_tracker else {}))
-    _refresh_progress_plot(store)
+    if telemetry_tracker:
+        _refresh_progress_plot(store, telemetry_tracker.plot_context())
+    else:
+        _refresh_progress_plot(store)
 
 
 def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
