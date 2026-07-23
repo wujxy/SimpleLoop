@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from . import loop
 from . import config as config_mod
+from . import memory
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -39,7 +41,44 @@ def main(argv: list[str] | None = None) -> None:
     validate = sub.add_parser("validate", help="Validate a config without running.")
     validate.add_argument("--config", required=True, help="Task config (YAML/JSON).")
 
+    memory_parser = sub.add_parser(
+        "memory", help="Inspect current-run Search Memory."
+    )
+    memory_sub = memory_parser.add_subparsers(
+        dest="memory_command", required=True
+    )
+    memory_show = memory_sub.add_parser(
+        "show",
+        help="Show one historical candidate by r<round>c<candidate> ref.",
+    )
+    memory_show.add_argument("ref")
+    memory_show.add_argument("--run-dir")
+
     args = parser.parse_args(argv)
+
+    if args.command == "memory":
+        if args.run_dir:
+            run_dir = Path(args.run_dir).expanduser().resolve()
+        else:
+            cwd = Path.cwd()
+            run_dir = cwd if (cwd / "history.jsonl").exists() else cwd.parent
+        history_path = run_dir / "history.jsonl"
+        if not history_path.exists():
+            print(
+                f"Error: no history.jsonl for current run at {run_dir}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        try:
+            episode = memory.resolve_episode(
+                memory.read_history(history_path),
+                args.ref,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(episode, ensure_ascii=False, indent=2))
+        return
 
     if args.command == "validate":
         try:
