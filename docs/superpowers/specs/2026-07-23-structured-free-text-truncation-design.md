@@ -1,7 +1,7 @@
 # Structured Free-Text Truncation Design
 
-**Status:** Approved design  
-**Date:** 2026-07-23  
+**Status:** Approved design
+**Date:** 2026-07-23
 **Scope:** Proposer and Judger structured-output free-text handling
 
 ## 1. Goal

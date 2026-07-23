@@ -105,9 +105,19 @@ def test_proposer_schema_keeps_structure_without_text_max_lengths():
     assert "maxLength" not in schema["properties"]["reflection"]
     assert "maxLength" not in schema["properties"]["insight"]
     assert "maxLength" not in schema["properties"]["insight_refs"]["items"]
+    assert schema["properties"]["reflection"]["type"] == "string"
+    assert schema["properties"]["insight"]["type"] == "string"
+    assert schema["properties"]["insight_refs"]["items"]["type"] == "string"
+    proposal_items = proposals["items"]
+    assert proposal_items["additionalProperties"] is False
+    assert proposal_items["required"] == ["family", "decision", "proposal"]
     item_properties = proposals["items"]["properties"]
     assert "maxLength" not in item_properties["family"]
     assert "maxLength" not in item_properties["proposal"]
+    assert item_properties["family"]["type"] == "string"
+    assert item_properties["family"]["minLength"] == 1
+    assert item_properties["proposal"]["type"] == "string"
+    assert item_properties["proposal"]["minLength"] == 1
     assert item_properties["proposal"]["pattern"] == r"\S"
     assert item_properties["family"]["pattern"] == r"\S"
     assert item_properties["decision"]["enum"] == ["continue", "switch"]
@@ -281,6 +291,32 @@ def test_parse_batch_rejects_invalid_decision():
                 "proposals": [
                     {"family": "layout", "decision": "maybe", "proposal": "p0"},
                 ],
+            },
+            candidates_per_round=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "proposal",
+    [
+        {"family": "", "decision": "switch", "proposal": "p"},
+        {"family": "   ", "decision": "switch", "proposal": "p"},
+        {"family": 7, "decision": "switch", "proposal": "p"},
+        {"family": "f", "decision": "switch", "proposal": ""},
+        {"family": "f", "decision": "switch", "proposal": "   "},
+        {"family": "f", "decision": "switch", "proposal": 7},
+        {"family": "f", "decision": "switch", "proposal": "p", "extra": True},
+        {"family": "f", "decision": "switch"},
+    ],
+)
+def test_parse_batch_rejects_invalid_nested_contract(proposal):
+    with pytest.raises(ValueError):
+        _parse_batch(
+            {
+                "reflection": "r",
+                "insight": "",
+                "insight_refs": [],
+                "proposals": [proposal],
             },
             candidates_per_round=1,
         )
