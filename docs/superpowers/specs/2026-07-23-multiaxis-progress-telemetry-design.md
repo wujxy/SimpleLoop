@@ -69,8 +69,7 @@ starts when a fresh run begins and includes:
 - builds and evaluation commands;
 - scheduling and waits while the run process is active.
 
-The clock uses a monotonic source. UTC timestamps are audit metadata only and
-are not used to calculate durations. On `--continue`, the new active segment is
+The clock uses a monotonic source. On `--continue`, the new active segment is
 added to the last persisted cumulative worktime; time while SimpleLoop was not
 running is excluded.
 
@@ -90,22 +89,18 @@ proposal mode has no proposer usage. Parallel candidate usage is counted once
 per actual Claude call.
 
 If an expected call does not return parseable usage, the global processed-token
-coordinate becomes unavailable from that call onward. Partial totals may be
-retained for diagnostics, but they are not plotted as exact cumulative token
-coordinates and no token count is estimated.
+coordinate becomes unavailable from that call onward and no token count is
+estimated.
 
 ## Persisted Telemetry
 
 Add a focused `simpleloop/telemetry.py` module. It owns a thread-safe run-level
 tracker and an atomically written `run_dir/telemetry.json`.
 
-The run-level document contains:
+The run-level document contains only:
 
-- a telemetry schema version;
-- fresh-run start time in UTC;
 - last persisted cumulative active worktime;
-- token-category cumulative totals;
-- whether the processed-token total remains complete;
+- cumulative processed tokens, or `null` after incomplete usage;
 - the fixed initial baseline metrics;
 - the telemetry snapshot taken when baseline evaluation completed.
 
@@ -119,7 +114,6 @@ The tracker exposes snapshots containing:
 ```text
 worktime_seconds
 processed_tokens | null
-token_usage_complete
 ```
 
 Snapshots are persisted into `history.jsonl`:
@@ -166,8 +160,10 @@ separable from collection and can be tested without pixel inspection.
 - Objective y coordinate: numeric configured objective.
 - Ratio y coordinate: numeric objective divided by the fixed baseline.
 
-All candidates are scatter points. The selected candidates receive prominent
-markers, and selected scores may be connected in completion order.
+All candidates are scatter points. The one selected candidate from each
+generation receives a prominent marker. Selected scores are connected across
+successive rounds using the x coordinate of each selected candidate's
+completion snapshot.
 
 ### Incumbent Lines
 
@@ -221,9 +217,8 @@ Rendering conventions:
 - accepted incumbents use prominent step lines;
 - score uses the fixed range `[0, 1]`;
 - round ticks use one-based integers;
-- worktime is stored in seconds and displayed in seconds, minutes, or hours
-  according to the plotted span;
-- tokens are stored as integers and formatted with readable K/M tick labels;
+- worktime is stored in seconds and displayed in hours;
+- tokens are stored and displayed as processed-token counts;
 - objective titles retain the configured lower/higher-is-better direction.
 
 Build the common series once per refresh, then render the overview and details.
@@ -249,9 +244,8 @@ when they were written.
 
 - Telemetry collection, usage parsing, persistence, and plotting are non-fatal.
 - `telemetry.json` uses a temporary file and atomic replacement.
-- A corrupt or unsupported telemetry file on `--continue` produces a warning.
-  Worktime resumes from the last valid persisted history snapshot when
-  possible; exact token coordinates become unavailable rather than guessed.
+- A corrupt telemetry file on `--continue` produces a warning. Continued
+  worktime and token coordinates become unavailable rather than guessed.
 - Invalid objective, baseline, ratio, or coordinate values are skipped.
 - Temporary PNGs are cleaned up best-effort after failures.
 - Plot warnings identify the affected output without dumping large payloads.
