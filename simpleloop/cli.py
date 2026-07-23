@@ -12,6 +12,7 @@ from pathlib import Path
 from . import loop
 from . import config as config_mod
 from . import memory
+from .image import ImageBuildError, build_image
 from .runtime import RuntimePreflightError
 
 
@@ -42,6 +43,26 @@ def main(argv: list[str] | None = None) -> None:
     validate = sub.add_parser("validate", help="Validate a config without running.")
     validate.add_argument("--config", required=True, help="Task config (YAML/JSON).")
 
+    image_parser = sub.add_parser(
+        "image",
+        help="Build Apptainer images.",
+    )
+    image_sub = image_parser.add_subparsers(
+        dest="image_command",
+        required=True,
+    )
+    image_build = image_sub.add_parser(
+        "build",
+        help="Build a SIF from a definition file.",
+    )
+    image_build.add_argument("definition")
+    image_build.add_argument("--output")
+    image_build.add_argument(
+        "--force",
+        action="store_true",
+        help="Explicitly allow Apptainer to overwrite an existing SIF.",
+    )
+
     memory_parser = sub.add_parser(
         "memory", help="Inspect current-run Search Memory."
     )
@@ -56,6 +77,19 @@ def main(argv: list[str] | None = None) -> None:
     memory_show.add_argument("--run-dir")
 
     args = parser.parse_args(argv)
+
+    if args.command == "image":
+        try:
+            output = build_image(
+                args.definition,
+                args.output,
+                force=args.force,
+            )
+        except ImageBuildError as exc:
+            print(f"Image build error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Built image: {output}")
+        return
 
     if args.command == "memory":
         if args.run_dir:
