@@ -363,11 +363,13 @@ def test_parse_truncates_feedback_above_tolerance_limit():
 def test_store_persists_feedback(tmp_path: Path):
     store = Store(tmp_path)
     store.append(0, "p0", "sha0", 0.7, "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: -10% speed\nAnalysis: cache locality",
-                 eval_block="e0")
+                 eval_block="e0",
+                 feedback_for_proposer="Precomputation is worth revisiting.")
     rows = store.history()
     assert len(rows) == 1
     assert "LANDED_STATE" in rows[0]["feedback"]
     assert "Implemented:" in rows[0]["feedback"]
+    assert rows[0]["feedback_for_proposer"] == "Precomputation is worth revisiting."
     assert rows[0]["eval_block"] == "e0"
 
 

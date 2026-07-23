@@ -276,7 +276,9 @@ def test_record_failure_refreshes_progress_plot(monkeypatch, tmp_path):
     )
 
     assert refreshed == [store]
-    assert len(store.history()) == 1
+    history = store.history()
+    assert len(history) == 1
+    assert history[0]["feedback_for_proposer"] == "[loop failure] executor failed"
 
 
 def test_noop_continue_refreshes_plot_and_report(monkeypatch, tmp_path):

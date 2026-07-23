@@ -426,11 +426,13 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
         {"candidate": 0, "family": "hoist", "proposal": "p0", "sha": "a",
          "score": 0.5, "risk": "low",
          "feedback": "LANDED_STATE: not-implemented\nImplemented: p0\nResult: worse\nAnalysis: no win.",
+         "feedback_for_proposer": "Hoisting did not help this workload.",
          "metrics": {"SPEED_MS": 600.0, "CORRECTNESS": True},
          "changed_paths": ["a.cc"], "accepted": True, "selected": False},
         {"candidate": 1, "family": "layout", "proposal": "p1", "sha": "b",
          "score": 0.7, "risk": "low",
          "feedback": "LANDED_STATE: not-implemented\nImplemented: p1\nResult: better\nAnalysis: cache locality.",
+         "feedback_for_proposer": "Layout remains a promising direction.",
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True},
          "changed_paths": ["b.cc"], "accepted": True, "selected": True},
     ]
@@ -440,6 +442,10 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     rows = store.history()
     assert rows[0]["selected_sha"] == "b"
     assert rows[0]["candidates"][1]["selected"] is True
+    assert rows[0]["feedback_for_proposer"] == "Layout remains a promising direction."
+    assert rows[0]["candidates"][0]["feedback_for_proposer"] == (
+        "Hoisting did not help this workload."
+    )
     assert store.best_sha == "b"
 
     projected = views.for_proposer(rows)
@@ -516,7 +522,8 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
     def fake_judge(agent, **kwargs):
         judger_labels.append(kwargs["label"])
         return Judgment(score=0.5, risk="low",
-                        feedback="LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z.")
+                        feedback="LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z.",
+                        feedback_for_proposer="The mechanism remains plausible.")
 
     monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(loop_mod.judger_mod, "run_eval", fake_run_eval)
@@ -569,6 +576,9 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
         }, FakeWorkspace(), object(), object(), {}, {}, None, "")
 
     assert candidates[0]["score"] == 0.0
+    assert candidates[0]["feedback_for_proposer"] == (
+        "[loop failure] bad structured feedback"
+    )
     assert "candidate r2-c0 failed: bad structured feedback" in capsys.readouterr().out
 
 

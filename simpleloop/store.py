@@ -1,7 +1,7 @@
 """History store: append-only JSONL of each round + best tracking.
 
 Each round records {round, proposal, sha, accepted, base_sha, score, risk,
-feedback, eval_block, metrics}. `sha` is the attempted
+feedback, feedback_for_proposer, eval_block, metrics}. `sha` is the attempted
 candidate; `base_sha` is the accepted cumulative source after that round. The
 best commit is selected by the HARNESS, by the real objective metric — NOT by
 the judger's subjective 0-1 score. This is the fix for
@@ -70,7 +70,8 @@ class Store:
                reflection: str = "",
                decision: str = "",
                accepted: bool = False,
-               base_sha: str | None = None) -> None:
+               base_sha: str | None = None,
+               feedback_for_proposer: str = "") -> None:
         """Record one round and update best selection.
 
         risk defaults to 'high' — a caller that doesn't supply one (e.g. a loop
@@ -100,6 +101,7 @@ class Store:
             "score": score,
             "risk": risk,
             "feedback": feedback,
+            "feedback_for_proposer": feedback_for_proposer,
             "eval_block": (eval_block or "")[:_HIST_EVAL_CAP],
             "metrics": eval_metrics or {},
             "changed_paths": changed_paths or [],
@@ -136,6 +138,7 @@ class Store:
                 "risk": c.get("risk", "high"),
                 "decision": c.get("decision", ""),
                 "feedback": c.get("feedback", ""),
+                "feedback_for_proposer": c.get("feedback_for_proposer", ""),
                 "eval_block": (c.get("eval_block") or "")[:_HIST_EVAL_CAP],
                 "metrics": c.get("metrics") or {},
                 "changed_paths": c.get("changed_paths") or [],
@@ -153,6 +156,10 @@ class Store:
             "score": selected.get("score") if selected else 0.0,
             "risk": selected.get("risk", "high") if selected else "high",
             "feedback": selected.get("feedback", "") if selected else "[no selected candidate]",
+            "feedback_for_proposer": (
+                selected.get("feedback_for_proposer", "")
+                if selected else "[no selected candidate]"
+            ),
             "metrics": selected.get("metrics", {}) if selected else {},
             "changed_paths": selected.get("changed_paths", []) if selected else [],
             "accepted": bool(selected_sha),

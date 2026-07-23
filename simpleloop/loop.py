@@ -348,7 +348,8 @@ def run(config_path: str | Path, run_dir: str | Path,
                      eval_block, eval_metrics=eval_metrics, risk=judgment.risk,
                      changed_paths=result.changed_paths,
                      reflection=reflection, decision=decision,
-                     accepted=accepted, base_sha=next_base_sha)
+                     accepted=accepted, base_sha=next_base_sha,
+                     feedback_for_proposer=judgment.feedback_for_proposer)
         _refresh_progress_plot(store)
         if accepted:
             prior_eval_block = eval_block or prior_eval_block
@@ -395,11 +396,13 @@ def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
     not a ship candidate). reflection/decision default empty — a proposer
     crash (L192) has neither; an executor/judger crash (L209/L251) passes the
     proposer's reflection/decision through so the audit trail is complete."""
-    store.append(round_id, proposal, sha, 0.0, f"[loop failure] {reason}", eval_block,
+    failure_feedback = f"[loop failure] {reason}"
+    store.append(round_id, proposal, sha, 0.0, failure_feedback, eval_block,
                  eval_metrics=eval_metrics or {}, risk="high",
                  changed_paths=changed_paths or [],
                  reflection=reflection, decision=decision,
-                 accepted=accepted, base_sha=base_sha)
+                 accepted=accepted, base_sha=base_sha,
+                 feedback_for_proposer=failure_feedback)
     _refresh_progress_plot(store)
 
 
@@ -501,6 +504,7 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
             "score": judgment.score,
             "risk": judgment.risk,
             "feedback": judgment.feedback,
+            "feedback_for_proposer": judgment.feedback_for_proposer,
             "eval_block": eval_block,
             "metrics": eval_metrics,
             "changed_paths": result.changed_paths,
@@ -527,6 +531,7 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
                        eval_block: str = "", eval_metrics: dict | None = None,
                        changed_paths: list[str] | None = None,
                        accepted: bool = False) -> dict:
+    failure_feedback = f"[loop failure] {reason[:200]}"
     return {
         "candidate": candidate_id,
         "family": proposal.family,
@@ -535,7 +540,8 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
         "sha": sha,
         "score": 0.0,
         "risk": "high",
-        "feedback": f"[loop failure] {reason[:200]}",
+        "feedback": failure_feedback,
+        "feedback_for_proposer": failure_feedback,
         "eval_block": eval_block,
         "metrics": eval_metrics or {},
         "changed_paths": changed_paths or [],
