@@ -27,6 +27,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 class AgentError(RuntimeError):
@@ -61,6 +62,26 @@ def normalize_free_text(
 class AgentResult:
     text: str           # the agent's response text (inside the JSON envelope)
     data: dict          # parsed JSON object (run_json only)
+    usage: object = None
+
+
+def _decode_output(stdout: str) -> AgentResult:
+    """Decode Claude's JSON envelope without interpreting usage semantics."""
+    text = stdout
+    data: dict = {}
+    usage: object = None
+    try:
+        outer = json.loads(stdout)
+        if isinstance(outer, dict):
+            structured = outer.get("structured_output")
+            if isinstance(structured, dict):
+                data = structured
+            if isinstance(outer.get("result"), str):
+                text = outer["result"]
+            usage = outer.get("usage")
+    except json.JSONDecodeError:
+        pass
+    return AgentResult(text=text, data=data, usage=usage)
 
 
 class Agent:
@@ -72,6 +93,7 @@ class Agent:
         model: str | None = None,
         allowed_tools: str = "Read,Edit,Write,Bash",
         max_output_tokens: int = 64000,
+        usage_observer: Callable[[object], None] | None = None,
     ):
         self.command = command
         self.timeout_seconds = timeout_seconds
@@ -85,6 +107,18 @@ class Agent:
         # Passed to the subprocess as CLAUDE_CODE_MAX_OUTPUT_TOKENS (the env var
         # claude reads), inheriting the rest of the host env.
         self.max_output_tokens = max_output_tokens
+        self.usage_observer = usage_observer
+
+    def _notify_usage(self, usage: object, label: str) -> None:
+        if self.usage_observer is None:
+            return
+        try:
+            self.usage_observer(usage)
+        except Exception as exc:
+            print(
+                f"[telemetry] warning: {label} usage was not recorded: {exc}",
+                flush=True,
+            )
 
     def run_json(
         self,
@@ -186,6 +220,7 @@ class Agent:
             now = time.monotonic()
             if now >= deadline:
                 _kill_group(proc)
+                self._notify_usage(None, label)
                 raise AgentError(
                     f"[{label}] timed out after {self.timeout_seconds}s\n"
                     f"stderr: {''.join(err_buf).strip()[:2000]}"
@@ -200,6 +235,7 @@ class Agent:
         t_err.join(timeout=2)
         t_feed.join(timeout=2)
         if write_err:
+            self._notify_usage(None, label)
             # The agent died before/while we wrote stdin — surface it (returncode
             # will be nonzero and stderr will carry the real cause too, but be
             # explicit so the ARG_MAX-class failure is obvious if it ever recurs).
@@ -214,6 +250,8 @@ class Agent:
         stdout = "".join(out_buf)
         stderr = "".join(err_buf)
         elapsed = self.timeout_seconds - (deadline - time.monotonic())
+        result = _decode_output(stdout)
+        self._notify_usage(result.usage, label)
 
         if proc.returncode != 0:
             raise AgentError(
@@ -222,20 +260,7 @@ class Agent:
             )
         print(f"[{label}] claude call finished ({elapsed:.0f}s)", flush=True)
 
-        # Claude Code's --output-format json wraps the agent text in a "result" field.
-        text = stdout
-        data: dict = {}
-        try:
-            outer = json.loads(stdout)
-            if isinstance(outer, dict):
-                structured = outer.get("structured_output")
-                if isinstance(structured, dict):
-                    data = structured
-                if isinstance(outer.get("result"), str):
-                    text = outer["result"]
-        except json.JSONDecodeError:
-            pass  # older/fake wrappers print the agent text directly
-        return AgentResult(text=text, data=data)
+        return result
 
     def _resolve_command(self) -> str:
         found = shutil.which(self.command)
