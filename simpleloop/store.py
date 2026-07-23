@@ -71,7 +71,8 @@ class Store:
                decision: str = "",
                accepted: bool = False,
                base_sha: str | None = None,
-               feedback_for_proposer: str = "") -> None:
+               feedback_for_proposer: str = "",
+               telemetry: dict | None = None) -> None:
         """Record one round and update best selection.
 
         risk defaults to 'high' — a caller that doesn't supply one (e.g. a loop
@@ -109,6 +110,7 @@ class Store:
             "decision": decision,
             "accepted": bool(accepted),
             "base_sha": base_sha,
+            "telemetry": dict(telemetry or {}),
         }
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -125,7 +127,8 @@ class Store:
                           selected_candidate: int | None,
                           selected_sha: str | None,
                           candidates: list[dict],
-                          reflection: str = "") -> None:
+                          reflection: str = "",
+                          telemetry: dict | None = None) -> None:
         """Record a self-loop generation with multiple candidate attempts."""
         normalized = []
         for i, c in enumerate(candidates):
@@ -144,6 +147,7 @@ class Store:
                 "changed_paths": c.get("changed_paths") or [],
                 "accepted": bool(c.get("accepted")),
                 "selected": c.get("candidate", i) == selected_candidate,
+                "telemetry": dict(c.get("telemetry") or {}),
             })
         selected = next((c for c in normalized if c["selected"]), None)
         record = {
@@ -167,6 +171,7 @@ class Store:
             "reflection": reflection,
             "decision": selected.get("decision", "") if selected else "",
             "candidates": normalized,
+            "telemetry": dict(telemetry or {}),
         }
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")

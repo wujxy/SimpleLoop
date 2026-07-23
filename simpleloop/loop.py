@@ -35,6 +35,7 @@ from . import plot as plot_mod
 from . import proposer as proposer_mod
 from . import views
 from .store import Store
+from .telemetry import RunTelemetry
 from .workspace import Workspace
 
 
@@ -59,6 +60,7 @@ def run(config_path: str | Path, run_dir: str | Path,
     # repo's cwd while Popen resolves them relative to the loop's cwd -> mismatch.
     run_dir_path = Path(run_dir).resolve()
     run_dir_path.mkdir(parents=True, exist_ok=True)
+    telemetry = RunTelemetry(run_dir_path, resume=continue_run)
 
     static_proposals = _load_proposals(proposals)
     if static_proposals is not None and continue_run:
@@ -88,11 +90,14 @@ def run(config_path: str | Path, run_dir: str | Path,
     # one round (no half-work).
     timeout = cfg.get("agent_timeout_seconds", 3600)
     proposer_agent = Agent(command="claude", timeout_seconds=timeout,
-                           allowed_tools="Read,Bash")
+                           allowed_tools="Read,Bash",
+                           usage_observer=telemetry.record_usage)
     executor_agent = Agent(command="claude", timeout_seconds=timeout,
-                           allowed_tools="Read,Edit,Write,Bash")
+                           allowed_tools="Read,Edit,Write,Bash",
+                           usage_observer=telemetry.record_usage)
     judger_agent = Agent(command="claude", timeout_seconds=timeout,
-                         allowed_tools="Read,Bash")
+                         allowed_tools="Read,Bash",
+                         usage_observer=telemetry.record_usage)
     workspace = Workspace(
         run_dir=run_dir_path,
         repo_path=cfg["repo_path"],
@@ -162,6 +167,7 @@ def run(config_path: str | Path, run_dir: str | Path,
             prior_eval_block = baseline_eval_block or ""
     else:
         baseline_eval_block, baseline_metrics = _eval_baseline(workspace, cfg, parent_sha)
+        telemetry.set_baseline(baseline_metrics)
         # round 0's "prior round" is the baseline. Updated to each round's eval after
         # that round is recorded. Both the raw text (for the record) and the parsed
         # metrics (for the FACTS block) are threaded forward.
@@ -220,7 +226,7 @@ def run(config_path: str | Path, run_dir: str | Path,
             candidates = _run_candidates(
                 proposals_batch, round_id, parent_sha, cfg, workspace,
                 executor_agent, judger_agent, prior_metrics, baseline_metrics,
-                metrics_schema, gate_lines,
+                metrics_schema, gate_lines, telemetry,
             )
             winner = _select_winner(
                 candidates,
@@ -244,6 +250,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                 round_id, parent_sha=parent_sha,
                 selected_candidate=selected_candidate, selected_sha=selected_sha,
                 candidates=candidates, reflection=reflection,
+                telemetry=telemetry.snapshot(persist=True),
             )
             if pending_insight is not None:
                 insight_text, insight_refs = pending_insight
@@ -267,7 +274,8 @@ def run(config_path: str | Path, run_dir: str | Path,
             print(f"[{stamp()}] executor failed: {exc}", flush=True)
             workspace.remove_worktree(round_id)
             _record_failure(store, round_id, proposal, "executor failed: " + str(exc)[:200],
-                            reflection=reflection, decision=decision, base_sha=parent_sha)
+                            reflection=reflection, decision=decision, base_sha=parent_sha,
+                            telemetry_tracker=telemetry)
             continue
 
         if result.sha:
@@ -317,7 +325,8 @@ def run(config_path: str | Path, run_dir: str | Path,
             _record_failure(store, round_id, proposal, "judger failed: " + str(exc)[:200], result.sha,
                             eval_block, eval_metrics, changed_paths=result.changed_paths,
                             reflection=reflection, decision=decision,
-                            accepted=accepted, base_sha=next_base_sha)
+                            accepted=accepted, base_sha=next_base_sha,
+                            telemetry_tracker=telemetry)
             if accepted:
                 prior_eval_block = eval_block or prior_eval_block
                 prior_metrics = eval_metrics or prior_metrics
@@ -349,7 +358,8 @@ def run(config_path: str | Path, run_dir: str | Path,
                      changed_paths=result.changed_paths,
                      reflection=reflection, decision=decision,
                      accepted=accepted, base_sha=next_base_sha,
-                     feedback_for_proposer=judgment.feedback_for_proposer)
+                     feedback_for_proposer=judgment.feedback_for_proposer,
+                     telemetry=telemetry.snapshot(persist=True))
         _refresh_progress_plot(store)
         if accepted:
             prior_eval_block = eval_block or prior_eval_block
@@ -388,7 +398,8 @@ def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
                     eval_metrics: dict | None = None,
                     changed_paths: list[str] | None = None,
                     reflection: str = "", decision: str = "",
-                    accepted: bool = False, base_sha: str | None = None) -> None:
+                    accepted: bool = False, base_sha: str | None = None,
+                    telemetry_tracker: RunTelemetry | None = None) -> None:
     """Record a round where a role crashed, so history stays complete.
 
     A failed round never has a valid risk band; record risk as 'high' so it is
@@ -405,7 +416,9 @@ def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
                  changed_paths=changed_paths or [],
                  reflection=reflection, decision=decision,
                  accepted=accepted, base_sha=base_sha,
-                 feedback_for_proposer=proposer_failure)
+                 feedback_for_proposer=proposer_failure,
+                 telemetry=(telemetry_tracker.snapshot(persist=True)
+                            if telemetry_tracker else {}))
     _refresh_progress_plot(store)
 
 
@@ -413,16 +426,23 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
                     parent_sha: str, cfg: dict, workspace: Workspace,
                     executor_agent: Agent, judger_agent: Agent,
                     prior_metrics: dict, baseline_metrics: dict,
-                    metrics_schema: dict | None, gate_lines: str) -> list[dict]:
+                    metrics_schema: dict | None, gate_lines: str,
+                    telemetry: RunTelemetry | None = None) -> list[dict]:
     """Run one generation's candidates, possibly concurrently."""
     max_workers = min(cfg.get("max_workers", 1), max(1, len(proposals)))
     if max_workers <= 1 or len(proposals) <= 1:
-        return [
-            _run_one_candidate(i, proposal, round_id, parent_sha, cfg, workspace,
-                               executor_agent, judger_agent, prior_metrics,
-                               baseline_metrics, metrics_schema, gate_lines)
-            for i, proposal in enumerate(proposals)
-        ]
+        serial_results = []
+        for i, proposal in enumerate(proposals):
+            candidate = _run_one_candidate(
+                i, proposal, round_id, parent_sha, cfg, workspace,
+                executor_agent, judger_agent, prior_metrics,
+                baseline_metrics, metrics_schema, gate_lines,
+            )
+            candidate["telemetry"] = (
+                telemetry.snapshot(persist=True) if telemetry else {}
+            )
+            serial_results.append(candidate)
+        return serial_results
     results: list[dict | None] = [None] * len(proposals)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
@@ -443,6 +463,9 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
                       flush=True)
                 results[i] = _candidate_failure(
                     i, p, f"candidate worker failed: {exc}", parent_sha)
+            results[i]["telemetry"] = (
+                telemetry.snapshot(persist=True) if telemetry else {}
+            )
     return [r for r in results if r is not None]
 
 
