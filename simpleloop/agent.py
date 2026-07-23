@@ -37,6 +37,26 @@ class AgentError(RuntimeError):
         self.raw_output = raw_output
 
 
+def normalize_free_text(
+    value: str,
+    *,
+    limit: int,
+    label: str,
+    field: str,
+) -> str:
+    """Strip free text and visibly truncate it at the local tolerance limit."""
+    normalized = value.strip()
+    length = len(normalized)
+    if length > limit:
+        print(
+            f"[{label}] warning: {field} length {length} exceeds {limit}; "
+            f"truncated to {limit}",
+            flush=True,
+        )
+        return normalized[:limit]
+    return normalized
+
+
 @dataclass
 class AgentResult:
     text: str           # the agent's response text (inside the JSON envelope)

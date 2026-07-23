@@ -21,10 +21,32 @@ import pytest
 
 from simpleloop import config as config_mod
 from simpleloop import views
+from simpleloop.agent import normalize_free_text
 from simpleloop.judger import Judgment, _parse, _build_prompt, _judger_schema, judge
 from simpleloop.store import Store
 
 EXAMPLES = Path(__file__).parents[2] / "examples"
+
+
+def test_normalize_free_text_accepts_limit_without_warning(capsys):
+    value = "x" * 1100
+
+    assert normalize_free_text(
+        value, limit=1100, label="proposer", field="reflection"
+    ) == value
+    assert capsys.readouterr().out == ""
+
+
+def test_normalize_free_text_warns_and_truncates_after_strip(capsys):
+    value = "  " + ("x" * 1101) + "  "
+
+    assert normalize_free_text(
+        value, limit=1100, label="proposer", field="reflection"
+    ) == "x" * 1100
+    assert capsys.readouterr().out == (
+        "[proposer] warning: reflection length 1101 exceeds 1100; "
+        "truncated to 1100\n"
+    )
 
 
 # --- views.for_proposer: projects landing-state signals to the proposer ---
