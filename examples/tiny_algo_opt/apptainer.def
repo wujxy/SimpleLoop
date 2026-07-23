@@ -1,0 +1,35 @@
+Bootstrap: docker
+From: almalinux:9
+
+# Runtime for tiny_algo_opt. The toy repository is supplied by SimpleLoop's
+# automatic run-directory bind and is deliberately not baked into this image.
+
+%post
+    set -eux
+    dnf install -y \
+        bash ca-certificates coreutils curl diffutils findutils git \
+        gcc gcc-c++ make cmake patch procps-ng which \
+        python3 python3-pip tar xz
+    curl -fsSLO https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz
+    tar -xJf node-v22.19.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+    rm -f node-v22.19.0-linux-x64.tar.xz
+    python3 -m pip install --no-cache-dir pytest
+    npm install -g @anthropic-ai/claude-code@2.1.216
+    dnf clean all
+    rm -rf /var/cache/dnf
+
+%environment
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+
+%test
+    command -v bash
+    command -v git
+    command -v gcc
+    command -v g++
+    command -v make
+    command -v cmake
+    command -v node
+    command -v claude
+    command -v python3
+    command -v pytest

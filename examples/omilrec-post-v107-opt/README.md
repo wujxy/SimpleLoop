@@ -34,6 +34,8 @@ honesty" for the 100-evt × 3-reps methodology.
 
 ```
 omilrec-post-v107-opt/
+  apptainer.def          # independent AlmaLinux 9 runtime definition
+  apptainer.sif          # generated locally; ignored by Git
   task.yaml               # this task config (goal, safety, eval, source)
 ../../../omilrec-v100-postv107-gated/   # the source repo to optimize
   OMILRECV2/src/          # the algorithm — the only editable surface
@@ -94,10 +96,15 @@ partitioning, SoA layout, reciprocal precompute (verified per-term).
 
 ```bash
 # from the SimpleLoop checkout
+simpleloop image build examples/omilrec-post-v107-opt/apptainer.def
 simpleloop validate --config examples/omilrec-post-v107-opt/task.yaml
 simpleloop run      --config examples/omilrec-post-v107-opt/task.yaml \
                     --run-dir   ./runs/omilrec-postv107-001
 ```
+
+The build defaults to `examples/omilrec-post-v107-opt/apptainer.sif`, matching
+`runtime.image`. To reuse a shared prebuilt SIF, update `runtime.image` to its
+absolute path.
 
 The task defaults to `candidates_per_round: 3` and `max_workers: 3`. With
 `max_rounds: 40`, one run can execute up to 120 candidates and three concurrent
@@ -118,13 +125,16 @@ cat runs/omilrec-postv107-001/history.jsonl           # proposals, scores, feedb
 
 ## Prerequisites (external, read-only, already on this machine)
 
+- Runtime binds: `/cvmfs`, `/data/juno`, and
+  `/datafs/users/wujxy/agent-sci/omilrec_opt`
 - JUNO env: `/cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1/setup.sh`
 - Bench input: `/data/juno/dingxf/inputs/index_12628_rtraw_1.json`
 - RecMap dir: `/data/juno/dingxf/OMILREC_maps`
 
-The eval wrapper sources the JUNO env itself, so SimpleLoop's agent subprocess
-does not need a pre-sourced JUNO shell. Run SimpleLoop under **bash** (the CVMFS
-setup leaves ROOT unset under zsh). `claude` must be installed and authenticated.
+The YAML mounts those large directory trees at unchanged paths. The eval
+wrapper sources the JUNO env inside the SIF, so an activated host virtualenv or
+JUNO shell does not affect the agent or authoritative evaluation. Claude
+authentication is reused through the normal home mount.
 
 ## Note on the speed signal
 

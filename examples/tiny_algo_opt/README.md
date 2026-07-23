@@ -7,6 +7,8 @@ function; the loop should make it faster without breaking correctness.
 ## Layout
 ```
 tiny_algo_opt/
+  apptainer.def     # independently buildable SimpleLoop runtime
+  apptainer.sif     # generated locally; ignored by Git
   task.yaml          # SimpleLoop task config (goal, safety, eval, source)
   repo/              # the git repo to optimize (real working tree)
     tinyalgo/__init__.py   # count_pairs — the optimization target
@@ -30,10 +32,16 @@ Then:
 
 ```bash
 # from the SimpleLoop checkout
+simpleloop image build examples/tiny_algo_opt/apptainer.def
 simpleloop validate --config examples/tiny_algo_opt/task.yaml
 simpleloop run      --config examples/tiny_algo_opt/task.yaml \
                     --run-dir   examples/tiny_algo_opt/runs/run-001
 ```
+
+The build defaults to `examples/tiny_algo_opt/apptainer.sif`, which matches
+`runtime.image`. To reuse a shared prebuilt SIF, pass `--output` when building
+and update `runtime.image`. The repository itself is mounted from the run
+directory and is not copied into the image.
 
 The example defaults to `candidates_per_round: 3` and `max_workers: 3`. Set
 both values to `1` for serial-compatible execution.

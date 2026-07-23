@@ -7,6 +7,7 @@ a README explaining the loop/gate/run.
 
 ```
 examples/
+  apptainer.def             # generic AlmaLinux 9 runtime definition
   task.yaml                  # generic reference template (not runnable — fill it in)
   tiny_algo_opt/             # self-contained toy target (Python, ~µs-scale)
   omilrec-opt/               # OMILRECV2 FCN optimization — paper reproduction + v1.11.0 sibling
@@ -15,12 +16,20 @@ examples/
 
 ## `task.yaml` — reference template
 
-A heavily-commented, minimal config covering the full schema (`task` / `safety`
-/ `loop` / `eval` / `source`, including the optional `eval.metrics` objective +
-gates block). Not runnable as-is — its `source.path` is a placeholder. Copy it,
-point `source.path` at a real git repo, and `simpleloop validate --config <copy>`
-before running. Schema + validation live in `../simpleloop/config.py` (strict:
-unknown top-level keys error at validate, not silently mid-run).
+A heavily-commented config covering the full schema (`task` / `safety` /
+`loop` / `runtime` / `eval` / `source`, including the optional `eval.metrics`
+objective + gates block). Not runnable as-is — its `source.path` is a
+placeholder. Build the adjacent image, copy the YAML, point `source.path` at a
+real git repo, and validate it. Schema + validation live in
+`../simpleloop/config.py` (strict: unknown keys error at validate).
+
+```bash
+simpleloop image build examples/apptainer.def
+```
+
+The default output is `examples/apptainer.sif`, matching `runtime.image` in the
+template. You may instead use `--output` for one shared prebuilt SIF and update
+`runtime.image`. Generated SIF files are not committed.
 
 ## `tiny_algo_opt/` — the toy target
 
@@ -66,12 +75,12 @@ correctness contract. See `omilrec-post-v107-opt/README.md`.
 
 ```bash
 # from the SimpleLoop checkout (cwd = SimpleLoop/)
+# first build the definition documented by that example
 simpleloop validate --config examples/<folder>/task.yaml
 simpleloop run      --config examples/<folder>/task.yaml --run-dir ./runs/<name>-001
 ```
 
-The two OMILRECV2 tasks need the JUNO environment and the external bench input
-on this machine — but the eval wrapper sources the JUNO env itself, so the
-SimpleLoop agent subprocess does not need a pre-sourced shell. Run SimpleLoop
-under **bash** (the CVMFS setup leaves ROOT unset under zsh). `claude` must be
-installed and authenticated. See each folder's README for per-task notes.
+SimpleLoop always launches Claude and evaluation inside the configured SIF.
+The OMILRECV2 YAMLs bind `/cvmfs`, `/data/juno`, and project storage at their
+existing paths; the eval wrapper then sources its selected JUNO release inside
+the container. See each folder's README for its exact build command and binds.

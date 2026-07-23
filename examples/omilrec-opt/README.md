@@ -21,6 +21,8 @@ batches, all targeting the OMILRECV2 FCN / likelihood hot path:
 
 ```
 omilrec-opt/
+  apptainer.def                  # independent AlmaLinux 9 runtime definition
+  apptainer.sif                  # generated locally; ignored by Git
   task.yaml                       # the v1.0.0 paper-reproduction task config
   omilrec-v1.11.0.yaml            # sibling task config targeting v1.11.0
   omilrec-paper-proposals-test.yaml    # static proposals 1-4   (smoke)
@@ -90,6 +92,7 @@ start gated by the post-v1.0.7 FCN replay + relaxed reconstruction tolerances).
 
 ```bash
 # from the SimpleLoop checkout
+simpleloop image build examples/omilrec-opt/apptainer.def
 simpleloop validate --config examples/omilrec-opt/task.yaml
 simpleloop run      --config examples/omilrec-opt/task.yaml --run-dir ./runs/omilrec-opt-001
 
@@ -101,6 +104,10 @@ simpleloop run --config examples/omilrec-opt/task.yaml \
 # the v1.11.0 sibling (free-function FCN, 1e-13 gate):
 simpleloop run --config examples/omilrec-opt/omilrec-v1.11.0.yaml --run-dir ./runs/omilrec-v1110-001
 ```
+
+The build defaults to `examples/omilrec-opt/apptainer.sif`, matching
+`runtime.image` in both task configs. A shared prebuilt SIF is also valid:
+point `runtime.image` at it instead.
 
 The v1.0.0 task defaults to `candidates_per_round: 3` and `max_workers: 3`. With
 `max_rounds: 40`, one run can execute up to 120 candidates and three concurrent
@@ -121,13 +128,16 @@ cat runs/omilrec-opt-001/history.jsonl              # proposals, scores, feedbac
 
 ## Prerequisites (external, read-only, already on this machine)
 
+- Runtime binds: `/cvmfs`, `/data/juno`, and
+  `/datafs/users/wujxy/agent-sci/omilrec_opt`
 - JUNO env: `/cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1/setup.sh`
 - Bench input: `/data/juno/dingxf/inputs/index_12628_rtraw_1.json`
 - RecMap dir: `/data/juno/dingxf/OMILREC_maps`
 
-The eval wrapper sources the JUNO env itself, so SimpleLoop's agent subprocess
-does not need a pre-sourced JUNO shell. Run SimpleLoop under **bash** (the CVMFS
-setup leaves ROOT unset under zsh). `claude` must be installed and authenticated.
+The YAML mounts those large directory trees at unchanged paths. The eval
+wrapper sources the JUNO env inside the SIF, so an activated host virtualenv or
+JUNO shell does not affect the agent or authoritative evaluation. Claude
+authentication is reused through the normal home mount.
 
 ## Note on the speed signal
 

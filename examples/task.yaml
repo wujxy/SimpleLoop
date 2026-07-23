@@ -3,9 +3,9 @@ kind: task
 # ============================================================================
 #  SimpleLoop task.yaml — reference template
 #  ============================================================================
-#  Copy this file, fill in the four required blocks (task / safety / loop /
-#  source), and point `--config` at it. `simpleloop validate --config <file>`
-#  checks the schema before you run.
+#  Copy this file, fill in the required task / safety / loop / runtime / source
+#  blocks, and point `--config` at it. `simpleloop validate --config <file>`
+#  checks the schema before you run. Build runtime.image before validating.
 #
 #  Paths in `source.path` are resolved RELATIVE TO THIS FILE, not cwd.
 #  `source.path` must point at a real git repo (has a .git/).
