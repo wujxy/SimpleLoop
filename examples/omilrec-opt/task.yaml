@@ -57,6 +57,13 @@ loop:
   candidates_per_round: 3
   max_workers: 3
 
+runtime:
+  image: apptainer.sif
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt
+
 eval:
   commands:
     # One self-contained command: env + build + e2e bit-identical gate + speed bench.

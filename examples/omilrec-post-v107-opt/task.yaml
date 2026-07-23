@@ -50,6 +50,13 @@ loop:
   candidates_per_round: 3
   max_workers: 3
 
+runtime:
+  image: apptainer.sif
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt
+
 eval:
   commands:
     - "bash scripts/sl_eval_post_v107.sh --evtmax 10"

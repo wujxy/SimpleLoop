@@ -21,6 +21,10 @@ loop:
   candidates_per_round: 3
   max_workers: 3
 
+runtime:
+  image: apptainer.sif
+  binds: []
+
 # The harness runs these after each commit and feeds the stdout to the judger.
 # correctness + drift are hard gates (must pass); bench is the speed signal.
 eval:

@@ -46,6 +46,10 @@ loop:
   # max_workers: 1                # optional, default 1 — candidate concurrency
   # agent_timeout_seconds: 3600   # optional, default 3600 — per claude call budget
 
+runtime:
+  image: apptainer.sif
+  binds: []
+
 eval:
   # commands (optional): run after each commit, in the round worktree, before
   # it is removed. Omit `eval` entirely for a diff-only judger. Each command

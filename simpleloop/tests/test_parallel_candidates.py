@@ -32,11 +32,14 @@ def _write_config(tmp_path: Path, loop_block: dict | None = None) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
+    image = tmp_path / "runtime.sif"
+    image.write_bytes(b"SIF-test-double")
     cfg = {
         "kind": "task",
         "task": {"goal": "go faster"},
         "safety": {"editable_paths": ["src/**"], "frozen_paths": []},
         "loop": {"max_rounds": 3, **(loop_block or {})},
+        "runtime": {"image": "runtime.sif"},
         "source": {"path": str(repo), "baseline_ref": "HEAD"},
     }
     path = tmp_path / "task.yaml"
@@ -76,15 +79,17 @@ def test_omilrec_v100_example_uses_parallel_speed_selection():
 
 
 def test_omilrec_v100_postv107_gated_example_uses_new_package_only():
-    cfg = config_mod.load(EXAMPLES / "omilrec-post-v107-opt/task.yaml")
+    cfg = _example_yaml("omilrec-post-v107-opt/task.yaml")
 
-    assert cfg["repo_path"].endswith("/omilrec-v100-postv107-gated")
-    assert cfg["eval_commands"] == ["bash scripts/sl_eval_post_v107.sh --evtmax 10"]
-    gates = cfg["metrics"]["gates"]
+    assert cfg["source"]["path"].endswith("/omilrec-v100-postv107-gated")
+    assert cfg["eval"]["commands"] == [
+        "bash scripts/sl_eval_post_v107.sh --evtmax 10"
+    ]
+    gates = cfg["eval"]["metrics"]["gates"]
     assert [g["key"] for g in gates] == ["FCN", "CONSISTENCY", "EVAL_RESULT"]
     assert all("description" in g for g in gates), "every gate declares a description"
-    assert "/omilrec/scripts/" not in "\n".join(cfg["eval_commands"])
-    assert "/omilrec-v100/scripts/" not in "\n".join(cfg["eval_commands"])
+    assert "/omilrec/scripts/" not in "\n".join(cfg["eval"]["commands"])
+    assert "/omilrec-v100/scripts/" not in "\n".join(cfg["eval"]["commands"])
 
 
 @pytest.mark.parametrize("field", ["candidates_per_round", "max_workers"])

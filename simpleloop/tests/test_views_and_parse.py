@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from simpleloop import config as config_mod
 from simpleloop import views
@@ -664,8 +665,12 @@ def test_gate_block_empty_when_no_schema():
 
 def test_config_gate_description_is_parsed_and_optional():
     # gates with description are kept; gates without stay key-only.
-    cfg = config_mod.load(EXAMPLES / "omilrec-post-v107-opt" / "task.yaml")
-    gates = cfg["metrics"]["gates"]
+    cfg = yaml.safe_load(
+        (EXAMPLES / "omilrec-post-v107-opt" / "task.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    gates = cfg["eval"]["metrics"]["gates"]
     keys = [g["key"] for g in gates]
     assert keys == ["FCN", "CONSISTENCY", "EVAL_RESULT"]
     for g in gates:

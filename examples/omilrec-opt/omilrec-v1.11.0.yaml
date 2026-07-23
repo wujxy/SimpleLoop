@@ -48,6 +48,13 @@ safety:
 loop:
   max_rounds: 4
 
+runtime:
+  image: apptainer.sif
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt
+
 eval:
   commands:
     # One self-contained command: env + build + FCN gate + speed bench.

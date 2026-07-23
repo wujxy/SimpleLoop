@@ -9,6 +9,8 @@ Minimal schema:
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
   loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
   loop.max_workers: int              (optional, default 1; candidate concurrency)
+  runtime.image: path                (required; readable SIF image)
+  runtime.binds: [absolute dir]      (optional, default [])
   eval.commands: [str]                (optional; omit -> judger is diff-only)
   eval.metrics: {objective, gates}    (optional; omit -> judger reads prose, best by score)
   source.path: path                   (required; the repo to optimize)
@@ -20,12 +22,15 @@ keys are errors so a misspelled knob fails at validate, not silently mid-run.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-TASK_TOP_KEYS = {"kind", "task", "safety", "loop", "eval", "source"}
+TASK_TOP_KEYS = {
+    "kind", "task", "safety", "loop", "runtime", "eval", "source",
+}
 
 
 class ConfigError(ValueError):
@@ -58,6 +63,7 @@ def _resolve(raw: dict, path: Path) -> dict:
     safety = _need(raw, "safety", dict)
     loop = _need(raw, "loop", dict)
     source = _need(raw, "source", dict)
+    runtime_image, runtime_binds = _resolve_runtime(raw.get("runtime"), path)
     goal = task.get("goal")
     if not goal:
         raise ConfigError("task.goal: required and must be non-empty")
@@ -122,12 +128,58 @@ def _resolve(raw: dict, path: Path) -> dict:
         "agent_timeout_seconds": int(agent_timeout),
         "candidates_per_round": int(candidates_per_round),
         "max_workers": int(max_workers),
+        "runtime_image": runtime_image,
+        "runtime_binds": runtime_binds,
         "eval_commands": eval_commands,
         "metrics": metrics,
         "repo_path": str(repo),
         "baseline_ref": baseline_ref,
         "config_dir": str(path.parent),
     }
+
+
+def _resolve_runtime(raw: object, config_path: Path) -> tuple[str, list[str]]:
+    """Validate and resolve the mandatory Apptainer runtime block."""
+    if not isinstance(raw, dict):
+        raise ConfigError("runtime: required and must be an object")
+    unknown = set(raw) - {"image", "binds"}
+    if unknown:
+        raise ConfigError(f"runtime: unknown key(s): {sorted(unknown)}")
+
+    image_value = raw.get("image")
+    if not isinstance(image_value, str) or not image_value.strip():
+        raise ConfigError("runtime.image: required non-empty path")
+    image = Path(_rel(image_value, config_path)).expanduser().resolve()
+    if not image.is_file():
+        raise ConfigError(
+            f"runtime.image: does not exist or is not a file: {image}"
+        )
+    if not os.access(image, os.R_OK):
+        raise ConfigError(f"runtime.image: not readable: {image}")
+
+    raw_binds = raw.get("binds", [])
+    if not isinstance(raw_binds, list):
+        raise ConfigError(
+            "runtime.binds: must be a list of absolute directories"
+        )
+    binds: list[str] = []
+    for index, value in enumerate(raw_binds):
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"runtime.binds[{index}]: must be a non-empty path"
+            )
+        bind = Path(value).expanduser()
+        if not bind.is_absolute():
+            raise ConfigError(
+                f"runtime.binds[{index}]: must be absolute: {value}"
+            )
+        bind = bind.resolve()
+        if not bind.is_dir():
+            raise ConfigError(
+                f"runtime.binds[{index}]: not an existing directory: {bind}"
+            )
+        binds.append(str(bind))
+    return str(image), binds
 
 
 def _resolve_metrics(raw: object) -> dict:
