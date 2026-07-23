@@ -250,89 +250,12 @@ class Store:
             self.best_sha = best[1]
             self.best_round = best[0]
             self.best_candidate = best[3]
-            # keep best_score as the judger score of that round for the report
+            # keep best_score as the judger score exposed by the run summary
             rec = next((r for r in candidates
                         if r["round"] == best[0] and r.get("sha") == best[1]), None)
             if rec and isinstance(rec.get("score"), (int, float)):
                 self.best_score = rec["score"]
 
-    def write_final_report(self, goal: str) -> Path:
-        """Write a human-readable markdown summary. Returns its path."""
-        rounds = self.history()
-        lines = [
-            "# SimpleLoop Run Report",
-            "",
-            f"**Goal:** {goal}",
-            "",
-            "![Run progress](progress.png)",
-            "",
-        ]
-        if self.best_sha:
-            cand = (f", candidate {self.best_candidate}"
-                    if self.best_candidate is not None else "")
-            lines += [f"- Best commit: `{self.best_sha}` (round {self.best_round}{cand}, "
-                      f"selected by {'objective metric' if self.metrics_schema else 'judger score'}"
-                      f", score {self.best_score:.2f})", ""]
-        else:
-            lines += ["- No accepted commit produced.", ""]
-        # Report divergence between metric-best and score-best when they differ —
-        # this is the exact tension the harness-owned best was built to surface.
-        if (self.metrics_schema and self.best_by_score_sha
-                and self.best_by_score_sha != self.best_sha):
-            lines += [f"- Highest-score round (judger score): `{self.best_by_score_sha}` "
-                      f"(round {self.best_by_score_round}) — differs from the metric-selected best; "
-                      f"the metric best is what ships, the score-best is a quality signal.",
-                      ""]
-        lines += ["## Round History", ""]
-        for r in rounds:
-            if "candidates" in r:
-                lines += [f"### Round {r['round']}",
-                          f"- parent sha: `{r.get('parent_sha')}`",
-                          f"- selected candidate: {r.get('selected_candidate')}  "
-                          f"selected sha: `{r.get('selected_sha')}`",
-                          f"- reflection: {r.get('reflection', '')}", "",
-                          "| candidate | selected | family | sha | metrics | score | risk | feedback |",
-                          "|---|---|---|---|---|---|---|---|"]
-                for c in r.get("candidates") or []:
-                    m = c.get("metrics") or {}
-                    metrics_text = " ".join(f"{k}={v}" for k, v in m.items()) if m else ""
-                    lines.append(
-                        f"| {c.get('candidate')} | {bool(c.get('selected'))} | "
-                        f"{c.get('family', '')} | `{c.get('sha')}` | {metrics_text} | "
-                        f"{c.get('score')} | {c.get('risk')} | {c.get('feedback', '')[:180]} |"
-                    )
-                for c in r.get("candidates") or []:
-                    lines += ["",
-                              f"#### Round {r['round']} candidate {c.get('candidate')}",
-                              f"- proposal: {c.get('proposal', '')[:300]}",
-                              f"- changed paths: {', '.join(c.get('changed_paths') or []) or '(none)'}",
-                              f"- feedback: {c.get('feedback', '')}"]
-                lines.append("")
-                continue
-            m = r.get("metrics") or {}
-            metrics_line = ""
-            if self.metrics_schema and m:
-                obj_key = self.metrics_schema["objective"]["key"]
-                parts = []
-                if obj_key in m:
-                    parts.append(f"{obj_key}={m[obj_key]}")
-                for g in self.metrics_schema.get("gates", []):
-                    if g["key"] in m:
-                        v = m[g["key"]]
-                        parts.append(f"{g['key']}={'PASS' if v is True else 'FAIL' if v is False else '?'}")
-                if parts:
-                    metrics_line = f"  metrics: {' '.join(parts)}"
-            lines += [f"### Round {r['round']}",
-                      f"- proposal: {r['proposal'][:200]}",
-                      f"- candidate sha: `{r['sha']}`  accepted: "
-                      f"{r.get('accepted', '?')}  base sha: `{r.get('base_sha', '?')}`",
-                      f"- score: {r['score']}  risk: {r.get('risk', '?')}  decision: {r.get('decision', '?')}",
-                      metrics_line,
-                      f"- feedback: {r['feedback']}",
-                      f"- reflection: {r.get('reflection', '')}", ""]
-        out = self.run_dir / "final_report.md"
-        out.write_text("\n".join(lines), encoding="utf-8")
-        return out
 
 
 def _iter_candidates(rounds: list[dict]):

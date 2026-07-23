@@ -38,7 +38,7 @@ Each run:
 - clones your source repo locally into `runs/001/repo` (`git clone --local`,
   source repo untouched),
 - runs `max_rounds` rounds, each in a fresh worktree,
-- writes `history.jsonl` and `final_report.md`.
+- writes `history.jsonl`, `telemetry.json`, `progress.png`, and nine detail progress images.
 
 Trace any run's commits with `git -C runs/001/repo log --oneline`.
 
@@ -77,6 +77,8 @@ by the judger agent. The judger sees `git diff` + the commands' stdout.
 | `workspace.py` | repo clone, worktree, harness commit, diff, env |
 | `config.py` | read+validate task config |
 | `store.py` | history JSONL + best-score tracking |
+| `telemetry.py` | baseline, active worktime, and processed-token state |
+| `plot.py` | 3×3 overview and nine detail progress plots |
 | `cli.py` | entry point |
 
 **Commit chain:** rounds link — round 0 forks `baseline_ref`, round n forks

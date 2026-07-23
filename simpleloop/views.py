@@ -6,7 +6,7 @@ The store holds the full raw record per round:
 
 Each role sees only the fields it should, via these projections. The store stays
 the single source of truth (full record, for the judger's prior/baseline eval
-axis and for final_report); projection happens at prompt-build time in each role.
+axis); projection happens at prompt-build time in each role.
 
 Why projections instead of a central Context object: SimpleLoop's data model is
 flat — one record per round, serial single-parent chain. A Context pool class

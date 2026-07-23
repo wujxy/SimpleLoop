@@ -294,7 +294,7 @@ def test_record_failure_refreshes_progress_plot(monkeypatch, tmp_path):
     assert "FULL_TECHNICAL_SENTINEL" in history[0]["feedback"]
 
 
-def test_noop_continue_refreshes_plot_and_report(monkeypatch, tmp_path):
+def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     run_dir = tmp_path / "run"
     store = Store(run_dir, metrics_schema=SCHEMA)
     store.append(
@@ -339,4 +339,4 @@ def test_noop_continue_refreshes_plot_and_report(monkeypatch, tmp_path):
 
     assert summary["rounds"] == 1
     assert (run_dir / "progress.png").exists()
-    assert (run_dir / "final_report.md").exists()
+    assert not (run_dir / "final_report.md").exists()

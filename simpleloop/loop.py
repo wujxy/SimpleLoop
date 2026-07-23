@@ -148,7 +148,6 @@ def run(config_path: str | Path, run_dir: str | Path,
                   f"max_rounds={n_rounds} -- nothing to do. Bump loop.max_rounds in "
                   f"the config to add more rounds.", flush=True)
             _refresh_progress_plot(store, telemetry.plot_context())
-            store.write_final_report(cfg["goal"])
             return _summary(store, workspace, run_dir_path)
         parent_sha, last_accepted = _resume_chain(
             done, workspace.baseline_sha(), metrics_schema)
@@ -366,9 +365,7 @@ def run(config_path: str | Path, run_dir: str | Path,
             prior_metrics = eval_metrics or prior_metrics
         parent_sha = next_base_sha
 
-    report = store.write_final_report(cfg["goal"])
     print(f"\n[{stamp()}] done. best={store.best_sha} (score {store.best_score:.2f})", flush=True)
-    print(f"[{stamp()}] report: {report}", flush=True)
     print(f"[{stamp()}] working repo (for tracing): {workspace.repo}", flush=True)
     return _summary(store, workspace, run_dir_path)
 

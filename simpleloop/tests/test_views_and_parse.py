@@ -6,8 +6,7 @@ These do NOT spawn the claude agent — they test the pure pieces:
   - views.for_executor / for_judger carry only their role's fields
   - judger._parse handles the four-field contract + the missing-report fallback
     (LANDED_STATE prefix is a feedback-string convention, not a parsed field)
-  - Store.append persists both feedback fields + changed_paths, final_report uses
-    the report one
+  - Store.append persists both feedback fields + changed_paths
 
 Run: python -m pytest simpleloop/tests/   (from SimpleLoop/)
 """
@@ -426,7 +425,7 @@ def test_parse_warns_and_truncates_judger_text_with_candidate_label(capsys):
 
 
 
-# --- Store: single feedback field persisted, final_report uses it ---
+# --- Store: feedback fields remain persisted in history ---
 
 def test_store_persists_feedback(tmp_path: Path):
     store = Store(tmp_path)
@@ -439,18 +438,6 @@ def test_store_persists_feedback(tmp_path: Path):
     assert "Implemented:" in rows[0]["feedback"]
     assert rows[0]["feedback_for_proposer"] == "Precomputation is worth revisiting."
     assert rows[0]["eval_block"] == "e0"
-
-
-def test_final_report_uses_feedback(tmp_path: Path):
-    store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.7, "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: -10% speed\nAnalysis: cache locality",
-                 eval_block="e")
-    report_path = store.write_final_report("goal")
-    text = report_path.read_text(encoding="utf-8")
-    assert "LANDED_STATE" in text
-    assert "Implemented:" in text
-    assert "-10% speed" in text
-    assert "![Run progress](progress.png)" in text
 
 
 # --- Store: changed_paths persisted (landing-state signal for the proposer) ---
