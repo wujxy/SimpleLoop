@@ -98,7 +98,11 @@ def test_proposer_schema_uses_generation_limit_plus_margin_and_exact_count():
     proposals = schema["properties"]["proposals"]
     assert proposals["minItems"] == 3
     assert proposals["maxItems"] == 3
-    assert schema["required"] == ["reflection", "proposals"]
+    assert schema["required"] == [
+        "reflection", "insight", "insight_refs", "proposals",
+    ]
+    assert schema["properties"]["insight"]["type"] == "string"
+    assert schema["properties"]["insight_refs"]["type"] == "array"
     assert schema["additionalProperties"] is False
     assert schema["properties"]["reflection"]["maxLength"] == 900
     item_properties = proposals["items"]["properties"]
@@ -116,7 +120,7 @@ def test_proposer_schema_uses_batch_shape_when_k_is_one():
 
 
 def test_parse_batch_rejects_legacy_single_when_k_is_one():
-    with pytest.raises(ValueError, match="only reflection and proposals"):
+    with pytest.raises(ValueError, match="only reflection, insight, insight_refs, and proposals"):
         _parse_batch(
             {"reflection": "r", "decision": "continue", "proposal": "do one thing"},
             candidates_per_round=1,
@@ -127,6 +131,8 @@ def test_parse_batch_accepts_new_shape():
     batch = _parse_batch(
         {
             "reflection": "r",
+            "insight": "Sparse gathers benefit from packing.",
+            "insight_refs": ["r0c0", "r1c1"],
             "proposals": [
                 {"family": "layout", "decision": "switch", "proposal": "p0"},
                 {"family": "hoist", "decision": "continue", "proposal": "p1"},
@@ -136,6 +142,8 @@ def test_parse_batch_accepts_new_shape():
     )
     assert [p.family for p in batch.proposals] == ["layout", "hoist"]
     assert [p.proposal for p in batch.proposals] == ["p0", "p1"]
+    assert batch.insight == "Sparse gathers benefit from packing."
+    assert batch.insight_refs == ["r0c0", "r1c1"]
 
 
 def test_parse_batch_truncates_all_free_text_at_generation_limit_plus_300():
@@ -145,6 +153,8 @@ def test_parse_batch_truncates_all_free_text_at_generation_limit_plus_300():
     batch = _parse_batch(
         {
             "reflection": reflection,
+            "insight": "",
+            "insight_refs": [],
             "proposals": [
                 {"family": family, "decision": "switch", "proposal": proposal},
             ],
@@ -157,7 +167,7 @@ def test_parse_batch_truncates_all_free_text_at_generation_limit_plus_300():
 
 
 def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
-    with pytest.raises(ValueError, match="only reflection and proposals"):
+    with pytest.raises(ValueError, match="only reflection, insight, insight_refs, and proposals"):
         _parse_batch(
             {"reflection": "r", "decision": "continue", "proposal": "only one"},
             candidates_per_round=3,
@@ -166,13 +176,15 @@ def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
 
 def test_parse_batch_rejects_empty_batch():
     with pytest.raises(ValueError, match="expected exactly 3"):
-        _parse_batch({"reflection": "r", "proposals": []}, candidates_per_round=3)
+        _parse_batch({"reflection": "r", "insight": "", "insight_refs": [], "proposals": []}, candidates_per_round=3)
 
 
 @pytest.mark.parametrize("count", [1, 2, 4])
 def test_parse_batch_rejects_wrong_candidate_count(count: int):
     data = {
         "reflection": "r",
+        "insight": "",
+        "insight_refs": [],
         "proposals": [
             {"family": f"family_{i}", "decision": "switch", "proposal": f"p{i}"}
             for i in range(count)
@@ -187,6 +199,8 @@ def test_parse_batch_rejects_duplicate_families():
         _parse_batch(
             {
                 "reflection": "r",
+                "insight": "",
+                "insight_refs": [],
                 "proposals": [
                     {"family": "Layout", "decision": "switch", "proposal": "p0"},
                     {"family": " layout ", "decision": "continue", "proposal": "p1"},
@@ -201,6 +215,8 @@ def test_parse_batch_rejects_invalid_decision():
         _parse_batch(
             {
                 "reflection": "r",
+                "insight": "",
+                "insight_refs": [],
                 "proposals": [
                     {"family": "layout", "decision": "maybe", "proposal": "p0"},
                 ],
@@ -219,6 +235,8 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
             self.schema = json_schema
             return {
                 "reflection": "r" * 900,
+                "insight": "",
+                "insight_refs": [],
                 "proposals": [
                     {"family": "a" * 364, "decision": "switch", "proposal": "p" * 1100},
                     {"family": "b" * 364, "decision": "switch", "proposal": "q" * 1100},
@@ -233,6 +251,11 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
         editable=["src/**"],
         frozen=["tests/**"],
         history=[],
+        insights=[{
+            "id": "I4",
+            "text": "Hoisting behind cold gates measured as noise.",
+            "refs": ["r0c0", "r3c0"],
+        }],
         base_sha="base-sha",
         cwd=tmp_path,
         candidates_per_round=3,
@@ -243,10 +266,23 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     assert [len(item.family) for item in batch.proposals] == [364, 364, 364]
     assert [len(item.proposal) for item in batch.proposals] == [1100, 1100, 1100]
     prompt = " ".join(agent.prompt.split())
+    assert "Accumulated search insights:" in prompt
+    assert "[I4] Hoisting behind cold gates measured as noise." in prompt
+    assert "Evidence: r0c0, r3c0" in prompt
+    assert "simpleloop memory show <ref>" in prompt
+    assert "`reflection`:" in agent.prompt
+    assert "`insight`:" in agent.prompt
+    assert "`insight_refs`:" in agent.prompt
+    assert "`decision`:" in agent.prompt
+    assert "[\"r0c0\", \"r1c1\"]" in agent.prompt
+    assert "one or two concise, generalizing sentences" in prompt
+    assert (
+        "previous evidence -> reflection -> optional insight "
+        "-> decision -> proposal"
+    ) in prompt
     assert "grounded hypothesis, not an implementation conclusion" in prompt
     assert "The EXECUTOR investigates implementation details" in prompt
     assert "The JUDGER evaluates the resulting diff" in prompt
-    assert "previous evidence -> reflection -> decision -> proposal" in prompt
     assert "batch-level search rationale" in prompt
     assert "not a single continue/switch verdict for the whole batch" in prompt
     assert "Once the EXECUTOR has enough to take over" in prompt

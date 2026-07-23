@@ -13,17 +13,16 @@ flat — one record per round, serial single-parent chain. A Context pool class
 would wrap a list[dict] with no added structure. Three pure functions are enough
 and leave explicit, auditable seams for future mechanisms.
 
-The proposer projection keeps recent proposals complete and compacts older
-proposal text. The persisted history remains complete, so other roles and final
-reports are unaffected.
+The proposer projection keeps only the six most recent round records in full.
+The persisted history remains complete and older evidence stays available through
+Search Memory references.
 """
 from __future__ import annotations
 
 import re
 
 
-_PROPOSER_FULL_PROPOSAL_ROUNDS = 6
-_PROPOSER_OLD_PROPOSAL_CHARS = 300
+_PROPOSER_RECENT_ROUNDS = 6
 
 # The judger prefixes each feedback with a `LANDED_STATE: <tag>` token (the
 # contract lives in judger.py); we surface it as a structured field in the
@@ -47,17 +46,6 @@ def _landing_state(feedback: str | None) -> str | None:
         return None
     m = _LANDING_STATE_RE.search(feedback)
     return m.group(1).lower() if m else None
-
-
-def _proposal_projection(proposal: str, keep_full: bool) -> dict[str, str]:
-    if keep_full:
-        return {"proposal": proposal}
-    normalized = " ".join(proposal.split())
-    suffix = "…" if len(normalized) > _PROPOSER_OLD_PROPOSAL_CHARS else ""
-    return {
-        "proposal_head":
-            normalized[:_PROPOSER_OLD_PROPOSAL_CHARS] + suffix,
-    }
 
 
 def for_proposer(history: list[dict]) -> list[dict]:
@@ -86,11 +74,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
     Still excludes eval_block: raw eval text, too noisy, hallucination risk.
     """
     out = []
-    full_proposal_start = max(
-        0, len(history) - _PROPOSER_FULL_PROPOSAL_ROUNDS
-    )
-    for record_index, r in enumerate(history):
-        keep_full_proposal = record_index >= full_proposal_start
+    for r in history[-_PROPOSER_RECENT_ROUNDS:]:
         if "candidates" in r:
             out.append({
                 "round": r["round"],
@@ -103,10 +87,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
                     {
                         "candidate": c.get("candidate"),
                         "family": c.get("family"),
-                        **_proposal_projection(
-                            c.get("proposal") or "",
-                            keep_full_proposal,
-                        ),
+                        "proposal": c.get("proposal") or "",
                         "sha": c.get("sha") or None,
                         "selected": bool(c.get("selected")),
                         "accepted": c.get("accepted"),
@@ -123,10 +104,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
             continue
         out.append({
             "round": r["round"],
-            **_proposal_projection(
-                r.get("proposal") or "",
-                keep_full_proposal,
-            ),
+            "proposal": r.get("proposal") or "",
             "sha": r.get("sha") or None,
             "accepted": r.get("accepted"),
             "base_sha": r.get("base_sha"),

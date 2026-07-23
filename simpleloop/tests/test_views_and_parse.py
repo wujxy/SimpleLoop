@@ -127,7 +127,7 @@ def _parallel_history_record(round_id: int, proposals: list[str]) -> dict:
     }
 
 
-def test_for_proposer_keeps_last_six_records_full_by_position():
+def test_for_proposer_recent_window_uses_position_and_full_proposals():
     round_ids = [3, 5, 12, 20, 21, 40, 99]
     history = [
         _serial_history_record(round_id, f"proposal-{round_id}")
@@ -136,48 +136,32 @@ def test_for_proposer_keeps_last_six_records_full_by_position():
 
     projected = views.for_proposer(history)
 
-    assert projected[0]["round"] == 3
-    assert projected[0]["proposal_head"] == "proposal-3"
-    assert "proposal" not in projected[0]
-    assert [row["round"] for row in projected[1:]] == round_ids[1:]
-    assert [row["proposal"] for row in projected[1:]] == [
+    assert [row["round"] for row in projected] == round_ids[1:]
+    assert [row["proposal"] for row in projected] == [
         f"proposal-{round_id}" for round_id in round_ids[1:]
     ]
-    assert all("proposal_head" not in row for row in projected[1:])
+    assert all("proposal_head" not in row for row in projected)
 
 
-def test_for_proposer_compacts_old_proposal_without_mutating_history():
-    long_proposal = "  Compact\n\tthe   live list  " + ("x" * 320)
-    history = [_serial_history_record(0, long_proposal)]
-    history.extend(
-        _serial_history_record(round_id, f"recent-{round_id}")
-        for round_id in range(1, 7)
-    )
+def test_for_proposer_recent_window_does_not_mutate_history():
+    history = [
+        _serial_history_record(round_id, f"proposal-{round_id}")
+        for round_id in range(7)
+    ]
     original = deepcopy(history)
-    normalized = " ".join(long_proposal.split())
 
     projected = views.for_proposer(history)
 
-    assert projected[0]["proposal_head"] == normalized[:300] + "…"
-    assert len(projected[0]["proposal_head"]) == 301
-    assert projected[0]["sha"] == "sha-0"
-    assert projected[0]["metrics"] == {"SPEED_MS": 500.0}
-    assert projected[0]["score"] == 0.5
-    assert projected[0]["risk"] == "low"
-    assert projected[0]["changed_paths"] == ["src/a.cc"]
-    assert "LANDED_STATE" in projected[0]["feedback"]
-    assert "eval_block" not in projected[0]
+    assert [row["round"] for row in projected] == [1, 2, 3, 4, 5, 6]
     assert history == original
 
 
-def test_for_proposer_applies_one_window_state_to_all_generation_candidates():
+def test_for_proposer_drops_old_generation_and_keeps_recent_candidates():
     old_generation = _parallel_history_record(
-        10,
-        ["  old\n candidate zero  ", "old candidate one"],
+        10, ["old candidate zero", "old candidate one"]
     )
     recent_generation = _parallel_history_record(
-        100,
-        ["recent candidate zero", "recent candidate one"],
+        100, ["recent candidate zero", "recent candidate one"]
     )
     history = [old_generation]
     history.extend(
@@ -188,23 +172,14 @@ def test_for_proposer_applies_one_window_state_to_all_generation_candidates():
 
     projected = views.for_proposer(history)
 
-    old_candidates = projected[0]["candidates"]
-    assert [c["proposal_head"] for c in old_candidates] == [
-        "old candidate zero",
-        "old candidate one",
-    ]
-    assert all("proposal" not in c for c in old_candidates)
-    assert old_candidates[1]["sha"] == "candidate-10-1"
-    assert old_candidates[1]["selected"] is True
-    assert "LANDED_STATE" in old_candidates[1]["feedback"]
-    assert all("eval_block" not in c for c in old_candidates)
-
+    assert [row["round"] for row in projected] == [20, 30, 40, 50, 60, 100]
     recent_candidates = projected[-1]["candidates"]
     assert [c["proposal"] for c in recent_candidates] == [
         "recent candidate zero",
         "recent candidate one",
     ]
     assert all("proposal_head" not in c for c in recent_candidates)
+    assert all("eval_block" not in c for c in recent_candidates)
 
 
 # --- views.for_executor / for_judger: role isolation ---
@@ -500,14 +475,14 @@ def test_parse_batch_enforces_exact_count():
     one = {"family": "f", "decision": "continue", "proposal": "p"}
     two = [one, dict(one, family="g")]
     # right count passes
-    assert isinstance(_parse_batch({"reflection": "", "proposals": two},
+    assert isinstance(_parse_batch({"reflection": "", "insight": "", "insight_refs": [], "proposals": two},
                                    candidates_per_round=2), ProposalBatch)
     # too few / too many -> ValueError (the sentence 'Produce exactly N' used to carry)
     with pytest.raises(ValueError):
-        _parse_batch({"reflection": "", "proposals": [one]},
+        _parse_batch({"reflection": "", "insight": "", "insight_refs": [], "proposals": [one]},
                       candidates_per_round=2)
     with pytest.raises(ValueError):
-        _parse_batch({"reflection": "", "proposals": [one, one, one]},
+        _parse_batch({"reflection": "", "insight": "", "insight_refs": [], "proposals": [one, one, one]},
                       candidates_per_round=2)
 
 
