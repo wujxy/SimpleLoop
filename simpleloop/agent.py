@@ -21,13 +21,14 @@ import json
 import os
 import re
 import signal
-import shutil
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from .runtime import ApptainerRuntime
 
 
 class AgentError(RuntimeError):
@@ -87,6 +88,7 @@ def _decode_output(stdout: str) -> AgentResult:
 class Agent:
     def __init__(
         self,
+        runtime: ApptainerRuntime,
         command: str = "claude",
         timeout_seconds: int = 1800,
         extra_args: list[str] | None = None,
@@ -95,6 +97,7 @@ class Agent:
         max_output_tokens: int = 64000,
         usage_observer: Callable[[object], None] | None = None,
     ):
+        self.runtime = runtime
         self.command = command
         self.timeout_seconds = timeout_seconds
         self.extra_args = list(extra_args or [])
@@ -159,7 +162,6 @@ class Agent:
 
     def _run(self, prompt: str, *, cwd: Path, label: str,
              json_schema: dict | None = None) -> AgentResult:
-        exe = self._resolve_command()
         # Prompt goes to claude via STDIN, not argv. A long proposer history (the
         # round-N proposal can be kilobytes; across 14+ rounds the assembled
         # prompt grew past the kernel's ARG_MAX (~128KB for a single execve arg)
@@ -167,22 +169,28 @@ class Agent:
         # run mid-loop. With --input-format text (the default), `claude -p` reads
         # the prompt from stdin when no positional prompt arg is given — stdin is
         # unbounded by ARG_MAX (it's a pipe, not execve argv).
-        argv = [
-            exe, "-p",
+        payload = [
+            self.command, "-p",
             "--input-format", "text",
             "--output-format", "json",
             "--allowedTools", self.allowed_tools,
         ]
         if self.model:
-            argv += ["--model", self.model]
-        argv += self.extra_args
+            payload += ["--model", self.model]
+        payload += self.extra_args
         if json_schema is not None:
-            argv += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
+            payload += [
+                "--json-schema",
+                json.dumps(json_schema, separators=(",", ":")),
+            ]
+        argv = self.runtime.exec_argv(payload, cwd=cwd)
 
         prompt_bytes = prompt.encode("utf-8")
         print(f"[{label}] claude call started (timeout={self.timeout_seconds}s, cwd={cwd}, "
               f"prompt={len(prompt_bytes)}B via stdin)", flush=True)
-        env = {**os.environ, "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens)}
+        env = self.runtime.subprocess_env({
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
+        })
         proc = subprocess.Popen(
             argv,
             cwd=str(cwd),
@@ -261,20 +269,6 @@ class Agent:
         print(f"[{label}] claude call finished ({elapsed:.0f}s)", flush=True)
 
         return result
-
-    def _resolve_command(self) -> str:
-        found = shutil.which(self.command)
-        if found:
-            return found
-        p = Path(self.command).expanduser()
-        if p.is_absolute() or "/" in self.command:
-            if p.exists():
-                return str(p)
-        raise AgentError(
-            f"claude command not found: {self.command!r}. Install/authenticate "
-            "Claude Code or set agent.command to an absolute path."
-        )
-
 
 def _drain(stream, buf: list[str], label: str | None = None) -> None:
     if stream is None:

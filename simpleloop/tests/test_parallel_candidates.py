@@ -755,7 +755,7 @@ def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
 
 
 def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):
-    agent = Agent()
+    agent = Agent(runtime=object())
     expected = {"reflection": "", "proposals": []}
 
     def fake_run(*_args, **_kwargs):
@@ -772,7 +772,7 @@ def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path
 
 
 def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path: Path):
-    agent = Agent()
+    agent = Agent(runtime=object())
 
     def fake_run(*_args, **_kwargs):
         return AgentResult(
