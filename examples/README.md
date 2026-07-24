@@ -7,12 +7,24 @@ a README explaining the loop/gate/run.
 
 ```
 examples/
-  apptainer.def             # generic AlmaLinux 9 runtime definition
+  apptainer.def             # generic LEAN runtime (Python-only tasks; no gcc/junosw)
+  junosw-apptainer.def      # JUNOSW runtime (gcc + freetype/X11/GL/ICU/nsl chain)
   task.yaml                  # generic reference template (not runnable — fill it in)
   tiny_algo_opt/             # self-contained toy target (Python, ~µs-scale)
   omilrec-opt/               # OMILRECV2 FCN optimization — paper reproduction + v1.11.0 sibling
   omilrec-post-v107-opt/     # OMILRECV2 from v1.0.0, gated by post-v1.0.7 FCN + relaxed e2e
 ```
+
+## Which def to build
+
+- `apptainer.def` — the lean image (bash/git/python + claude/node). Use for
+  pure-Python tasks like `tiny_algo_opt`. No C++ toolchain, no JUNO system
+  libs.
+- `junosw-apptainer.def` — the fat image. Adds gcc/cmake plus the
+  freetype/X11/GL/ICU/nsl2 system-library chain that junosw's shared libs
+  link (libBufferMemMgr.so, libDetSimMT.so, …). Build this once and both
+  omilrec tasks reuse it via their `apptainer.sif` symlink →
+  `../junosw-apptainer.sif`.
 
 ## `task.yaml` — reference template
 
@@ -75,7 +87,10 @@ correctness contract. See `omilrec-post-v107-opt/README.md`.
 
 ```bash
 # from the SimpleLoop checkout (cwd = SimpleLoop/)
-# first build the definition documented by that example
+# build the right image for the task:
+#   tiny_algo_opt  -> examples/apptainer.def      (lean)
+#   omilrec-*      -> examples/junosw-apptainer.def (fat; shared by both)
+simpleloop image build examples/junosw-apptainer.def --output examples/junosw-apptainer.sif
 simpleloop validate --config examples/<folder>/task.yaml
 simpleloop run      --config examples/<folder>/task.yaml --run-dir ./runs/<name>-001
 ```

@@ -164,13 +164,14 @@ def test_exec_argv_keeps_paths_and_payload_arguments_atomic(tmp_path: Path):
     )
 
     assert runtime.exec_argv(
-        ["bash", "-lc", "printf '%s\n' \"$PWD\""],
+        ["bash", "-c", "printf '%s\n' \"$PWD\""],
         cwd=run_dir,
     ) == [
         "/usr/bin/apptainer",
         "exec",
         "--cleanenv",
         "--no-eval",
+        "--userns",
         "--bind",
         f"{resource}:{resource}",
         "--bind",
@@ -179,8 +180,23 @@ def test_exec_argv_keeps_paths_and_payload_arguments_atomic(tmp_path: Path):
         str(run_dir),
         str(image),
         "bash",
-        "-lc",
+        "-c",
         "printf '%s\n' \"$PWD\"",
+    ]
+
+
+def test_exec_argv_drops_userns_when_disabled(monkeypatch, tmp_path: Path):
+    """On a normal root-owned host, setuid is fine; the env var disables userns."""
+    monkeypatch.setenv("SIMPLELOOP_APPTAINER_USERNS", "0")
+    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    argv = runtime.exec_argv(["true"], cwd=runtime.run_dir)
+    assert "--userns" not in argv
+    assert argv[:5] == [
+        "/usr/bin/apptainer",
+        "exec",
+        "--cleanenv",
+        "--no-eval",
+        "--bind",
     ]
 
 
@@ -217,6 +233,9 @@ def test_subprocess_env_strips_container_injection_and_forwards_allowlist(
             "APPTAINER_NO_HOME": "1",
             "APPTAINER_CONTAINALL": "1",
             "SINGULARITY_BIND": "/legacy-unexpected",
+            "BASH_FUNC_which%%": "() {  /usr/bin/which ...; }",
+            "BASH_FUNC_module%%": "() {  local _mlredir=0; ... }",
+            "which_declare": "declare -f",
             "ANTHROPIC_BASE_URL": "https://endpoint.example",
             "UNRELATED_SECRET": "do-not-forward-as-payload",
         },
@@ -235,6 +254,11 @@ def test_subprocess_env_strips_container_injection_and_forwards_allowlist(
     assert "APPTAINER_NO_HOME" not in env
     assert "APPTAINER_CONTAINALL" not in env
     assert "SINGULARITY_BIND" not in env
+    # Bash-exported shell functions poison /bin/sh children in the container;
+    # strip them along with the apptainer injection prefixes.
+    assert "BASH_FUNC_which%%" not in env
+    assert "BASH_FUNC_module%%" not in env
+    assert "which_declare" not in env
     assert "APPTAINERENV_PYTHONPATH" not in env
     assert "SINGULARITYENV_LD_LIBRARY_PATH" not in env
     assert (
@@ -380,7 +404,7 @@ def test_preflight_uses_one_container_probe(monkeypatch, tmp_path: Path):
 
     assert runtime.executable == "/usr/bin/apptainer"
     assert seen["argv"][-5] == "bash"
-    assert seen["argv"][-4] == "-lc"
+    assert seen["argv"][-4] == "-c"
     assert "command -v" in seen["argv"][-3]
     assert seen["argv"][-1] == str(runtime.run_dir)
     assert seen["kwargs"]["shell"] is False
@@ -524,7 +548,7 @@ def test_run_eval_wraps_bash_lc_and_parses_metrics(
 
     assert seen["argv"][-3:] == [
         "bash",
-        "-lc",
+        "-c",
         "bash scripts/eval.sh --evtmax 10",
     ]
     assert seen["kwargs"]["shell"] is False

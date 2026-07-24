@@ -1,0 +1,62 @@
+Bootstrap: docker
+From: almalinux:9
+
+# Shared JUNOSW runtime for any SimpleLoop task that drives the JUNO offline
+# software stack (junosw/SNiPER/ROOT on /cvmfs). This is the "fat" image:
+# beyond the base SimpleLoop runtime (bash/git/python/claude/node/gcc/cmake),
+# it carries the full system-library chain that junosw's shared libs link but
+# almalinux:9 base image does NOT ship, so the reconstruction/DetSim/ROOTIO
+# chains loadDLL cleanly inside the container.
+#
+# Proven necessary (each was a real run014 failure):
+#   freetype      libfreetype.so.6   dep of libBufferMemMgr.so
+#   libSM/libICE  libSM.so.6/ICE.so.6  dep of libDetSimMT (X session mgmt)
+#   libX11/libXext/libXmu/libXpm/libXft  the X11 client libs DetSim/Tutorial pull
+#   libglvnd-glx libGL.so.1   (NOT mesa-libGL directly; libglvnd-glx provides it)
+#   mesa-libGLU   libGLU.so.1
+#   libicu        libicudata.so.67 / libicui18n.so.67 / libicuuc.so.67
+#   libnsl2       libnsl.so.3   (NOT libnsl — that only provides legacy so.1)
+#   time          /usr/bin/time  (GNU time, used by benchmark.sh line 89)
+#
+# JUNO source packages, reconstruction maps, fixtures, and inputs remain
+# external; task.yaml exposes /cvmfs, /data/juno, and project storage through
+# same-path runtime binds. Reuse this one SIF across omilrec-opt and
+# omilrec-post-v107-opt by setting runtime.image to its path.
+#
+# Build:   simpleloop image build examples/junosw-apptainer.def
+#          (or simpleloop image build examples/junosw-apptainer.def \
+#                 --output examples/junosw-apptainer.sif)
+
+%post
+    set -eux
+    dnf install -y \
+        bash ca-certificates diffutils findutils git time \
+        freetype \
+        libSM libICE libX11 libXext libXmu libXpm libXft \
+        libglvnd-glx mesa-libGLU libicu libnsl2 \
+        gcc gcc-c++ make cmake patch procps-ng which \
+        python3 python3-pip python-unversioned-command tar xz
+    curl -fsSLO https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz
+    tar -xJf node-v22.19.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+    rm -f node-v22.19.0-linux-x64.tar.xz
+    python3 -m pip install --no-cache-dir pytest
+    npm install -g @anthropic-ai/claude-code@2.1.216
+    dnf clean all
+    rm -rf /var/cache/dnf
+
+%environment
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+
+%test
+    command -v bash
+    command -v git
+    command -v gcc
+    command -v g++
+    command -v make
+    command -v cmake
+    command -v node
+    command -v claude
+    command -v python
+    command -v python3
+    command -v pytest

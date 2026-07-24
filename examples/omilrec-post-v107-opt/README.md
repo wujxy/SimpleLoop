@@ -34,8 +34,7 @@ honesty" for the 100-evt × 3-reps methodology.
 
 ```
 omilrec-post-v107-opt/
-  apptainer.def          # independent AlmaLinux 9 runtime definition
-  apptainer.sif          # generated locally; ignored by Git
+  apptainer.sif          # symlink -> ../junosw-apptainer.sif (shared; see below)
   task.yaml               # this task config (goal, safety, eval, source)
 ../../../omilrec-v100-postv107-gated/   # the source repo to optimize
   OMILRECV2/src/          # the algorithm — the only editable surface
@@ -95,16 +94,19 @@ partitioning, SoA layout, reciprocal precompute (verified per-term).
 ## Run
 
 ```bash
-# from the SimpleLoop checkout
-simpleloop image build examples/omilrec-post-v107-opt/apptainer.def
+# from the SimpleLoop checkout — build the SHARED junosw image once
+simpleloop image build examples/junosw-apptainer.def \
+            --output   examples/junosw-apptainer.sif
 simpleloop validate --config examples/omilrec-post-v107-opt/task.yaml
 simpleloop run      --config examples/omilrec-post-v107-opt/task.yaml \
                     --run-dir   ./runs/omilrec-postv107-001
 ```
 
-The build defaults to `examples/omilrec-post-v107-opt/apptainer.sif`, matching
-`runtime.image`. To reuse a shared prebuilt SIF, update `runtime.image` to its
-absolute path.
+`runtime.image: apptainer.sif` resolves relative to this task config, and
+`apptainer.sif` here is a symlink to the shared `../junosw-apptainer.sif`.
+Both omilrec tasks (omilrec-opt and omilrec-post-v107-opt) reuse that one
+image; build it once and both are ready. To point at a different image, set
+`runtime.image` to its absolute path.
 
 The task defaults to `candidates_per_round: 3` and `max_workers: 3`. With
 `max_rounds: 40`, one run can execute up to 120 candidates and three concurrent

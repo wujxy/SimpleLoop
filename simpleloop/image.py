@@ -1,9 +1,12 @@
 """Thin synchronous wrapper for building an Apptainer SIF."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
+
+from .runtime import _BLOCKED_PREFIXES
 
 
 class ImageBuildError(RuntimeError):
@@ -51,7 +54,16 @@ def build_image(
     if force:
         argv.append("--force")
     argv.extend([str(output_path), str(definition_path)])
-    completed = subprocess.run(argv, check=False)
+    # Strip APPTAINER_*/SINGULARITY_* inherited from an outer container
+    # session: a leaked APPTAINER_BIND is applied to the build sandbox, whose
+    # rootfs lacks those destinations (no underlay during build) -> the build
+    # dies with "destination ... doesn't exist in container".
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(_BLOCKED_PREFIXES)
+    }
+    completed = subprocess.run(argv, check=False, env=env)
     if completed.returncode:
         raise ImageBuildError(
             f"apptainer build failed with exit {completed.returncode}"

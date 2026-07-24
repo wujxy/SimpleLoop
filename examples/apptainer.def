@@ -1,14 +1,22 @@
 Bootstrap: docker
 From: almalinux:9
 
-# Generic SimpleLoop runtime. Keep repositories and large task resources out
-# of the SIF; expose them at their existing paths with runtime.binds.
+# Generic SimpleLoop runtime — the lean image. Keep repositories and large task
+# resources out of the SIF; expose them at their existing paths with
+# runtime.binds. This carries only the base SimpleLoop runtime (bash/git/python
+# + claude/node for the agent roles, no C++ toolchain). If your task compiles
+# C/C++ or drives the JUNO offline stack (junosw/SNiPER), use the shared
+# examples/junosw-apptainer.def instead — it adds gcc/cmake plus the freetype /
+# X11 / GL / ICU / nsl system libs that junosw's shared libs link.
+#
+# NOTE: coreutils and curl are deliberately omitted — almalinux:9 ships
+# coreutils-single and curl-minimal variants that conflict with the full
+# packages and break `dnf install`.
 
 %post
     set -eux
     dnf install -y \
-        bash ca-certificates coreutils curl diffutils findutils git \
-        gcc gcc-c++ make cmake patch procps-ng which \
+        bash ca-certificates diffutils findutils git which \
         python3 python3-pip python-unversioned-command tar xz
     curl -fsSLO https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz
     tar -xJf node-v22.19.0-linux-x64.tar.xz -C /usr/local --strip-components=1
@@ -25,10 +33,6 @@ From: almalinux:9
 %test
     command -v bash
     command -v git
-    command -v gcc
-    command -v g++
-    command -v make
-    command -v cmake
     command -v node
     command -v claude
     command -v python

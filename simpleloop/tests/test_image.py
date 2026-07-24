@@ -52,7 +52,38 @@ def test_build_image_uses_fakeroot_and_explicit_output(
         str(output.resolve()),
         str(definition.resolve()),
     ]
-    assert seen["kwargs"] == {"check": False}
+    assert seen["kwargs"]["check"] is False
+
+
+def test_build_image_strips_outer_container_env(monkeypatch, tmp_path: Path):
+    """A leaked APPTAINER_BIND from an outer container session is applied to
+    the build sandbox (no underlay during build) and kills it; the build env
+    must drop APPTAINER_*/SINGULARITY_* like the exec runtime does."""
+    definition = _write_definition(tmp_path)
+    seen = {}
+    monkeypatch.setattr(
+        image_mod.shutil,
+        "which",
+        lambda _name: "/usr/bin/apptainer",
+    )
+    monkeypatch.setenv("APPTAINER_BIND", "/data,/cvmfs")
+    monkeypatch.setenv("SINGULARITY_BIND", "/data")
+    monkeypatch.setenv("APPTAINERENV_FOO", "x")
+    monkeypatch.setenv("KEEP_ME", "1")
+
+    def fake_run(argv, **kwargs):
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(image_mod.subprocess, "run", fake_run)
+
+    build_image(definition, tmp_path / "juno.sif")
+
+    assert seen["env"]["KEEP_ME"] == "1"
+    assert not any(
+        key.startswith(("APPTAINER_", "APPTAINERENV_", "SINGULARITY_", "SINGULARITYENV_"))
+        for key in seen["env"]
+    )
 
 
 def test_existing_output_requires_force(tmp_path: Path):

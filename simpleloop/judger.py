@@ -346,7 +346,14 @@ def run_eval(
     full_text: list[str] = []
     returncodes: list[int] = []
     for cmd in commands:
-        argv = runtime.exec_argv(["bash", "-lc", cmd], cwd=cwd)
+        # Non-login bash: a login shell sources /etc/profile.d/*.sh, which on
+        # EL-based images re-exports the `which` (and module/scl) function via
+        # `export -f`, producing BASH_FUNC_which%% env vars that then poison
+        # every /bin/sh child (SNiPER/Python) with "syntax error: unexpected
+        # end of file" and break DLL load. Eval commands are expected to
+        # source their own environment (e.g. sl_eval_post_v107.sh sources the
+        # JUNO setup), so a login shell is unnecessary here.
+        argv = runtime.exec_argv(["bash", "-c", cmd], cwd=cwd)
         completed = subprocess.run(
             argv, shell=False, cwd=str(cwd), env=runtime.subprocess_env(),
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

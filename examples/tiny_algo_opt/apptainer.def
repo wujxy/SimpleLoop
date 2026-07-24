@@ -1,14 +1,18 @@
 Bootstrap: docker
 From: almalinux:9
 
-# Runtime for tiny_algo_opt. The toy repository is supplied by SimpleLoop's
-# automatic run-directory bind and is deliberately not baked into this image.
+# Runtime for tiny_algo_opt — the minimal/lean image. The toy repository is
+# pure Python (pytest + drift + bench scripts, no C++ build), so this carries
+# only the base SimpleLoop runtime: bash/git/python + claude/node for the agent
+# roles. It deliberately omits the gcc/cmake/freetype/X11/GL/ICU/nsl chain —
+# if a future task needs to compile or drive junosw, use the shared
+# examples/junosw-apptainer.def instead. The toy repo itself is supplied by
+# SimpleLoop's automatic run-directory bind and is not baked into this image.
 
 %post
     set -eux
     dnf install -y \
-        bash ca-certificates coreutils curl diffutils findutils git \
-        gcc gcc-c++ make cmake patch procps-ng which \
+        bash ca-certificates diffutils findutils git which \
         python3 python3-pip python-unversioned-command tar xz
     curl -fsSLO https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz
     tar -xJf node-v22.19.0-linux-x64.tar.xz -C /usr/local --strip-components=1
@@ -25,10 +29,6 @@ From: almalinux:9
 %test
     command -v bash
     command -v git
-    command -v gcc
-    command -v g++
-    command -v make
-    command -v cmake
     command -v node
     command -v claude
     command -v python

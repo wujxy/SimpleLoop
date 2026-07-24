@@ -31,7 +31,15 @@ _BLOCKED_PREFIXES = (
     "APPTAINERENV_",
     "SINGULARITY_",
     "SINGULARITYENV_",
+    # Bash exports shell functions to subprocesses as BASH_FUNC_<name>%%
+    # env vars. An outer shell (e.g. the IHEP JUNO sandbox's environment
+    # modules) exports `which`, `module`, `scl`, etc. Inheriting these into
+    # the container poisons any child `/bin/sh` (dash-like syntax error on
+    # `importing function definition`) and breaks junosw's Sniper DLL load
+    # path resolution. `which_declare` is the matching helper var.
+    "BASH_FUNC_",
 )
+_BLOCKED_EXACT = frozenset({"which_declare"})
 _PREFLIGHT_SCRIPT = """
 for tool in bash git gcc g++ make cmake node claude; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -73,6 +81,14 @@ class ApptainerRuntime:
     ) -> list[str]:
         """Return one shell-free Apptainer argv for a payload command."""
         argv = [self.executable, "exec", "--cleanenv", "--no-eval"]
+        # Unprivileged user namespace: the default on shared HPC nodes and
+        # inside an outer Apptainer sandbox, where starter-suid has no setuid
+        # bit (the root overlay strips it) and setuid root is unavailable.
+        # --userns drives container setup via an unprivileged user namespace,
+        # so no setuid is needed. Set SIMPLELOOP_APPTAINER_USERNS=0 to fall
+        # back to setuid on a normal root-owned host.
+        if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
+            argv.append("--userns")
         for bind in self.binds:
             if bind != self.run_dir:
                 argv.extend(["--bind", f"{bind}:{bind}"])
@@ -96,6 +112,7 @@ class ApptainerRuntime:
             key: value
             for key, value in os.environ.items()
             if not key.startswith(_BLOCKED_PREFIXES)
+            and key not in _BLOCKED_EXACT
         }
         payload_env = {
             key: os.environ[key]
@@ -121,7 +138,7 @@ class ApptainerRuntime:
         argv = self.exec_argv(
             [
                 "bash",
-                "-lc",
+                "-c",
                 _PREFLIGHT_SCRIPT,
                 "simpleloop-preflight",
                 str(self.run_dir),

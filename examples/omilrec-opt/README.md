@@ -21,8 +21,7 @@ batches, all targeting the OMILRECV2 FCN / likelihood hot path:
 
 ```
 omilrec-opt/
-  apptainer.def                  # independent AlmaLinux 9 runtime definition
-  apptainer.sif                  # generated locally; ignored by Git
+  apptainer.sif                  # symlink -> ../junosw-apptainer.sif (shared; see below)
   task.yaml                       # the v1.0.0 paper-reproduction task config
   omilrec-v1.11.0.yaml            # sibling task config targeting v1.11.0
   omilrec-paper-proposals-test.yaml    # static proposals 1-4   (smoke)
@@ -91,8 +90,9 @@ start gated by the post-v1.0.7 FCN replay + relaxed reconstruction tolerances).
 ## Run
 
 ```bash
-# from the SimpleLoop checkout
-simpleloop image build examples/omilrec-opt/apptainer.def
+# from the SimpleLoop checkout — build the SHARED junosw image once
+simpleloop image build examples/junosw-apptainer.def \
+            --output   examples/junosw-apptainer.sif
 simpleloop validate --config examples/omilrec-opt/task.yaml
 simpleloop run      --config examples/omilrec-opt/task.yaml --run-dir ./runs/omilrec-opt-001
 
@@ -105,9 +105,10 @@ simpleloop run --config examples/omilrec-opt/task.yaml \
 simpleloop run --config examples/omilrec-opt/omilrec-v1.11.0.yaml --run-dir ./runs/omilrec-v1110-001
 ```
 
-The build defaults to `examples/omilrec-opt/apptainer.sif`, matching
-`runtime.image` in both task configs. A shared prebuilt SIF is also valid:
-point `runtime.image` at it instead.
+`runtime.image: apptainer.sif` resolves relative to this task config, and
+`apptainer.sif` here is a symlink to the shared `../junosw-apptainer.sif`.
+Both omilrec tasks (omilrec-opt and omilrec-post-v107-opt) reuse that one
+image; build it once and both are ready.
 
 The v1.0.0 task defaults to `candidates_per_round: 3` and `max_workers: 3`. With
 `max_rounds: 40`, one run can execute up to 120 candidates and three concurrent
