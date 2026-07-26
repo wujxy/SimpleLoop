@@ -36,6 +36,7 @@ import yaml
 from .agent import Agent, AgentError
 from . import config as config_mod
 from . import executor as executor_mod
+from . import evals
 from . import judger as judger_mod
 from . import memory as memory_mod
 from . import plot as plot_mod
@@ -408,7 +409,7 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
                   f"{result.reason}", flush=True)
         if result.sha and cfg["eval_commands"]:
             try:
-                eval_result = judger_mod.run_eval(
+                eval_result = evals.run_eval(
                     cfg["eval_commands"],
                     cwd=worktree,
                     runtime=runtime,
@@ -581,7 +582,7 @@ def _resume_chain(history: list[dict], baseline_sha: str,
 
 
 def _require_baseline_acceptance(
-    result: judger_mod.EvalResult,
+    result: evals.EvalResult,
     metrics_schema: dict | None,
 ) -> None:
     """Reject an unusable baseline before any optimization agent is called."""
@@ -651,7 +652,7 @@ def _eval_baseline(
             f"cwd: {wt}"
         )
         try:
-            result = judger_mod.run_eval(
+            result = evals.run_eval(
                 cfg["eval_commands"],
                 cwd=wt,
                 runtime=runtime,

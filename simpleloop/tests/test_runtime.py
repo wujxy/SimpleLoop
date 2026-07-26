@@ -9,10 +9,11 @@ import yaml
 
 from simpleloop import config as config_mod
 from simpleloop import cli as cli_mod
+from simpleloop import evals as evals_mod
 from simpleloop import judger as judger_mod
 from simpleloop import loop as loop_mod
 from simpleloop import runtime as runtime_mod
-from simpleloop.judger import EvalResult
+from simpleloop.evals import EvalResult
 from simpleloop.runtime import ApptainerRuntime, RuntimePreflightError
 
 
@@ -533,13 +534,13 @@ def test_run_eval_wraps_bash_lc_and_parses_metrics(
             "",
         )
 
-    monkeypatch.setattr(judger_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(evals_mod.subprocess, "run", fake_run)
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
         "gates": [{"key": "CORRECTNESS"}],
     }
 
-    result = judger_mod.run_eval(
+    result = evals_mod.run_eval(
         ["bash scripts/eval.sh --evtmax 10"],
         tmp_path,
         runtime,
@@ -570,12 +571,12 @@ def test_run_eval_records_each_nonzero_status(monkeypatch, tmp_path: Path):
         ]
     )
     monkeypatch.setattr(
-        judger_mod.subprocess,
+        evals_mod.subprocess,
         "run",
         lambda *args, **kwargs: next(results),
     )
 
-    result = judger_mod.run_eval(
+    result = evals_mod.run_eval(
         ["first", "second"],
         tmp_path,
         runtime,
@@ -592,7 +593,7 @@ def test_run_eval_preserves_stdout_and_stderr_on_failure(
 ):
     runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
     monkeypatch.setattr(
-        judger_mod.subprocess,
+        evals_mod.subprocess,
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0],
@@ -602,7 +603,7 @@ def test_run_eval_preserves_stdout_and_stderr_on_failure(
         ),
     )
 
-    result = judger_mod.run_eval(["build"], tmp_path, runtime)
+    result = evals_mod.run_eval(["build"], tmp_path, runtime)
 
     assert "stdout:\nbuild progress" in result.text
     assert "stderr:\ncompiler diagnostic" in result.text

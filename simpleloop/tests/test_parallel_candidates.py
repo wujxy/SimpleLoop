@@ -12,7 +12,8 @@ from simpleloop import memory as memory_mod
 from simpleloop import views
 from simpleloop.agent import Agent, AgentError, AgentResult
 from simpleloop.executor import ExecResult
-from simpleloop.judger import EvalResult, Judgment, _parse as parse_judgment
+from simpleloop.evals import EvalResult
+from simpleloop.judger import Judgment, _parse as parse_judgment
 from simpleloop.loop import _run_candidates, _select_winner
 from simpleloop.proposer import Proposal, ProposalBatch
 from simpleloop.proposer import _parse_batch
@@ -673,7 +674,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
                         feedback_for_proposer="The mechanism remains plausible.")
 
     monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(loop_mod.judger_mod, "run_eval", fake_run_eval)
+    monkeypatch.setattr(loop_mod.evals, "run_eval", fake_run_eval)
     monkeypatch.setattr(loop_mod.judger_mod, "judge", fake_judge)
 
     workspace = FakeWorkspace()
