@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from simpleloop import loop as loop_mod
-from simpleloop.loop import _record_failure, _run_candidates
+from simpleloop.loop import _run_candidates
 from simpleloop.proposer import Proposal
 from simpleloop.store import Store
 
@@ -96,24 +96,3 @@ def test_run_candidates_attaches_persisted_snapshot_after_each_worker(
         c["telemetry"]["worktime_seconds"] for c in candidates
     } == {1.0, 2.0}
     assert tracker.persist_flags == [True, True]
-
-
-def test_record_failure_persists_completion_snapshot(monkeypatch, tmp_path):
-    store = Store(tmp_path)
-    tracker = SnapshotTracker()
-    monkeypatch.setattr(loop_mod, "_refresh_progress_plot", lambda *_args: None)
-
-    _record_failure(
-        store,
-        round_id=0,
-        proposal="proposal",
-        reason="boom",
-        base_sha="base",
-        telemetry_tracker=tracker,
-    )
-
-    assert store.history()[0]["telemetry"] == {
-        "worktime_seconds": 1.0,
-        "processed_tokens": 10,
-    }
-    assert tracker.persist_flags == [True]

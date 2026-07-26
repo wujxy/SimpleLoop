@@ -1,21 +1,26 @@
 """The serial main loop. Scheduling only — the thinking is in the roles.
 
-For each of max_rounds rounds:
-  proposer.propose(history) -> proposal   (or a pre-supplied proposal; see below)
-  executor.execute(proposal) -> sha (or None if gate-rejected / empty)
-  judger.judge(diff + eval)  -> {score, feedback}
-  store.append(...)
-  if candidate passes every configured hard gate: parent_sha = candidate_sha
-  else: parent_sha stays put (the rejected candidate remains in history)
+For each of max_rounds rounds (one "generation"):
+  proposer.propose(history) -> N candidate proposals (candidates_per_round)
+  for each candidate (serial or ThreadPool, loop.max_workers):
+    executor.execute(proposal) -> sha (or None if gate-rejected / empty)
+    harness runs eval commands   -> raw text + parsed metrics
+    judger.judge(diff + metrics) -> {score, risk, feedback}
+  harness selects a winner (gate-pass + risk!=high + objective improved);
+  store.append_generation(...) records the whole generation;
+  winner -> parent_sha advances; no winner -> parent_sha stays put
+  (rejected candidates remain in history).
 
-No early stop, no batch, no parallel. The orchestrator never decides whether a
-round is "good" — it just records the judger's score and feeds feedback forward.
+No early stop. The orchestrator never decides whether a round is "good" — it
+just records the judger's score and feeds feedback forward.
 
 Static-proposal mode: pass `proposals=[str, ...]` (or a path to a YAML/JSON
 file of such a list) to SKIP the claude proposer and drive the loop from a
-fixed batch of directions you prepared. Round i uses proposals[i]; the number
-of rounds is len(proposals) (max_rounds is ignored in this mode). The judger
-still runs and scores each, but its feedback no longer chooses the next proposal.
+fixed batch of directions you prepared. Round i uses proposals[i] as a
+one-candidate generation; the number of rounds is len(proposals) (max_rounds
+is ignored in this mode). The judger still runs and scores each, but its
+feedback no longer chooses the next proposal, and acceptance is by hard gates
+alone (a regressing-but-valid experiment still advances the chain).
 """
 from __future__ import annotations
 
@@ -203,9 +208,12 @@ def run(config_path: str | Path, run_dir: str | Path,
         #    verbatim from the supplied batch (history is still recorded, but its
         #    feedback no longer picks the next direction).
         if static_proposals is not None:
-            proposal = static_proposals[round_id]
-            reflection, decision = "", "static"  # static mode: no proposer reflection
-            print(f"[{stamp()}] proposal (static): {proposal[:150]}", flush=True)
+            proposal_text = static_proposals[round_id]
+            proposals_batch = [proposer_mod.Proposal(
+                proposal=proposal_text, decision="static", family="single")]
+            reflection = ""  # static mode: no proposer, no reflection/insight
+            pending_insight = None
+            print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
         else:
             history = store.history()
             insights = memory_mod.load_insights(insights_path)
@@ -236,153 +244,57 @@ def run(config_path: str | Path, run_dir: str | Path,
             print(f"[{stamp()}] proposals: {len(proposals_batch)} candidate(s)",
                   flush=True)
 
-        if static_proposals is None:
-            candidates = _run_candidates(
-                proposals_batch, round_id, parent_sha, cfg, workspace,
-                executor_agent, judger_agent, prior_metrics, baseline_metrics,
-                metrics_schema, gate_lines,
-                runtime=runtime,
-                telemetry=telemetry,
-            )
+        # 2. executor + eval + judger, one shared pipeline per candidate. Static
+        #    mode is just a one-candidate generation with a different acceptance
+        #    rule (below).
+        candidates = _run_candidates(
+            proposals_batch, round_id, parent_sha, cfg, workspace,
+            executor_agent, judger_agent, prior_metrics, baseline_metrics,
+            metrics_schema, gate_lines,
+            runtime=runtime,
+            telemetry=telemetry,
+        )
+        if static_proposals is not None:
+            # Controlled-experiment rule (unchanged from the old serial path):
+            # hard gates alone decide whether the chain advances — no
+            # improvement or risk requirement, so a regressing-but-valid
+            # experiment still lands and the next static proposal builds on it.
+            first = candidates[0] if candidates else None
+            winner = (first if first and first.get("sha") and first.get("accepted")
+                      else None)
+        else:
             winner = _select_winner(
                 candidates,
                 metrics_schema,
                 prior_metrics=prior_metrics,
             )
-            selected_candidate = winner.get("candidate") if winner else None
-            selected_sha = winner.get("sha") if winner else None
-            for candidate in candidates:
-                candidate["selected"] = candidate.get("candidate") == selected_candidate
-            next_base_sha = selected_sha or parent_sha
-            if winner:
-                print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
-                      f"{selected_sha[:10]}", flush=True)
-                prior_metrics = winner.get("metrics") or prior_metrics
-            else:
-                print(f"[{stamp()}] no eligible candidate improved the incumbent; "
-                      f"accepted base stays {parent_sha[:10]}", flush=True)
-            store.append_generation(
-                round_id, parent_sha=parent_sha,
-                selected_candidate=selected_candidate, selected_sha=selected_sha,
-                candidates=candidates, reflection=reflection,
-                telemetry=telemetry.snapshot(persist=True),
-            )
-            if pending_insight is not None:
-                insight_text, insight_refs = pending_insight
-                memory_mod.append_insight(
-                    insights_path, round_id, insight_text, insight_refs,
-                )
-            _refresh_progress_plot(store, telemetry.plot_context())
-            parent_sha = next_base_sha
-            continue
-
-        # 2. executor (+ gate + harness commit)
-        worktree = workspace.add_worktree(round_id, parent_sha)
-        try:
-            result = executor_mod.execute(
-                executor_agent, proposal=proposal, goal=cfg["goal"],
-                editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
-                workspace=workspace, worktree=worktree, round_id=round_id,
-                gate_block=gate_lines,
-            )
-        except AgentError as exc:
-            print(f"[{stamp()}] executor failed: {exc}", flush=True)
-            workspace.remove_worktree(round_id)
-            _record_failure(store, round_id, proposal, "executor failed: " + str(exc)[:200],
-                            reflection=reflection, decision=decision, base_sha=parent_sha,
-                            telemetry_tracker=telemetry)
-            continue
-
-        if result.sha:
-            print(f"[{stamp()}] committed: {result.sha} ({len(result.changed_paths)} files)", flush=True)
+        selected_candidate = winner.get("candidate") if winner else None
+        selected_sha = winner.get("sha") if winner else None
+        for candidate in candidates:
+            candidate["selected"] = candidate.get("candidate") == selected_candidate
+        next_base_sha = selected_sha or parent_sha
+        if winner:
+            print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
+                  f"{selected_sha[:10]}", flush=True)
+            prior_metrics = winner.get("metrics") or prior_metrics
         else:
-            print(f"[{stamp()}] no commit: {result.reason}", flush=True)
-
-        # 3. eval + 4. judger — both run while the worktree still exists.
-        #    eval runs in the worktree (the real committed tree; the bare per-run
-        #    repo clone has no working tree). The judger ALSO runs in the worktree
-        #    so it can cat/grep the actual source and re-run a command to verify a
-        #    claim. The worktree is removed only after the judger returns.
-        #    run_eval returns (raw_text, metrics) — the harness parses the declared
-        #    key=value lines so the judger never has to read numbers out of prose
-        #    (which hallucinated a baseline number across 12 rounds before).
-        eval_block = ""
-        eval_metrics: dict = {}
-        if result.sha and cfg["eval_commands"]:
-            try:
-                eval_result = judger_mod.run_eval(
-                    cfg["eval_commands"],
-                    cwd=worktree,
-                    runtime=runtime,
-                    metrics_schema=metrics_schema,
-                )
-                eval_block = eval_result.text
-                eval_metrics = eval_result.metrics
-            except Exception as exc:  # timeout or subprocess error
-                eval_block = f"(eval failed to run: {exc})"
-                print(f"[{stamp()}] eval error: {exc}", flush=True)
-
-        accepted = _candidate_accepted(result.sha, eval_metrics, metrics_schema)
-        next_base_sha = result.sha if accepted else parent_sha
-        if result.sha and not accepted:
-            print(f"[{stamp()}] candidate rejected by hard gates; accepted base stays "
-                  f"{parent_sha[:10]}", flush=True)
-
-        try:
-            judgment = judger_mod.judge(
-                judger_agent, goal=cfg["goal"], proposal=proposal, sha=result.sha,
-                reason=result.reason, parent_sha=parent_sha, workspace=workspace,
-                eval_block=eval_block, cwd=worktree,
-                metrics=eval_metrics,
-                prior_metrics=prior_metrics,
-                baseline_metrics=baseline_metrics,
-                metrics_schema=metrics_schema,
+            reason = ("candidate rejected by hard gates"
+                      if static_proposals is not None
+                      else "no eligible candidate improved the incumbent")
+            print(f"[{stamp()}] {reason}; accepted base stays {parent_sha[:10]}",
+                  flush=True)
+        store.append_generation(
+            round_id, parent_sha=parent_sha,
+            selected_candidate=selected_candidate, selected_sha=selected_sha,
+            candidates=candidates, reflection=reflection,
+            telemetry=telemetry.snapshot(persist=True),
+        )
+        if pending_insight is not None:
+            insight_text, insight_refs = pending_insight
+            memory_mod.append_insight(
+                insights_path, round_id, insight_text, insight_refs,
             )
-        except (AgentError, ValueError) as exc:
-            # AgentError = claude call failed; ValueError = judger returned a
-            # malformed score/feedback/risk. Hard-gate acceptance was already
-            # computed by the harness, so a bad judgment does not override it.
-            print(f"[{stamp()}] judger failed: {exc}", flush=True)
-            _record_failure(store, round_id, proposal, "judger failed: " + str(exc)[:200], result.sha,
-                            eval_block, eval_metrics, changed_paths=result.changed_paths,
-                            reflection=reflection, decision=decision,
-                            accepted=accepted, base_sha=next_base_sha,
-                            telemetry_tracker=telemetry)
-            if accepted:
-                prior_metrics = eval_metrics or prior_metrics
-            parent_sha = next_base_sha
-            continue
-        finally:
-            # the worktree must not leak, whatever the judger raised.
-            workspace.remove_worktree(round_id)
-
-        print(f"[{stamp()}] score={judgment.score:.2f}  risk={judgment.risk}  "
-              f"feedback: {judgment.feedback[:120]}", flush=True)
-        # The objective line: print the authoritative measured value (harness-parsed,
-        # not the judger's prose) with vs-prior and vs-baseline deltas so the run
-        # log shows each round's optimization result at a glance. Before, the speed
-        # number lived inside feedback (truncated to 120 chars) or only in
-        # history.jsonl, so the log reader couldn't see whether a round actually
-        # improved. Best-effort: silent if no metrics schema / no objective value.
-        _print_objective(eval_metrics, prior_metrics, baseline_metrics, metrics_schema)
-
-        # 4. record + advance chain. eval_block + eval_metrics are stored so the
-        #    NEXT round's judger gets this round's result as its "prior round"
-        #    axis (raw text for the record + parsed metrics for the FACTS block).
-        #    risk is stored for the harness's best selection (gate-pass + risk≠high).
-        #    reflection + decision are stored as human-audit evidence (what the
-        #    proposer reflected before choosing this direction) — NOT fed back
-        #    into the next round's prompt (views.for_proposer doesn't project them).
-        store.append(round_id, proposal, result.sha, judgment.score, judgment.feedback,
-                     eval_block, eval_metrics=eval_metrics, risk=judgment.risk,
-                     changed_paths=result.changed_paths,
-                     reflection=reflection, decision=decision,
-                     accepted=accepted, base_sha=next_base_sha,
-                     feedback_for_proposer=judgment.feedback_for_proposer,
-                     telemetry=telemetry.snapshot(persist=True))
         _refresh_progress_plot(store, telemetry.plot_context())
-        if accepted:
-            prior_metrics = eval_metrics or prior_metrics
         parent_sha = next_base_sha
 
     print(f"\n[{stamp()}] done. best={store.best_sha} (score {store.best_score:.2f})", flush=True)
@@ -413,38 +325,6 @@ def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> No
         plot_mod.write_progress_pngs(
             store.run_dir, history, store.metrics_schema, plot_context,
         )
-
-
-def _record_failure(store: Store, round_id: int, proposal: str, reason: str,
-                    sha: str | None = None, eval_block: str = "",
-                    eval_metrics: dict | None = None,
-                    changed_paths: list[str] | None = None,
-                    reflection: str = "", decision: str = "",
-                    accepted: bool = False, base_sha: str | None = None,
-                    telemetry_tracker: RunTelemetry | None = None) -> None:
-    """Record a round where a role crashed, so history stays complete.
-
-    A failed round never has a valid risk band; record risk as 'high' so it is
-    never selected as best (a crashed judger/executor round is definitionally
-    not a ship candidate). reflection/decision default empty — a proposer
-    crash (L192) has neither; an executor/judger crash (L209/L251) passes the
-    proposer's reflection/decision through so the audit trail is complete."""
-    failure_feedback = f"[loop failure] {reason}"
-    proposer_failure = (
-        "[loop failure] round failed before a usable result was produced"
-    )
-    store.append(round_id, proposal, sha, 0.0, failure_feedback, eval_block,
-                 eval_metrics=eval_metrics or {}, risk="high",
-                 changed_paths=changed_paths or [],
-                 reflection=reflection, decision=decision,
-                 accepted=accepted, base_sha=base_sha,
-                 feedback_for_proposer=proposer_failure,
-                 telemetry=(telemetry_tracker.snapshot(persist=True)
-                            if telemetry_tracker else {}))
-    if telemetry_tracker:
-        _refresh_progress_plot(store, telemetry_tracker.plot_context())
-    else:
-        _refresh_progress_plot(store)
 
 
 def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,

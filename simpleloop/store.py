@@ -75,7 +75,13 @@ class Store:
                base_sha: str | None = None,
                feedback_for_proposer: str = "",
                telemetry: dict | None = None) -> None:
-        """Record one round and update best selection.
+        """Record one legacy flat (single-candidate) round and update best.
+
+        The loop no longer writes this shape — every round is recorded as a
+        generation via append_generation, static mode included. This writer is
+        kept because old runs' history.jsonl files still hold flat records that
+        --continue/plot/views must keep reading, and tests use it to build such
+        legacy histories.
 
         risk defaults to 'high' — a caller that doesn't supply one (e.g. a loop
         failure) is treated as not-best-eligible, which is the safe default for a

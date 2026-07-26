@@ -263,37 +263,6 @@ def test_refresh_progress_plot_swallows_history_read_failure(monkeypatch, tmp_pa
     assert "[plot] warning:" in capsys.readouterr().out
 
 
-def test_record_failure_refreshes_progress_plot(monkeypatch, tmp_path):
-    store = Store(tmp_path, metrics_schema=SCHEMA)
-    refreshed = []
-    monkeypatch.setattr(loop_mod, "_refresh_progress_plot", refreshed.append)
-
-    try:
-        parse_judgment({
-            "score": 0.5,
-            "risk": "low",
-            "feedback": "FULL_TECHNICAL_SENTINEL",
-            "feedback_for_proposer": "",
-        })
-    except ValueError as exc:
-        loop_mod._record_failure(
-            store,
-            round_id=0,
-            proposal="proposal",
-            reason="judger failed: " + str(exc),
-            base_sha="base",
-        )
-
-    assert refreshed == [store]
-    history = store.history()
-    assert len(history) == 1
-    assert history[0]["feedback_for_proposer"] == (
-        "[loop failure] round failed before a usable result was produced"
-    )
-    assert "FULL_TECHNICAL_SENTINEL" not in history[0]["feedback_for_proposer"]
-    assert "FULL_TECHNICAL_SENTINEL" in history[0]["feedback"]
-
-
 def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     run_dir = tmp_path / "run"
     store = Store(run_dir, metrics_schema=SCHEMA)
