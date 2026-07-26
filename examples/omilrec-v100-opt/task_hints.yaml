@@ -20,8 +20,7 @@ task:
     assume the listed techniques are the only safe or useful directions.
     Arithmetic changes elsewhere remain possible when every gate passes. Do
     not weaken, regenerate, bypass, or replace the evaluator, fixtures,
-    references, thresholds, or build wiring, and do not introduce a second
-    likelihood implementation. Edit only the admitted source files.
+    references, thresholds, or build wiring. Edit only the admitted source files.
 
 safety:
   editable_paths:

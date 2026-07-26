@@ -9,6 +9,7 @@ Minimal schema:
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
   loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
   loop.max_workers: int              (optional, default 1; candidate concurrency)
+loop.proposer_recent_rounds: int   (optional, default 3; rounds of history fed to proposer)
   runtime.image: path                (required; readable SIF image)
   runtime.binds: [absolute dir]      (optional, default [])
   eval.commands: [str]                (optional; omit -> judger is diff-only)
@@ -88,6 +89,9 @@ def _resolve(raw: dict, path: Path) -> dict:
     max_workers = loop.get("max_workers", 1)
     if not isinstance(max_workers, int) or max_workers < 1:
         raise ConfigError("loop.max_workers: must be a positive integer")
+    proposer_recent_rounds = loop.get("proposer_recent_rounds", 6)
+    if not isinstance(proposer_recent_rounds, int) or proposer_recent_rounds < 1:
+        raise ConfigError("loop.proposer_recent_rounds: must be a positive integer")
 
     src_path = source.get("path")
     if not src_path:
@@ -128,6 +132,7 @@ def _resolve(raw: dict, path: Path) -> dict:
         "agent_timeout_seconds": int(agent_timeout),
         "candidates_per_round": int(candidates_per_round),
         "max_workers": int(max_workers),
+        "proposer_recent_rounds": int(proposer_recent_rounds),
         "runtime_image": runtime_image,
         "runtime_binds": runtime_binds,
         "eval_commands": eval_commands,

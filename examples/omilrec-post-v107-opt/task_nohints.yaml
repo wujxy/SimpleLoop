@@ -1,0 +1,79 @@
+kind: task
+
+# Independent OMILRECV2 optimization experiment.
+# Every run starts from the same v1.0.0-based gated baseline.
+
+task:
+  goal: >
+    Optimize the runtime performance of the OMILRECV2 reconstruction algorithm
+    under OMILRECV2/src/.
+
+    Minimize OMILRECV2 milliseconds per event, reported as SPEED_MS, while
+    passing every configured correctness gate.
+
+    Any implementation strategy is allowed within the editable paths. A change
+    is valid only when EVAL_RESULT, FCN, and CONSISTENCY all pass. Among valid
+    candidates, lower SPEED_MS is better.
+
+safety:
+  editable_paths:
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
+
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "benchmarks/**"
+    - "reference/**"
+    - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
+    - "pyproject.toml"
+    - "docs/**"
+    - "CLAUDE.md"
+    - "README.md"
+    - ".gitignore"
+
+loop:
+  max_rounds: 20
+  candidates_per_round: 3
+  max_workers: 3
+  agent_timeout_seconds: 4500
+  proposer_recent_rounds: 4     # rounds of prior history fed to the proposer (down from 6)
+
+runtime:
+  image: apptainer.sif
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt
+
+eval:
+  commands:
+    - "bash scripts/sl_eval_post_v107.sh --evtmax 10"
+
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+
+    gates:
+      - key: FCN
+        description: >
+          Replay the charge and time likelihood evaluation against the
+          post-v1.0.7 golden fixture. The maximum allowed relative drift is
+          1e-13.
+
+      - key: CONSISTENCY
+        description: >
+          Compare end-to-end reconstructed physics output against the
+          post-v1.0.7 reference. The allowed differences are 4 mm for vertex,
+          7 keV for energy, 10 ps for t0, and 0.1 PE for peSum.
+
+      - key: EVAL_RESULT
+        description: >
+          The evaluation command must complete successfully without build
+          failure, timeout, or runtime crash.
+
+source:
+  path: ../../../omilrec-v100-postv107-gated
+  baseline_ref: postv107-gated-v100

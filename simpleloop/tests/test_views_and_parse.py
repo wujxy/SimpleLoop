@@ -118,7 +118,7 @@ def test_for_proposer_preserves_order():
                 "metrics": {}, "changed_paths": []}
                for r in range(5)]
     out = views.for_proposer(history)
-    assert [row["round"] for row in out] == [0, 1, 2, 3, 4]
+    assert [row["round"] for row in out] == [2, 3, 4]
 
 
 def _serial_history_record(round_id: int, proposal: str) -> dict:
@@ -176,9 +176,9 @@ def test_for_proposer_recent_window_uses_position_and_full_proposals():
 
     projected = views.for_proposer(history)
 
-    assert [row["round"] for row in projected] == round_ids[1:]
+    assert [row["round"] for row in projected] == round_ids[4:]
     assert [row["proposal"] for row in projected] == [
-        f"proposal-{round_id}" for round_id in round_ids[1:]
+        f"proposal-{round_id}" for round_id in round_ids[4:]
     ]
     assert all("proposal_head" not in row for row in projected)
 
@@ -192,7 +192,7 @@ def test_for_proposer_recent_window_does_not_mutate_history():
 
     projected = views.for_proposer(history)
 
-    assert [row["round"] for row in projected] == [1, 2, 3, 4, 5, 6]
+    assert [row["round"] for row in projected] == [4, 5, 6]
     assert history == original
 
 
@@ -212,7 +212,7 @@ def test_for_proposer_drops_old_generation_and_keeps_recent_candidates():
 
     projected = views.for_proposer(history)
 
-    assert [row["round"] for row in projected] == [20, 30, 40, 50, 60, 100]
+    assert [row["round"] for row in projected] == [50, 60, 100]
     recent_candidates = projected[-1]["candidates"]
     assert [c["proposal"] for c in recent_candidates] == [
         "recent candidate zero",
@@ -675,3 +675,41 @@ def test_config_gate_description_is_parsed_and_optional():
     assert keys == ["FCN", "CONSISTENCY", "EVAL_RESULT"]
     for g in gates:
         assert isinstance(g["description"], str) and g["description"].strip()
+
+
+def _write_min_task(tmp_path: Path, loop: dict) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    image = tmp_path / "runtime.sif"
+    image.write_bytes(b"fake-sif")
+    raw = {
+        "kind": "task",
+        "task": {"goal": "test"},
+        "safety": {"editable_paths": ["src/**"]},
+        "loop": loop,
+        "source": {"path": str(repo)},
+        "runtime": {"image": str(image)},
+    }
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return path
+
+
+def test_config_proposer_recent_rounds_defaults_to_three(tmp_path: Path):
+    cfg = config_mod.load(_write_min_task(tmp_path, {"max_rounds": 1}))
+    assert cfg["proposer_recent_rounds"] == 6
+
+
+def test_config_proposer_recent_rounds_is_configurable(tmp_path: Path):
+    cfg = config_mod.load(
+        _write_min_task(tmp_path, {"max_rounds": 1, "proposer_recent_rounds": 5})
+    )
+    assert cfg["proposer_recent_rounds"] == 5
+
+
+def test_config_proposer_recent_rounds_rejects_non_positive(tmp_path: Path):
+    with pytest.raises(config_mod.ConfigError, match="proposer_recent_rounds"):
+        config_mod.load(
+            _write_min_task(tmp_path, {"max_rounds": 1, "proposer_recent_rounds": 0})
+        )

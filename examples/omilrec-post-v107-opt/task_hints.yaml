@@ -24,9 +24,11 @@ task:
       (4mm/7keV/10ps/0.1PE): float-op changes there are fine as long as the
       reconstructed physics output stays within range.
 
-    Focus on: hoisting loop-invariant work, caching repeated values, SoA data
-    layout, precompute, index partitioning, dead code elimination — structural
-    refactors, not arithmetic ones. Edit only the admitted source files.
+    Reference directions include loop-invariant hoisting, repeated-value caching, SoA data 
+    layout, precomputation, index partitioning, removal of demonstrably unused work, and other 
+    structural rather than arithmetic optimizations. These examples are not an exhaustive search space; 
+    new code-grounded directions may also be proposed.
+    Edit only the admitted source files.
 
 safety:
   editable_paths:
@@ -46,11 +48,11 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 20
+  max_rounds: 60
   candidates_per_round: 3
   max_workers: 3
-  agent_timeout_seconds: 4500   # per claude call budget; raised from default 3600
-  proposer_recent_rounds: 3     # rounds of prior history fed to the proposer (down from 6)
+  agent_timeout_seconds: 4500
+  proposer_recent_rounds: 4
 
 runtime:
   image: apptainer.sif

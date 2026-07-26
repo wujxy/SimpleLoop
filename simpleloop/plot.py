@@ -111,6 +111,51 @@ def _coordinates(telemetry: object) -> tuple[float | None, int | None]:
     )
 
 
+def _ratio(
+    objective_value: float | None,
+    baseline_value: float | None,
+    lower_is_better: bool | None,
+) -> float | None:
+    if objective_value is None or baseline_value in (None, 0.0):
+        return None
+    # For lower-is-better objectives (e.g. latency in ms) invert the ratio so the
+    # third row reads as an improvement multiple where higher is better: a value of
+    # 1.25 means "1.25x the baseline speed" rather than "objective dropped to 0.8".
+    if lower_is_better is True:
+        if objective_value == 0.0:
+            return None
+        return baseline_value / objective_value
+    return objective_value / baseline_value
+
+
+def _worktime_rebase_offsets(history: list[dict]) -> list[float]:
+    """Per-record worktime offset (hours) keeping the plotted worktime continuous.
+
+    Each round stores its telemetry's *within-session* cumulative worktime. A
+    --continue resume reseeds that counter, and if the seed does not carry the
+    prior sessions' running total the stored value drops at the resume boundary
+    — so the "vs worktime" axis visibly resets to a smaller origin instead of
+    continuing past the last pre-resume round. Walk the rounds in order and,
+    whenever a round's worktime falls below the running maximum, lift that round
+    and every later round by the gap so the plotted worktime is monotonically
+    non-decreasing and continuous across sessions. No-op for a single session.
+    """
+    offsets: list[float] = []
+    running_hours = 0.0
+    ceiling_hours: float | None = None
+    for record in history:
+        seconds = _number((record.get("telemetry") or {}).get("worktime_seconds"))
+        if seconds is not None:
+            effective = seconds / 3600.0 + running_hours
+            if ceiling_hours is not None and effective < ceiling_hours:
+                running_hours += ceiling_hours - effective
+                effective = ceiling_hours
+            if ceiling_hours is None or effective > ceiling_hours:
+                ceiling_hours = effective
+        offsets.append(running_hours)
+    return offsets
+
+
 def _observation(
     *,
     round_number: float,
@@ -118,15 +163,15 @@ def _observation(
     score: object = None,
     objective: object = None,
     baseline_value: float | None = None,
+    lower_is_better: bool | None = None,
     selected: bool = False,
+    worktime_offset_hours: float = 0.0,
 ) -> Observation:
     worktime, tokens = _coordinates(telemetry)
+    if worktime is not None and worktime_offset_hours:
+        worktime += worktime_offset_hours
     objective_value = _number(objective)
-    ratio = (
-        objective_value / baseline_value
-        if objective_value is not None and baseline_value not in (None, 0.0)
-        else None
-    )
+    ratio = _ratio(objective_value, baseline_value, lower_is_better)
     return Observation(
         round=round_number,
         worktime_hours=worktime,
@@ -155,6 +200,10 @@ def build_series(
     baseline_value = _number(baseline_metrics.get(objective_key))
     if baseline_value == 0.0:
         baseline_value = None
+    # Rebase worktime across --continue resumes so the "vs worktime" axis does
+    # not drop at a session boundary (the baseline is round 0 of session 1, so
+    # its offset is always zero).
+    worktime_offsets = _worktime_rebase_offsets(history)
     baseline = None
     if baseline_value is not None:
         baseline = _observation(
@@ -162,6 +211,7 @@ def build_series(
             telemetry=context.get("baseline_telemetry"),
             objective=baseline_value,
             baseline_value=baseline_value,
+            lower_is_better=lower_is_better,
             selected=True,
         )
 
@@ -173,6 +223,11 @@ def build_series(
     for index, record in enumerate(history):
         round_number = int(record.get("round", index)) + 1
         rounds.append(round_number)
+        offset_hours = (
+            worktime_offsets[index]
+            if index < len(worktime_offsets)
+            else 0.0
+        )
         parallel = isinstance(record.get("candidates"), list)
         attempts = record["candidates"] if parallel else [record]
         selected_id = record.get("selected_candidate") if parallel else None
@@ -191,7 +246,9 @@ def build_series(
                 score=attempt.get("score"),
                 objective=metrics.get(objective_key),
                 baseline_value=baseline_value,
+                lower_is_better=lower_is_better,
                 selected=selected,
+                worktime_offset_hours=offset_hours,
             )
             candidates.append(point)
             if selected:
@@ -213,7 +270,9 @@ def build_series(
                 telemetry=record.get("telemetry"),
                 objective=incumbent_value,
                 baseline_value=baseline_value,
+                lower_is_better=lower_is_better,
                 selected=True,
+                worktime_offset_hours=offset_hours,
             ))
 
     return PlotSeries(
@@ -279,6 +338,10 @@ def _y_label(series: PlotSeries, kind: str) -> str:
         return "Score"
     key = series.objective_key or "Objective"
     if kind == "ratio":
+        if series.lower_is_better is True:
+            # Inverted: shows baseline/objective, so label it as an improvement
+            # multiple (higher is better) instead of a raw objective ratio.
+            return f"{key} multiple (vs baseline)"
         return f"{key} ratio (vs baseline)"
     return key
 
@@ -368,6 +431,10 @@ def _render_panel(axis, series: PlotSeries, y_kind: str, x_kind: str) -> None:
             else "direction not configured"
         )
         title = f"{title} ({direction})"
+    elif y_kind == "ratio" and series.lower_is_better is not None:
+        # After direction-aware inversion the ratio is always an improvement
+        # multiple, so higher is better regardless of the raw objective's direction.
+        title = f"{title} (higher is better)"
     axis.set_title(f"{title} vs {_x_label(x_kind)}")
     axis.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
     if y_kind == "score":

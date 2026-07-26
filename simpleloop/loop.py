@@ -219,6 +219,7 @@ def run(config_path: str | Path, run_dir: str | Path,
                     frozen=cfg["frozen_paths"], history=history, insights=insights,
                     base_sha=parent_sha, cwd=workspace.repo,
                     candidates_per_round=cfg.get("candidates_per_round", 1),
+                    recent_rounds=cfg.get("proposer_recent_rounds", 6),
                     gate_block=gate_lines,
                 )
             except (AgentError, ValueError) as exc:

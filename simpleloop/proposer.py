@@ -127,13 +127,14 @@ def _proposer_schema(candidates_per_round: int) -> dict:
 def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             history: list[dict], insights: list[dict], base_sha: str, cwd: Path,
             candidates_per_round: int = 1,
+            recent_rounds: int = views._PROPOSER_RECENT_ROUNDS_DEFAULT,
             gate_block: str = "") -> ProposalBatch:
     """Return ProposalBatch for the next round."""
     # Project history through the proposer's view: this strips eval_block (the
     # judger's axis — the judger summarizes it into `feedback_for_proposer` for
     # us). The proposer only sees each prior round's proposal + score + concise
     # search lesson.
-    visible = views.for_proposer(history)
+    visible = views.for_proposer(history, recent_rounds=recent_rounds)
     insights_block = memory_mod.render_insights(insights)
     if visible:
         hist_lines = []

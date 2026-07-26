@@ -13,7 +13,8 @@ flat — one record per round, serial single-parent chain. A Context pool class
 would wrap a list[dict] with no added structure. Three pure functions are enough
 and leave explicit, auditable seams for future mechanisms.
 
-The proposer projection keeps only the six most recent round records in full.
+The proposer projection keeps only the `recent_rounds` most recent round
+records in full (default 3; overridable via `loop.proposer_recent_rounds`).
 The persisted history remains complete and older evidence stays available through
 Search Memory references.
 """
@@ -22,7 +23,7 @@ from __future__ import annotations
 import re
 
 
-_PROPOSER_RECENT_ROUNDS = 6
+_PROPOSER_RECENT_ROUNDS_DEFAULT = 6
 
 # The judger prefixes each feedback with a `LANDED_STATE: <tag>` token (the
 # contract lives in judger.py); we surface it as a structured field in the
@@ -48,7 +49,7 @@ def _landing_state(feedback: str | None) -> str | None:
     return m.group(1).lower() if m else None
 
 
-def for_proposer(history: list[dict]) -> list[dict]:
+def for_proposer(history: list[dict], *, recent_rounds: int = _PROPOSER_RECENT_ROUNDS_DEFAULT) -> list[dict]:
     """What the proposer sees of each prior round.
 
     Projects round/generation history with candidate shas, selected state, score,
@@ -74,7 +75,7 @@ def for_proposer(history: list[dict]) -> list[dict]:
     Still excludes eval_block: raw eval text, too noisy, hallucination risk.
     """
     out = []
-    for r in history[-_PROPOSER_RECENT_ROUNDS:]:
+    for r in history[-recent_rounds:]:
         if "candidates" in r:
             out.append({
                 "round": r["round"],
