@@ -1,0 +1,64 @@
+kind: task
+
+task:
+  goal: >
+    Optimize OMILREC v1.0.0 production runtime under OMILRECV2/src. Minimize
+    probe-free SPEED_MS while preserving frozen v1.0.0 numerical truth. FCN
+    directly calls OMILRECV2::Calculate_EVLikelihood for four events at QMLE,
+    TMLE, QTMLE, and ENERGY and requires all 16 relative LL errors below 1e-13.
+    E2E checks all 18 events with limits of 4 mm Euclidean 3D position, 7 keV
+    energy, 10 ps t0, and 0.1 PE peSum. Do not modify or bypass the gate,
+    regenerate truth, or introduce a second likelihood implementation.
+
+safety:
+  editable_paths:
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "baseline/**"
+    - "benchmarks/**"
+    - "reference/**"
+    - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
+    - "pyproject.toml"
+    - "docs/**"
+    - "CLAUDE.md"
+    - "README.md"
+    - ".gitignore"
+
+loop:
+  max_rounds: 20
+  candidates_per_round: 3
+  max_workers: 3
+  agent_timeout_seconds: 4500
+  proposer_recent_rounds: 3
+
+runtime:
+  image: apptainer.sif
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt
+
+eval:
+  commands:
+    - "bash scripts/sl_eval_v100.sh --evtmax 10"
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    gates:
+      - key: CONTRACT
+        description: Single-source v1.0.0 gate structure and numerical assets are intact.
+      - key: FCN
+        description: All 16 direct production-member FCN results match frozen v1.0.0 truth below 1e-13 relative error.
+      - key: CONSISTENCY
+        description: All 18 events pass the v1.0.0 E2E finite and range checks.
+      - key: EVAL_RESULT
+        description: Probe-on tests, probe-off production build, and benchmark all succeed.
+
+source:
+  path: ../../../omilrec-v100-gated
+  baseline_ref: simpleloop-v100-gated-baseline

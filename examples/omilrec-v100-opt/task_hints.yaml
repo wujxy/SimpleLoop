@@ -1,0 +1,69 @@
+kind: task
+
+task:
+  goal: >
+    Optimize OMILREC v1.0.0 production runtime under OMILRECV2/src. The
+    authoritative baseline is 919.94892 ms/event: the median of three
+    probe-free, single-thread, 100-event measurements. Candidate ranking uses
+    probe-free SPEED_MS. FCN invokes the real production member at four stages
+    for four fixed events and requires exactly 16 finite unique results below
+    1e-13 relative error against v1.0.0 truth. E2E checks every one of 18 events
+    against v1.0.0 truth with 3D position <= 4 mm, energy <= 7 keV, t0 <= 10 ps,
+    and peSum <= 0.1 PE. Fixtures, input, reference, and map assets are SHA-256
+    pinned. Explore invariant hoisting, caching, SoA layout, index partitioning,
+    allocation reduction, and dead-work elimination. Arithmetic changes are
+    acceptable only when both gates pass. Never weaken or regenerate the gate
+    and never add an alternate likelihood implementation.
+
+safety:
+  editable_paths:
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "baseline/**"
+    - "benchmarks/**"
+    - "reference/**"
+    - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
+    - "pyproject.toml"
+    - "docs/**"
+    - "CLAUDE.md"
+    - "README.md"
+    - ".gitignore"
+
+loop:
+  max_rounds: 60
+  candidates_per_round: 3
+  max_workers: 3
+  agent_timeout_seconds: 4500
+  proposer_recent_rounds: 4
+
+runtime:
+  image: apptainer.sif
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt
+
+eval:
+  commands:
+    - "bash scripts/sl_eval_v100.sh --evtmax 10"
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    gates:
+      - key: CONTRACT
+        description: Single-source v1.0.0 gate contract passes.
+      - key: FCN
+        description: All 16 direct production-member FCN comparisons pass.
+      - key: CONSISTENCY
+        description: All 18 v1.0.0 E2E comparisons pass.
+      - key: EVAL_RESULT
+        description: Complete evaluation exits successfully.
+
+source:
+  path: ../../../omilrec-v100-gated
+  baseline_ref: simpleloop-v100-gated-baseline

@@ -1,0 +1,61 @@
+kind: task
+
+task:
+  goal: >
+    Optimize OMILREC v1.0.0 production runtime under OMILRECV2/src. Minimize
+    probe-free SPEED_MS while CONTRACT, FCN, CONSISTENCY, and EVAL_RESULT pass.
+    All numerical truth and the performance baseline originate from v1.0.0.
+    Do not modify the evaluator or add another likelihood implementation.
+
+safety:
+  editable_paths:
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "baseline/**"
+    - "benchmarks/**"
+    - "reference/**"
+    - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
+    - "pyproject.toml"
+    - "docs/**"
+    - "CLAUDE.md"
+    - "README.md"
+    - ".gitignore"
+
+loop:
+  max_rounds: 20
+  candidates_per_round: 3
+  max_workers: 3
+  agent_timeout_seconds: 4500
+  proposer_recent_rounds: 4
+
+runtime:
+  image: apptainer.sif
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt
+
+eval:
+  commands:
+    - "bash scripts/sl_eval_v100.sh --evtmax 10"
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    gates:
+      - key: CONTRACT
+        description: Frozen v1.0.0 gate contract passes.
+      - key: FCN
+        description: Direct v1.0.0 production-member FCN gate passes.
+      - key: CONSISTENCY
+        description: All 18 v1.0.0 E2E comparisons pass.
+      - key: EVAL_RESULT
+        description: Complete evaluation exits successfully.
+
+source:
+  path: ../../../omilrec-v100-gated
+  baseline_ref: simpleloop-v100-gated-baseline
