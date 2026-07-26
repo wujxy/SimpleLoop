@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from simpleloop import loop as loop_mod
-from simpleloop.loop import _run_candidates
+from simpleloop.loop import RunContext, _run_candidates
 from simpleloop.proposer import Proposal
 from simpleloop.store import Store
 
@@ -65,7 +65,7 @@ def test_store_persists_candidate_and_generation_telemetry(tmp_path):
 def test_run_candidates_attaches_persisted_snapshot_after_each_worker(
     monkeypatch,
 ):
-    def fake_candidate(candidate_id, proposal, *_args):
+    def fake_candidate(_ctx, candidate_id, proposal, *_args):
         return {
             "candidate": candidate_id,
             "proposal": proposal.proposal,
@@ -75,20 +75,13 @@ def test_run_candidates_attaches_persisted_snapshot_after_each_worker(
     monkeypatch.setattr(loop_mod, "_run_one_candidate", fake_candidate)
     tracker = SnapshotTracker()
 
+    ctx = RunContext(cfg={"max_workers": 2}, telemetry=tracker)
     candidates = _run_candidates(
+        ctx,
         [Proposal("p0"), Proposal("p1")],
         0,
         "base",
-        {"max_workers": 2},
-        object(),
-        object(),
-        object(),
         {},
-        {},
-        None,
-        "",
-        object(),
-        tracker,
     )
 
     assert {c["candidate"] for c in candidates} == {0, 1}

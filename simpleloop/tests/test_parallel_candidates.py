@@ -14,7 +14,7 @@ from simpleloop.agent import Agent, AgentError, AgentResult
 from simpleloop.executor import ExecResult
 from simpleloop.evals import EvalResult
 from simpleloop.judger import Judgment, _parse as parse_judgment
-from simpleloop.loop import _run_candidates, _select_winner
+from simpleloop.loop import RunContext, _run_candidates, _select_winner
 from simpleloop.proposer import Proposal, ProposalBatch
 from simpleloop.proposer import _parse_batch
 from simpleloop.proposer import _proposer_schema
@@ -685,13 +685,15 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
     ]
     schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
               "gates": [{"key": "CORRECTNESS"}]}
-    candidates = _run_candidates(
-        proposals, 7, "parent", {
+    ctx = RunContext(
+        cfg={
             "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
-            "eval_commands": ["eval"], "max_workers": 1,
-        }, workspace, object(), object(), {"SPEED_MS": 150.0},
-        {"SPEED_MS": 200.0}, schema, "", object(),
+            "eval_commands": ["eval"], "max_workers": 1, "metrics": schema,
+        },
+        workspace=workspace, executor_agent=object(), judger_agent=object(),
+        runtime=object(), baseline_metrics={"SPEED_MS": 200.0},
     )
+    candidates = _run_candidates(ctx, proposals, 7, "parent", {"SPEED_MS": 150.0})
 
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
@@ -724,12 +726,16 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
     monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(loop_mod.judger_mod, "judge", fake_judge)
 
-    candidates = _run_candidates(
-        [Proposal(proposal="p0", family="f0")], 2, "parent", {
+    ctx = RunContext(
+        cfg={
             "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
-            "eval_commands": [], "max_workers": 1,
-        }, FakeWorkspace(), object(), object(), {}, {}, None, "", object(),
+            "eval_commands": [], "max_workers": 1, "metrics": None,
+        },
+        workspace=FakeWorkspace(), executor_agent=object(),
+        judger_agent=object(), runtime=object(),
     )
+    candidates = _run_candidates(
+        ctx, [Proposal(proposal="p0", family="f0")], 2, "parent", {})
 
     assert candidates[0]["score"] == 0.0
     assert candidates[0]["feedback_for_proposer"] == (
@@ -741,19 +747,19 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
 
 
 def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
-    def fail_worker(candidate_id, *_args, **_kwargs):
+    def fail_worker(_ctx, candidate_id, *_args, **_kwargs):
         raise RuntimeError(f"worker {candidate_id} exploded")
 
     monkeypatch.setattr(loop_mod, "_run_one_candidate", fail_worker)
     candidates = _run_candidates(
+        RunContext(cfg={"max_workers": 2}),
         [
             Proposal(proposal="p0", family="f0"),
             Proposal(proposal="p1", family="f1"),
         ],
         3,
         "parent",
-        {"max_workers": 2},
-        object(), object(), object(), {}, {}, None, "", object(),
+        {},
     )
 
     assert [candidate["score"] for candidate in candidates] == [0.0, 0.0]

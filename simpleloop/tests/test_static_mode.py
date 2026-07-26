@@ -88,7 +88,8 @@ def test_static_mode_accepts_by_gates_alone_and_records_generations(
          "metrics": {"SPEED_MS": 150.0, "CORRECTNESS": True}},
     ]
 
-    def fake_candidate(candidate_id, proposal, round_id, parent_sha, *_args):
+    def fake_candidate(_ctx, candidate_id, proposal, round_id, parent_sha,
+                       *_args):
         seen_parents.append(parent_sha)
         outcome = outcomes[round_id]
         return {

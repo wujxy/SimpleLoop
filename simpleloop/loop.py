@@ -28,6 +28,7 @@ import json
 import math
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -52,6 +53,36 @@ class BaselineAcceptanceError(RuntimeError):
     """Raised when the configured runtime cannot pass the task baseline."""
 
 
+@dataclass
+class RunContext:
+    """Per-run fixtures shared by every round: config, runtime, agents, stores.
+
+    Everything here is fixed for the run's lifetime; baseline_metrics is set
+    once after the baseline eval. Mutable per-round search state (parent_sha,
+    prior_metrics) stays in run()'s locals. Only cfg is required so tests can
+    build a minimal context for a single helper.
+    """
+    cfg: dict
+    run_dir: Path | None = None
+    runtime: ApptainerRuntime | None = None
+    workspace: Workspace | None = None
+    store: Store | None = None
+    telemetry: RunTelemetry | None = None
+    proposer_agent: Agent | None = None
+    executor_agent: Agent | None = None
+    judger_agent: Agent | None = None
+    gate_lines: str = ""
+    baseline_metrics: dict = field(default_factory=dict)
+
+    @property
+    def metrics_schema(self) -> dict | None:
+        return self.cfg.get("metrics")
+
+    @property
+    def insights_path(self) -> Path:
+        return self.run_dir / "insights.jsonl"
+
+
 def run(config_path: str | Path, run_dir: str | Path,
         proposals: str | Path | list[str] | None = None,
         continue_run: bool = False) -> dict:
@@ -73,16 +104,7 @@ def run(config_path: str | Path, run_dir: str | Path,
     # repo's cwd while Popen resolves them relative to the loop's cwd -> mismatch.
     run_dir_path = Path(run_dir).resolve()
     run_dir_path.mkdir(parents=True, exist_ok=True)
-    telemetry = RunTelemetry(run_dir_path, resume=continue_run)
-    runtime = ApptainerRuntime(
-        image=cfg["runtime_image"],
-        binds=cfg["runtime_binds"],
-        run_dir=run_dir_path,
-    )
-    for line in runtime.summary_lines():
-        print(line, flush=True)
-    runtime.preflight()
-    print("preflight: PASS", flush=True)
+    ctx = _build_context(cfg, run_dir_path, resume=continue_run)
 
     static_proposals = _load_proposals(proposals)
     if static_proposals is not None and continue_run:
@@ -96,20 +118,106 @@ def run(config_path: str | Path, run_dir: str | Path,
     else:
         n_rounds = cfg["max_rounds"]
 
-    # Three role-scoped agents, separated by the tools each role NEEDS so a role
-    # can't do a job it isn't supposed to (reward-hacking / cross-run cheating):
-    #   - proposer: reads the source repo to propose a direction. Never edits —
-    #     giving it Edit/Write is pure attack surface (it could rewrite the
-    #     baseline). Read + Bash only.
-    #   - executor: edits the worktree and runs build/test to verify. Needs the
-    #     full set; its WRITE risk is bounded by gate.check_diff (frozen/editable).
-    #   - judger: reads the diff + re-runs eval to verify claims. Never edits — a
-    #     judger that can write could rewrite eval/reference to make itself pass.
-    #     Read + Bash only.
-    # All three share the same 1h timeout ceiling (configurable per-task via
-    # loop.agent_timeout_seconds): a proposal can be a large systematic change
-    # spanning many call sites, and the executor must finish the WHOLE proposal in
-    # one round (no half-work).
+    print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
+    ctx.workspace.setup()
+    print(f"[{stamp()}] baseline sha: {ctx.workspace.baseline_sha()}", flush=True)
+
+    start = _starting_state(ctx, continue_run, n_rounds)
+    if start is None:  # --continue with nothing left to do
+        return _summary(ctx.store, ctx.workspace, run_dir_path)
+    start_round, parent_sha, prior_metrics = start
+
+    for round_id in range(start_round, n_rounds):
+        print(f"\n[{stamp()}] === round {round_id + 1}/{n_rounds} ===", flush=True)
+
+        # 1. proposer (skipped in static mode — see _next_proposals).
+        proposals_batch, reflection, pending_insight = _next_proposals(
+            ctx, static_proposals, round_id, parent_sha)
+
+        # 2. executor + eval + judger, one shared pipeline per candidate. Static
+        #    mode is just a one-candidate generation with a different acceptance
+        #    rule (below).
+        candidates = _run_candidates(
+            ctx, proposals_batch, round_id, parent_sha, prior_metrics)
+        if static_proposals is not None:
+            # Controlled-experiment rule (unchanged from the old serial path):
+            # hard gates alone decide whether the chain advances — no
+            # improvement or risk requirement, so a regressing-but-valid
+            # experiment still lands and the next static proposal builds on it.
+            first = candidates[0] if candidates else None
+            winner = (first if first and first.get("sha") and first.get("accepted")
+                      else None)
+        else:
+            winner = _select_winner(
+                candidates,
+                ctx.metrics_schema,
+                prior_metrics=prior_metrics,
+            )
+        selected_candidate = winner.get("candidate") if winner else None
+        selected_sha = winner.get("sha") if winner else None
+        for candidate in candidates:
+            candidate["selected"] = candidate.get("candidate") == selected_candidate
+        next_base_sha = selected_sha or parent_sha
+        if winner:
+            print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
+                  f"{selected_sha[:10]}", flush=True)
+            prior_metrics = winner.get("metrics") or prior_metrics
+        else:
+            reason = ("candidate rejected by hard gates"
+                      if static_proposals is not None
+                      else "no eligible candidate improved the incumbent")
+            print(f"[{stamp()}] {reason}; accepted base stays {parent_sha[:10]}",
+                  flush=True)
+        ctx.store.append_generation(
+            round_id, parent_sha=parent_sha,
+            selected_candidate=selected_candidate, selected_sha=selected_sha,
+            candidates=candidates, reflection=reflection,
+            telemetry=ctx.telemetry.snapshot(persist=True),
+        )
+        if pending_insight is not None:
+            insight_text, insight_refs = pending_insight
+            memory_mod.append_insight(
+                ctx.insights_path, round_id, insight_text, insight_refs,
+            )
+        _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
+        parent_sha = next_base_sha
+
+    print(f"\n[{stamp()}] done. best={ctx.store.best_sha} "
+          f"(score {ctx.store.best_score:.2f})", flush=True)
+    print(f"[{stamp()}] working repo (for tracing): {ctx.workspace.repo}", flush=True)
+    return _summary(ctx.store, ctx.workspace, run_dir_path)
+
+
+def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext:
+    """Construct the run's fixed fixtures: runtime (with preflight), the three
+    role-scoped agents, workspace, store, and telemetry.
+
+    The three agents are separated by the tools each role NEEDS so a role can't
+    do a job it isn't supposed to (reward-hacking / cross-run cheating):
+      - proposer: reads the source repo to propose a direction. Never edits —
+        giving it Edit/Write is pure attack surface (it could rewrite the
+        baseline). Read + Bash only.
+      - executor: edits the worktree and runs build/test to verify. Needs the
+        full set; its WRITE risk is bounded by gate.check_diff (frozen/editable).
+      - judger: reads the diff + re-runs eval to verify claims. Never edits — a
+        judger that can write could rewrite eval/reference to make itself pass.
+        Read + Bash only.
+    All three share the same 1h timeout ceiling (configurable per-task via
+    loop.agent_timeout_seconds): a proposal can be a large systematic change
+    spanning many call sites, and the executor must finish the WHOLE proposal in
+    one round (no half-work).
+    """
+    telemetry = RunTelemetry(run_dir_path, resume=resume)
+    runtime = ApptainerRuntime(
+        image=cfg["runtime_image"],
+        binds=cfg["runtime_binds"],
+        run_dir=run_dir_path,
+    )
+    for line in runtime.summary_lines():
+        print(line, flush=True)
+    runtime.preflight()
+    print("preflight: PASS", flush=True)
+
     timeout = cfg.get("agent_timeout_seconds", 3600)
     proposer_agent = Agent(runtime=runtime, command="claude",
                            timeout_seconds=timeout,
@@ -130,177 +238,130 @@ def run(config_path: str | Path, run_dir: str | Path,
         editable=cfg["editable_paths"],
     )
     store = Store(run_dir_path, metrics_schema=cfg.get("metrics"))
-    insights_path = run_dir_path / "insights.jsonl"
-
-    print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
-    workspace.setup()
-    parent_sha = workspace.baseline_sha()
-    print(f"[{stamp()}] baseline sha: {parent_sha}", flush=True)
-
-    # Baseline eval: run the eval commands once on the unoptimized baseline
-    # commit so every round's judger has a "vs baseline" axis. It is also the
-    # runtime acceptance test: a failure aborts before any optimization role is
-    # called. Skipped entirely when no eval is configured.
-    # Returns both the raw text (kept for the record) and the parsed metrics
-    # (the authoritative baseline numbers the judger's FACTS block cites).
-    metrics_schema = cfg.get("metrics")
     # Pre-render the gates' list lines once for the run: the same bullet lines
     # go into both the proposer's (reference) and executor's (acceptance) prompt,
     # each prefixed by its own fixed framing sentence in that role's prompt. Empty
-    # when no gate declares a description (degrades to today: no gate list shown).
-    gate_lines = views.gate_block(metrics_schema)
+    # when no gate declares a description.
+    gate_lines = views.gate_block(cfg.get("metrics"))
+    return RunContext(
+        cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
+        store=store, telemetry=telemetry, proposer_agent=proposer_agent,
+        executor_agent=executor_agent, judger_agent=judger_agent,
+        gate_lines=gate_lines,
+    )
 
-    # ---- continue mode: resume from existing history ----
-    # Rounds already in history.jsonl are skipped; the commit chain resumes from
-    # the last accepted round's sha. max_rounds becomes the target TOTAL round
-    # count (caller bumps it in the config before continuing), so the loop runs
-    # range(start_round, n_rounds). Baseline eval is re-run for the judger's
-    # vs-baseline axis; the prior-round axis is rebuilt from the last accepted
-    # round's metrics so the resumed round 0's judger sees a real prior.
-    start_round = 0
-    if continue_run:
-        done = store.history()
-        if not done:
-            raise ValueError(
-                f"--continue: run-dir {run_dir_path} has no history.jsonl rounds; "
-                "drop --continue and start a fresh run."
-            )
-        start_round = len(done)
-        if start_round >= n_rounds:
-            print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
-                  f"max_rounds={n_rounds} -- nothing to do. Bump loop.max_rounds in "
-                  f"the config to add more rounds.", flush=True)
-            _refresh_progress_plot(store, telemetry.plot_context())
-            return _summary(store, workspace, run_dir_path)
-        parent_sha, last_accepted = _resume_chain(
-            done, workspace.baseline_sha(), metrics_schema)
-        prior_metrics = (last_accepted or {}).get("metrics") or {}
-        print(f"[{stamp()}] --continue: resuming from round {start_round + 1} "
-              f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
-              flush=True)
-        # baseline eval still runs (judger's vs-baseline axis); its metrics are
-        # only used if start_round == 0, which continue mode excludes, but the
-        # judger may cite baseline numbers so keep them available.
+
+def _starting_state(ctx: RunContext, continue_run: bool,
+                    n_rounds: int) -> tuple[int, str, dict] | None:
+    """Run the baseline eval and resolve where the round loop starts.
+
+    Returns (start_round, parent_sha, prior_metrics), or None when --continue
+    finds nothing left to do (target round count already recorded).
+
+    Baseline eval: run the eval commands once on the unoptimized baseline
+    commit so every round's judger has a "vs baseline" axis. It is also the
+    runtime acceptance test: a failure aborts before any optimization role is
+    called. Skipped entirely when no eval is configured.
+
+    Continue mode: rounds already in history.jsonl are skipped; the commit
+    chain resumes from the last accepted round's sha. max_rounds becomes the
+    target TOTAL round count (caller bumps it in the config before continuing).
+    The prior-round axis is rebuilt from the last accepted round's metrics so
+    the resumed round's judger sees a real prior.
+    """
+    baseline_sha = ctx.workspace.baseline_sha()
+    if not continue_run:
         _, baseline_metrics = _eval_baseline(
-            workspace, cfg, workspace.baseline_sha(), runtime)
-        if last_accepted is None:
-            prior_metrics = baseline_metrics
-    else:
-        _, baseline_metrics = _eval_baseline(
-            workspace, cfg, parent_sha, runtime)
-        telemetry.set_baseline(baseline_metrics)
+            ctx.workspace, ctx.cfg, baseline_sha, ctx.runtime)
+        ctx.telemetry.set_baseline(baseline_metrics)
+        ctx.baseline_metrics = baseline_metrics
         # round 0's "prior round" is the baseline. Updated to each accepted
         # round's parsed metrics (the judger FACTS block's vs-prior axis).
+        return 0, baseline_sha, baseline_metrics
+
+    done = ctx.store.history()
+    if not done:
+        raise ValueError(
+            f"--continue: run-dir {ctx.run_dir} has no history.jsonl rounds; "
+            "drop --continue and start a fresh run."
+        )
+    start_round = len(done)
+    if start_round >= n_rounds:
+        print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
+              f"max_rounds={n_rounds} -- nothing to do. Bump loop.max_rounds in "
+              f"the config to add more rounds.", flush=True)
+        _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
+        return None
+    parent_sha, last_accepted = _resume_chain(
+        done, baseline_sha, ctx.metrics_schema)
+    prior_metrics = (last_accepted or {}).get("metrics") or {}
+    print(f"[{stamp()}] --continue: resuming from round {start_round + 1} "
+          f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
+          flush=True)
+    # baseline eval still runs (judger's vs-baseline axis); its metrics are
+    # only used if start_round == 0, which continue mode excludes, but the
+    # judger may cite baseline numbers so keep them available.
+    _, baseline_metrics = _eval_baseline(
+        ctx.workspace, ctx.cfg, baseline_sha, ctx.runtime)
+    ctx.baseline_metrics = baseline_metrics
+    if last_accepted is None:
         prior_metrics = baseline_metrics
+    return start_round, parent_sha, prior_metrics
 
-    for round_id in range(start_round, n_rounds):
-        print(f"\n[{stamp()}] === round {round_id + 1}/{n_rounds} ===", flush=True)
 
-        # 1. proposer — reads the per-run repo (the SAME clone the executor
-        #    commits into, so the round shas in history are valid objects here and
-        #    the proposer can `git show`/`git diff` any prior round's actual
-        #    changes). It never edits — the executor edits in a per-round worktree;
-        #    the proposer's read of the repo is read-only (no working tree is
-        #    checked out for it: the per-run repo is a bare-ish --no-checkout clone,
-        #    so the proposer can only inspect commit history/diffs, not a live tree).
-        #    It must NOT read other runs' repos (cross-run answer-copying); the
-        #    per-run clone is physically isolated per run_dir.
-        #    In static-proposal mode this step is skipped: the proposal is taken
-        #    verbatim from the supplied batch (history is still recorded, but its
-        #    feedback no longer picks the next direction).
-        if static_proposals is not None:
-            proposal_text = static_proposals[round_id]
-            proposals_batch = [proposer_mod.Proposal(
-                proposal=proposal_text, decision="static", family="single")]
-            reflection = ""  # static mode: no proposer, no reflection/insight
-            pending_insight = None
-            print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
-        else:
-            history = store.history()
-            insights = memory_mod.load_insights(insights_path)
-            try:
-                proposal_obj = proposer_mod.propose(
-                    proposer_agent, goal=cfg["goal"], editable=cfg["editable_paths"],
-                    frozen=cfg["frozen_paths"], history=history, insights=insights,
-                    base_sha=parent_sha, cwd=workspace.repo,
-                    candidates_per_round=cfg.get("candidates_per_round", 1),
-                    recent_rounds=cfg.get("proposer_recent_rounds", 6),
-                    gate_block=gate_lines,
-                )
-            except (AgentError, ValueError) as exc:
-                # A proposer contract failure cannot produce a candidate generation.
-                print(f"[{stamp()}] proposer failed; aborting run: {exc}", flush=True)
-                raise
-            proposals_batch = proposal_obj.proposals
-            pending_insight = None
-            try:
-                pending_insight = memory_mod.validate_insight(
-                    proposal_obj.insight,
-                    proposal_obj.insight_refs,
-                    history,
-                )
-            except ValueError as exc:
-                print(f"[{stamp()}] insight skipped: {exc}", flush=True)
-            reflection = proposal_obj.reflection
-            print(f"[{stamp()}] proposals: {len(proposals_batch)} candidate(s)",
-                  flush=True)
+def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
+                    round_id: int, parent_sha: str,
+                    ) -> tuple[list[proposer_mod.Proposal], str,
+                               tuple[str, list[str]] | None]:
+    """One round's candidate directions: (proposals, reflection, pending_insight).
 
-        # 2. executor + eval + judger, one shared pipeline per candidate. Static
-        #    mode is just a one-candidate generation with a different acceptance
-        #    rule (below).
-        candidates = _run_candidates(
-            proposals_batch, round_id, parent_sha, cfg, workspace,
-            executor_agent, judger_agent, prior_metrics, baseline_metrics,
-            metrics_schema, gate_lines,
-            runtime=runtime,
-            telemetry=telemetry,
+    Normal mode calls the claude proposer, which reads the per-run repo (the
+    SAME clone the executor commits into, so the round shas in history are
+    valid objects here and the proposer can `git show`/`git diff` any prior
+    round's actual changes). It never edits — the executor edits in a
+    per-round worktree; the per-run repo is a bare-ish --no-checkout clone, so
+    the proposer can only inspect commit history/diffs, not a live tree. It
+    must NOT read other runs' repos (cross-run answer-copying); the per-run
+    clone is physically isolated per run_dir.
+
+    Static mode skips the proposer: the proposal is taken verbatim from the
+    supplied batch as a one-candidate generation (no reflection, no insight).
+    """
+    if static_proposals is not None:
+        proposal_text = static_proposals[round_id]
+        print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
+        return ([proposer_mod.Proposal(
+            proposal=proposal_text, decision="static", family="single")],
+            "", None)
+
+    cfg = ctx.cfg
+    history = ctx.store.history()
+    insights = memory_mod.load_insights(ctx.insights_path)
+    try:
+        proposal_obj = proposer_mod.propose(
+            ctx.proposer_agent, goal=cfg["goal"], editable=cfg["editable_paths"],
+            frozen=cfg["frozen_paths"], history=history, insights=insights,
+            base_sha=parent_sha, cwd=ctx.workspace.repo,
+            candidates_per_round=cfg.get("candidates_per_round", 1),
+            recent_rounds=cfg.get("proposer_recent_rounds", 6),
+            gate_block=ctx.gate_lines,
         )
-        if static_proposals is not None:
-            # Controlled-experiment rule (unchanged from the old serial path):
-            # hard gates alone decide whether the chain advances — no
-            # improvement or risk requirement, so a regressing-but-valid
-            # experiment still lands and the next static proposal builds on it.
-            first = candidates[0] if candidates else None
-            winner = (first if first and first.get("sha") and first.get("accepted")
-                      else None)
-        else:
-            winner = _select_winner(
-                candidates,
-                metrics_schema,
-                prior_metrics=prior_metrics,
-            )
-        selected_candidate = winner.get("candidate") if winner else None
-        selected_sha = winner.get("sha") if winner else None
-        for candidate in candidates:
-            candidate["selected"] = candidate.get("candidate") == selected_candidate
-        next_base_sha = selected_sha or parent_sha
-        if winner:
-            print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
-                  f"{selected_sha[:10]}", flush=True)
-            prior_metrics = winner.get("metrics") or prior_metrics
-        else:
-            reason = ("candidate rejected by hard gates"
-                      if static_proposals is not None
-                      else "no eligible candidate improved the incumbent")
-            print(f"[{stamp()}] {reason}; accepted base stays {parent_sha[:10]}",
-                  flush=True)
-        store.append_generation(
-            round_id, parent_sha=parent_sha,
-            selected_candidate=selected_candidate, selected_sha=selected_sha,
-            candidates=candidates, reflection=reflection,
-            telemetry=telemetry.snapshot(persist=True),
+    except (AgentError, ValueError) as exc:
+        # A proposer contract failure cannot produce a candidate generation.
+        print(f"[{stamp()}] proposer failed; aborting run: {exc}", flush=True)
+        raise
+    pending_insight = None
+    try:
+        pending_insight = memory_mod.validate_insight(
+            proposal_obj.insight,
+            proposal_obj.insight_refs,
+            history,
         )
-        if pending_insight is not None:
-            insight_text, insight_refs = pending_insight
-            memory_mod.append_insight(
-                insights_path, round_id, insight_text, insight_refs,
-            )
-        _refresh_progress_plot(store, telemetry.plot_context())
-        parent_sha = next_base_sha
-
-    print(f"\n[{stamp()}] done. best={store.best_sha} (score {store.best_score:.2f})", flush=True)
-    print(f"[{stamp()}] working repo (for tracing): {workspace.repo}", flush=True)
-    return _summary(store, workspace, run_dir_path)
+    except ValueError as exc:
+        print(f"[{stamp()}] insight skipped: {exc}", flush=True)
+    print(f"[{stamp()}] proposals: {len(proposal_obj.proposals)} candidate(s)",
+          flush=True)
+    return proposal_obj.proposals, proposal_obj.reflection, pending_insight
 
 
 def _summary(store: Store, workspace: Workspace, run_dir_path: Path) -> dict:
@@ -328,34 +389,26 @@ def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> No
         )
 
 
-def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
-                    parent_sha: str, cfg: dict, workspace: Workspace,
-                    executor_agent: Agent, judger_agent: Agent,
-                    prior_metrics: dict, baseline_metrics: dict,
-                    metrics_schema: dict | None, gate_lines: str,
-                    runtime,
-                    telemetry: RunTelemetry | None = None) -> list[dict]:
+def _run_candidates(ctx: RunContext, proposals: list[proposer_mod.Proposal],
+                    round_id: int, parent_sha: str,
+                    prior_metrics: dict) -> list[dict]:
     """Run one generation's candidates, possibly concurrently."""
-    max_workers = min(cfg.get("max_workers", 1), max(1, len(proposals)))
+    max_workers = min(ctx.cfg.get("max_workers", 1), max(1, len(proposals)))
     if max_workers <= 1 or len(proposals) <= 1:
         serial_results = []
         for i, proposal in enumerate(proposals):
             candidate = _run_one_candidate(
-                i, proposal, round_id, parent_sha, cfg, workspace,
-                executor_agent, judger_agent, prior_metrics,
-                baseline_metrics, metrics_schema, gate_lines, runtime,
-            )
+                ctx, i, proposal, round_id, parent_sha, prior_metrics)
             candidate["telemetry"] = (
-                telemetry.snapshot(persist=True) if telemetry else {}
+                ctx.telemetry.snapshot(persist=True) if ctx.telemetry else {}
             )
             serial_results.append(candidate)
         return serial_results
     results: list[dict | None] = [None] * len(proposals)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_run_one_candidate, i, proposal, round_id, parent_sha, cfg,
-                        workspace, executor_agent, judger_agent, prior_metrics,
-                        baseline_metrics, metrics_schema, gate_lines, runtime): i
+            pool.submit(_run_one_candidate, ctx, i, proposal, round_id,
+                        parent_sha, prior_metrics): i
             for i, proposal in enumerate(proposals)
         }
         for future in as_completed(futures):
@@ -371,19 +424,18 @@ def _run_candidates(proposals: list[proposer_mod.Proposal], round_id: int,
                 results[i] = _candidate_failure(
                     i, p, f"candidate worker failed: {exc}", parent_sha)
             results[i]["telemetry"] = (
-                telemetry.snapshot(persist=True) if telemetry else {}
+                ctx.telemetry.snapshot(persist=True) if ctx.telemetry else {}
             )
     return [r for r in results if r is not None]
 
 
-def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
-                       round_id: int, parent_sha: str, cfg: dict,
-                       workspace: Workspace, executor_agent: Agent,
-                       judger_agent: Agent, prior_metrics: dict,
-                       baseline_metrics: dict,
-                       metrics_schema: dict | None, gate_lines: str,
-                       runtime) -> dict:
+def _run_one_candidate(ctx: RunContext, candidate_id: int,
+                       proposal: proposer_mod.Proposal,
+                       round_id: int, parent_sha: str,
+                       prior_metrics: dict) -> dict:
     """Executor + eval + judger for one candidate."""
+    cfg = ctx.cfg
+    metrics_schema = ctx.metrics_schema
     worktree_id = f"{round_id}-c{candidate_id}"
     worktree = None
     result = None
@@ -394,12 +446,12 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
         print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
               f"(family={proposal.family}, decision={proposal.decision}): "
               f"{proposal.proposal[:120]}", flush=True)
-        worktree = workspace.add_worktree(worktree_id, parent_sha)
+        worktree = ctx.workspace.add_worktree(worktree_id, parent_sha)
         result = executor_mod.execute(
-            executor_agent, proposal=proposal.proposal, goal=cfg["goal"],
+            ctx.executor_agent, proposal=proposal.proposal, goal=cfg["goal"],
             editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
-            workspace=workspace, worktree=worktree, round_id=worktree_id,
-            gate_block=gate_lines,
+            workspace=ctx.workspace, worktree=worktree, round_id=worktree_id,
+            gate_block=ctx.gate_lines,
         )
         if result.sha:
             print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} committed: "
@@ -412,7 +464,7 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
                 eval_result = evals.run_eval(
                     cfg["eval_commands"],
                     cwd=worktree,
-                    runtime=runtime,
+                    runtime=ctx.runtime,
                     metrics_schema=metrics_schema,
                 )
                 eval_block = eval_result.text
@@ -423,17 +475,18 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
                       f"eval error: {exc}", flush=True)
         accepted = _candidate_accepted(result.sha, eval_metrics, metrics_schema)
         judgment = judger_mod.judge(
-            judger_agent, goal=cfg["goal"], proposal=proposal.proposal,
+            ctx.judger_agent, goal=cfg["goal"], proposal=proposal.proposal,
             sha=result.sha, reason=result.reason, parent_sha=parent_sha,
-            workspace=workspace, eval_block=eval_block, cwd=worktree,
+            workspace=ctx.workspace, eval_block=eval_block, cwd=worktree,
             metrics=eval_metrics, prior_metrics=prior_metrics,
-            baseline_metrics=baseline_metrics, metrics_schema=metrics_schema,
+            baseline_metrics=ctx.baseline_metrics, metrics_schema=metrics_schema,
             label=f"judger r{round_id}-c{candidate_id}",
         )
         print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
               f"score={judgment.score:.2f} risk={judgment.risk} "
               f"feedback: {judgment.feedback[:120]}", flush=True)
-        _print_objective(eval_metrics, prior_metrics, baseline_metrics, metrics_schema)
+        _print_objective(eval_metrics, prior_metrics, ctx.baseline_metrics,
+                         metrics_schema)
         return {
             "candidate": candidate_id,
             "family": proposal.family,
@@ -462,7 +515,7 @@ def _run_one_candidate(candidate_id: int, proposal: proposer_mod.Proposal,
                                   accepted=accepted)
     finally:
         if worktree is not None:
-            workspace.remove_worktree(worktree_id)
+            ctx.workspace.remove_worktree(worktree_id)
 
 
 def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
