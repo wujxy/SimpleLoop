@@ -54,10 +54,8 @@ def build_image(
     if force:
         argv.append("--force")
     argv.extend([str(output_path), str(definition_path)])
-    # Strip APPTAINER_*/SINGULARITY_* inherited from an outer container
-    # session: a leaked APPTAINER_BIND is applied to the build sandbox, whose
-    # rootfs lacks those destinations (no underlay during build) -> the build
-    # dies with "destination ... doesn't exist in container".
+    # Strip APPTAINER_*/SINGULARITY_* from an outer container session — a
+    # leaked APPTAINER_BIND kills the build sandbox.
     env = {
         key: value
         for key, value in os.environ.items()

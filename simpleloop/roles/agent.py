@@ -1,25 +1,9 @@
-"""Thin Claude Code CLI adapter.
-
-Calls `claude -p --input-format text --output-format json` as a non-interactive
-subprocess with a timeout and heartbeat logging. Two call modes:
-
-  - run_json(prompt): for proposer/judger. With json_schema it requires Claude's
-    structured output; without one it keeps the legacy tolerant JSON parser.
-  - run_text(prompt): for executor. Returns the raw text; the executor does not
-    return JSON, it just edits files in the worktree. We only care that it ran.
-
-The prompt is fed via STDIN (not argv) so a long proposer history (kilobytes per
-round, tens of rounds) cannot hit the kernel's ARG_MAX ceiling that killed a
-prior run mid-loop with `OSError: [Errno 7] Argument list too long`.
-
-The cwd passed to run() is the worktree path (executor/judger) or the per-run
-repo (proposer), so the agent operates on the right tree/repo.
-"""
+"""Thin Claude Code CLI adapter: run `claude -p` as a subprocess with timeout,
+heartbeat logging and schema-enforced JSON output (run_json) or raw text (run_text)."""
 from __future__ import annotations
 
 import json
 import os
-import re
 import signal
 import subprocess
 import threading
@@ -103,12 +87,8 @@ class Agent:
         self.extra_args = list(extra_args or [])
         self.model = model
         self.allowed_tools = allowed_tools
-        # Claude Code caps a single turn's output at 32000 tokens by default; a
-        # proposer/judger that thinks hard (long reasoning before the final JSON)
-        # can hit that ceiling and abort with "Claude's response exceeded the
-        # 32000 output token maximum". Raise it so thinking + output have room.
-        # Passed to the subprocess as CLAUDE_CODE_MAX_OUTPUT_TOKENS (the env var
-        # claude reads), inheriting the rest of the host env.
+        # Raised above Claude Code's 32000 default so long reasoning before the
+        # final JSON does not abort the turn.
         self.max_output_tokens = max_output_tokens
         self.usage_observer = usage_observer
 
@@ -129,32 +109,26 @@ class Agent:
         *,
         cwd: Path,
         label: str = "agent",
-        json_schema: dict | None = None,
+        json_schema: dict,
     ) -> dict:
-        """Run the agent, return its parsed JSON object. Raises AgentError on failure."""
+        """Run the agent with schema-enforced structured output; return the JSON object."""
         result = self._run(
             prompt, cwd=cwd, label=label, json_schema=json_schema)
-        if json_schema is not None:
-            if result.data:
-                return result.data
-            try:
-                parsed = json.loads(result.text)
-            except json.JSONDecodeError as exc:
-                raise AgentError(
-                    f"[{label}] structured output was not an exact JSON object: {exc}",
-                    raw_output=result.text,
-                ) from exc
-            if not isinstance(parsed, dict):
-                raise AgentError(
-                    f"[{label}] structured output must be a JSON object",
-                    raw_output=result.text,
-                )
-            return parsed
+        if result.data:
+            return result.data
         try:
-            return _extract_json(result.text)
-        except AgentError as exc:
-            exc.raw_output = result.text
-            raise
+            parsed = json.loads(result.text)
+        except json.JSONDecodeError as exc:
+            raise AgentError(
+                f"[{label}] structured output was not an exact JSON object: {exc}",
+                raw_output=result.text,
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise AgentError(
+                f"[{label}] structured output must be a JSON object",
+                raw_output=result.text,
+            )
+        return parsed
 
     def run_text(self, prompt: str, *, cwd: Path, label: str = "agent") -> str:
         """Run the agent, return its raw text. Used by the executor (no JSON expected)."""
@@ -162,13 +136,8 @@ class Agent:
 
     def _run(self, prompt: str, *, cwd: Path, label: str,
              json_schema: dict | None = None) -> AgentResult:
-        # Prompt goes to claude via STDIN, not argv. A long proposer history (the
-        # round-N proposal can be kilobytes; across 14+ rounds the assembled
-        # prompt grew past the kernel's ARG_MAX (~128KB for a single execve arg)
-        # and Popen raised `OSError: [Errno 7] Argument list too long`, killing the
-        # run mid-loop. With --input-format text (the default), `claude -p` reads
-        # the prompt from stdin when no positional prompt arg is given — stdin is
-        # unbounded by ARG_MAX (it's a pipe, not execve argv).
+        # Prompt goes via STDIN, not argv: a long assembled prompt can exceed the
+        # kernel's ARG_MAX and kill Popen mid-run.
         payload = [
             self.command, "-p",
             "--input-format", "text",
@@ -208,10 +177,8 @@ class Agent:
         t_out.start()
         t_err.start()
 
-        # Feed the prompt on stdin then close it; claude reads to EOF and answers.
-        # A write to a pipe whose read end is a long-running agent could block until
-        # the agent drains it, so write on a short-lived thread and never let a
-        # stuck write hold the timeout loop hostage.
+        # Write stdin on its own thread so a stuck pipe write cannot hold the
+        # timeout loop hostage.
         write_err: list = []
         def _feed() -> None:
             try:
@@ -244,9 +211,6 @@ class Agent:
         t_feed.join(timeout=2)
         if write_err:
             self._notify_usage(None, label)
-            # The agent died before/while we wrote stdin — surface it (returncode
-            # will be nonzero and stderr will carry the real cause too, but be
-            # explicit so the ARG_MAX-class failure is obvious if it ever recurs).
             raise AgentError(f"[{label}] stdin write failed: {write_err[0]}\n"
                              f"stderr: {''.join(err_buf).strip()[:2000]}")
         if proc.stdout:
@@ -288,21 +252,3 @@ def _kill_group(proc: subprocess.Popen) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-
-
-def _extract_json(text: str) -> dict:
-    """Extract the first JSON object from text (handles ```json fences)."""
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
-    candidates = [fenced.group(1)] if fenced else []
-    candidates.append(text.strip())
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    for cand in candidates:
-        try:
-            parsed = json.loads(cand)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    raise AgentError(f"agent did not return a JSON object. raw:\n{text[:3000]}")

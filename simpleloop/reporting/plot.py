@@ -1,4 +1,7 @@
-"""Progress plots across round, active worktime, and processed tokens."""
+"""Progress plots across round, active worktime, and processed tokens.
+
+The loop maintains only the 3x3 overview (write_progress_png); the nine
+single-panel detail images are drawn offline by scripts/plot_details.py."""
 from __future__ import annotations
 
 import math
@@ -118,9 +121,8 @@ def _ratio(
 ) -> float | None:
     if objective_value is None or baseline_value in (None, 0.0):
         return None
-    # For lower-is-better objectives (e.g. latency in ms) invert the ratio so the
-    # third row reads as an improvement multiple where higher is better: a value of
-    # 1.25 means "1.25x the baseline speed" rather than "objective dropped to 0.8".
+    # Invert for lower-is-better objectives so the ratio row always reads as an
+    # improvement multiple where higher is better.
     if lower_is_better is True:
         if objective_value == 0.0:
             return None
@@ -129,17 +131,8 @@ def _ratio(
 
 
 def _worktime_rebase_offsets(history: list[dict]) -> list[float]:
-    """Per-record worktime offset (hours) keeping the plotted worktime continuous.
-
-    Each round stores its telemetry's *within-session* cumulative worktime. A
-    --continue resume reseeds that counter, and if the seed does not carry the
-    prior sessions' running total the stored value drops at the resume boundary
-    — so the "vs worktime" axis visibly resets to a smaller origin instead of
-    continuing past the last pre-resume round. Walk the rounds in order and,
-    whenever a round's worktime falls below the running maximum, lift that round
-    and every later round by the gap so the plotted worktime is monotonically
-    non-decreasing and continuous across sessions. No-op for a single session.
-    """
+    """Per-record worktime offset (hours) lifting post---continue rounds so the
+    plotted worktime stays monotonically non-decreasing across sessions."""
     offsets: list[float] = []
     running_hours = 0.0
     ceiling_hours: float | None = None
@@ -200,9 +193,6 @@ def build_series(
     baseline_value = _number(baseline_metrics.get(objective_key))
     if baseline_value == 0.0:
         baseline_value = None
-    # Rebase worktime across --continue resumes so the "vs worktime" axis does
-    # not drop at a session boundary (the baseline is round 0 of session 1, so
-    # its offset is always zero).
     worktime_offsets = _worktime_rebase_offsets(history)
     baseline = None
     if baseline_value is not None:
@@ -332,8 +322,6 @@ def _y_label(series: PlotSeries, kind: str) -> str:
     key = series.objective_key or "Objective"
     if kind == "ratio":
         if series.lower_is_better is True:
-            # Inverted: shows baseline/objective, so label it as an improvement
-            # multiple (higher is better) instead of a raw objective ratio.
             return f"{key} multiple (vs baseline)"
         return f"{key} ratio (vs baseline)"
     return key
@@ -425,8 +413,8 @@ def _render_panel(axis, series: PlotSeries, y_kind: str, x_kind: str) -> None:
         )
         title = f"{title} ({direction})"
     elif y_kind == "ratio" and series.lower_is_better is not None:
-        # After direction-aware inversion the ratio is always an improvement
-        # multiple, so higher is better regardless of the raw objective's direction.
+        # After the direction-aware inversion the ratio is always an improvement
+        # multiple, so higher is better either way.
         title = f"{title} (higher is better)"
     axis.set_title(f"{title} vs {_x_label(x_kind)}")
     axis.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
@@ -466,23 +454,6 @@ def _render_progress_png(series: PlotSeries, output: Path) -> None:
         plt.close(figure)
 
 
-def _render_detail(
-    series: PlotSeries,
-    y_kind: str,
-    x_kind: str,
-    output: Path,
-) -> None:
-    plt = _prepare_pyplot()
-    figure, axis = plt.subplots(figsize=(9, 5.5))
-    figure.patch.set_facecolor("white")
-    _render_panel(axis, series, y_kind, x_kind)
-    figure.tight_layout()
-    try:
-        figure.savefig(output, format="png", dpi=140)
-    finally:
-        plt.close(figure)
-
-
 def _publish(output: Path, render: Callable[[Path], None]) -> bool:
     temporary = output.with_name(f".{output.stem}.tmp{output.suffix}")
     try:
@@ -512,34 +483,3 @@ def write_progress_png(
     if _publish(overview, lambda path: _render_progress_png(series, path)):
         return overview
     return None
-
-
-def write_detail_pngs(
-    run_dir: str | Path,
-    history: list[dict],
-    metrics_schema: dict | None,
-    plot_context: dict | None = None,
-) -> list[Path]:
-    """Redraw the nine single-panel detail images.
-
-    Offline entry point (`simpleloop plot`) — the loop no longer refreshes
-    these every round; it only maintains the 3x3 overview. Each image is
-    published independently so one failure doesn't block the rest.
-    """
-    run_path = Path(run_dir)
-    run_path.mkdir(parents=True, exist_ok=True)
-    series = build_series(history, metrics_schema, plot_context)
-    published: list[Path] = []
-    for y_kind in _Y_KINDS:
-        for x_kind in _X_KINDS:
-            output = run_path / (
-                f"progress-{_Y_SLUGS[y_kind]}-vs-{x_kind}.png"
-            )
-            if _publish(
-                output,
-                lambda path, y=y_kind, x=x_kind: _render_detail(
-                    series, y, x, path
-                ),
-            ):
-                published.append(output)
-    return published

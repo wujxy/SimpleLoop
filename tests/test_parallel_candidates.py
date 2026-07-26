@@ -673,7 +673,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
     def fake_execute(agent, *, proposal, goal, editable, frozen, workspace, worktree, round_id, gate_block=""):
         return ExecResult(sha=f"sha-{round_id}", reason=None, changed_paths=[f"{round_id}.cc"])
 
-    def fake_run_eval(commands, cwd, runtime, metrics_schema=None):
+    def fake_run_eval(commands, cwd, runtime, metrics_schema=None, **kwargs):
         cid = int(str(cwd).rsplit("c", 1)[-1])
         return EvalResult(
             "eval",

@@ -1,12 +1,6 @@
-"""Gate: deterministic pre-commit diff safety check.
-
-The only thing the gate does is reject a commit whose diff touches a frozen path
-or a path outside editable_paths. This is a hard safety net that must NOT be
-delegated to the judger LLM (it would miss an agent quietly editing tests/**).
-
-Returns (ok, violations). ok=False => the harness skips the commit, this round's
-sha is None, and the judger is told the rejection reason.
-"""
+"""Gate: deterministic pre-commit diff safety check — reject a commit whose
+diff touches a frozen path or a path outside editable_paths. Never delegated
+to an LLM."""
 from __future__ import annotations
 
 from fnmatch import fnmatch

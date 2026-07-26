@@ -1,15 +1,6 @@
-"""Executor: turns the proposal into a code change. Delivers a commit SHA (or None).
-
-Flow:
-  1. Prompt the agent with goal + proposal + safety; tell it to edit files in the
-     worktree and NOT to commit (the harness commits).
-  2. After the agent returns, read the worktree's changed paths.
-  3. Gate: if any changed path is frozen or outside editable, reject (sha=None).
-  4. Else harness stages exactly the changed paths in editable and commits -> SHA.
-  5. If nothing changed, sha=None with reason "empty".
-
-The executor agent returns no JSON — it just edits files. We only care that it ran.
-"""
+"""Executor: turns the proposal into a code change and delivers a commit SHA
+(or None when gate-rejected / no change). The agent only edits the worktree;
+the harness gates the changed paths and commits them itself."""
 from __future__ import annotations
 
 from dataclasses import dataclass

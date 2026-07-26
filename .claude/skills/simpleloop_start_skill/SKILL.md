@@ -2,185 +2,282 @@
 name: simpleloop_start_skill
 description: >-
   Use when a user wants to prepare a new target project for SimpleLoop: assemble
-  the source repo + editable/frozen paths + a correctness gate, author the task
-  config (including the eval.metrics block that declares the objective and gates),
-  rewrite the eval script to emit the structured key=value lines the harness
+  the resource pack (source git repo + editable/frozen split + correctness
+  reference + Apptainer runtime image), author the task config (including the
+  required eval.metrics block that declares the objective and gates), write or
+  rewrite the eval script to emit the structured KEY=VALUE lines the harness
   parses, or launch the loop and sanity-check the first round. Guides the agent
   through the whole onboarding so the user's project is ready to drive the
-  proposer→executor→judger loop with harness-owned metrics (not judger-hallucinated
-  numbers).
+  proposer→executor→judger loop with harness-owned metrics (not
+  judger-hallucinated numbers).
 ---
 
 # SimpleLoop Start Skill — prepare a task and run the loop
 
 Print `[skill: simpleloop_start_skill]` before proceeding.
 
-SimpleLoop is a minimal serial optimization loop: a **proposer** invents a
-direction, an **executor** implements it in a git worktree, the **harness** runs
-the eval commands and parses the structured metrics, and a **judger** grades the
-round. One round at a time, no batch, no parallel. The harness owns the numbers
-(parsed from eval output + best selection); the judger only interprets — it must
-never be the source of a metric, because an LLM asked to extract numbers from
-prose and do arithmetic on them hallucinates (a prior run invented a "baseline
-874.50" that appears in no ground-truth source and propagated across 12 rounds
-of feedback).
+## What SimpleLoop is
+
+SimpleLoop is a minimal LLM optimization loop over a git repo:
+
+```text
+user goal → proposer (reads history + insights, proposes candidate directions)
+          → executor (edits code in a fresh worktree, delivers a commit SHA)  ┐ per
+          → harness (diff gate + runs eval + parses metrics, deterministic)   │ candidate
+          → judger (grades the diff + metrics, gives feedback + score)        ┘
+          → harness selects the round's winner (gates + risk + objective)
+          → feedback + insights feed the next round's proposer
+```
+
+One accepted commit per round, serial single-parent chain. By default one
+candidate per round (`candidates_per_round: 1`); raising it fans out candidates
+within a round (up to `max_workers` concurrently) while the accepted chain
+stays single-parent.
+
+Two design rules everything below follows from:
+
+- **The harness owns the numbers.** It runs the eval commands, parses the
+  structured `KEY=VALUE` metrics out of their output, computes the deltas, and
+  selects `best` by the objective among gate-pass, risk-not-high candidates.
+  The judger only interprets — it must never be the source of a metric,
+  because an LLM asked to extract numbers from prose and do arithmetic
+  hallucinates (a prior run invented a "baseline 874.50" that appears in no
+  ground-truth source and propagated across 12 rounds of feedback).
+- **Everything agent-facing runs inside one mandatory Apptainer image.** All
+  three Claude roles and every eval command execute in the configured SIF with
+  `apptainer exec --cleanenv`. There is no host-execution fallback. Git
+  clone/worktree/gate/history logic stays on the host.
 
 This skill guides you (the agent helping the user) through preparing a target
-project so the loop runs correctly the first time. Do the parts in order.
+project so the loop runs correctly the first time. Do the parts in order:
 
-- **Part 1 — Assemble the resource pack.** The source repo, the editable/frozen
-  discipline, and the correctness reference.
-- **Part 2 — Author the config + rewrite the eval script to emit structured
-  output.** This is the contract the whole design rests on. Get it wrong and the
-  harness can't parse the metrics, the judger falls back to reading prose, and it
-  hallucinates numbers — exactly the defect this fixes.
-- **Part 3 — Launch and sanity-check round 0.** Confirm the metrics actually
-  parsed, or stop and fix the eval before the loop runs on garbage.
+- **Part 1 — Assemble the resource pack.** Source repo, editable/frozen
+  discipline, correctness reference, runtime image.
+- **Part 2 — Author the config + the eval script.** The `KEY=VALUE` contract
+  is what the whole design rests on: get it wrong and the metrics don't parse,
+  and the run either aborts at baseline or degrades to hallucinated numbers.
+- **Part 3 — Validate, launch, and sanity-check round 0.**
 
-SimpleLoop is general-purpose. There are two worked examples in the repo:
-`examples/tiny_algo_opt/` (a tiny Python pair-counter — the simplest complete
-task) and the OMILREC run under `runs/omilrec-v100-main/` (a real C++ physics
-reconstruction). Treat them as *one worked example of the structure*, not as the
-structure itself. Every concrete path, command, tolerance, and metric name below
-is a **placeholder you must replace for the actual target project.** Never copy
-OMILREC-specific values (8358P, `--evtmax 10`, `SPEED_MS`, bit-identical
-tolerance) into a different task — those are the target's contract, not
-SimpleLoop's.
+SimpleLoop is general-purpose. Worked examples in the repo:
+`examples/task.yaml` (heavily-commented reference template, not runnable
+as-is), `examples/tiny_algo_opt/` (a tiny Python pair-counter — the simplest
+complete task), and the `examples/omilrec-*` tasks (a real C++ physics
+reconstruction). Treat them as *worked examples of the structure*, not the
+structure itself: every concrete path, command, tolerance, and metric name
+below is a **placeholder you must replace for the actual target project**.
+Never copy OMILREC-specific values (`--evtmax 10`, `SPEED_MS`, `FCN`,
+bit-identical tolerance, `/cvmfs` binds) into a different task — those are the
+target's contract, not SimpleLoop's.
 
 ---
 
 ## Part 1 — Assemble the resource pack
 
-Goal of Part 1: a git repo SimpleLoop can `clone --local`, with a clear
-editable/frozen split and a correctness reference the gate compares against.
+Goal: a git repo SimpleLoop can `clone --local`, a clear editable/frozen
+split, a correctness reference for the gate, and a SIF image the whole loop
+runs inside.
 
 ### 1.1 Decide the optimization contract first
 
 Before touching files, pin down with the user, in one short written note:
 
-- **Objective** — what is being improved? (speed, accuracy, memory, binary size,
-  a score…). This becomes the `eval.metrics.objective.key` in the config and the
-  `KEY=` line the eval script must print.
-- **Direction** — is lower better (speed, memory, error) or higher (accuracy,
+- **Objective** — what is being improved? (speed, accuracy, memory, binary
+  size, a score…). This becomes `eval.metrics.objective.key` and the `KEY=`
+  line the eval script must print.
+- **Direction** — lower is better (speed, memory, error) or higher (accuracy,
   coverage)? This is `eval.metrics.objective.lower_is_better`. It is not
   guessable — declare it, or best selection inverts.
-- **Correctness gate** — what must not break? (a test suite, a bit-identical
-  diff, a tolerance band). This becomes a `eval.metrics.gates` entry and its own
-  `KEY=` line. A round that fails a gate is never selected as best, even if its
-  objective is best.
-- **Editable vs frozen** — which source may the executor change, which files must
-  it never touch (tests, references, build config, benchmarks)? The frozen gate
-  rejects the whole round if the executor touches a frozen path.
+- **Correctness gate(s)** — what must not break? (a test suite, a
+  bit-identical diff, a tolerance band). Each becomes an `eval.metrics.gates`
+  entry with its own `KEY=` line. A candidate that fails a gate is never
+  selected, even if its objective is best.
+- **Editable vs frozen** — which source may the executor change? Note the gate
+  is a **whitelist**: a diff path outside `editable_paths` rejects the round
+  even if it isn't in `frozen_paths`. `frozen_paths` adds an explicit "never
+  touch" list on top (tests, references, build config, benchmarks).
+- **Runtime environment** — what must exist inside the container for build +
+  eval to run? (compilers, Python packages, system libs, external data trees).
+  This decides which Apptainer definition to build and which host directories
+  to bind.
 
-Do not proceed to 1.2 until the user has confirmed these four.
+Do not proceed until the user has confirmed these five.
 
 ### 1.2 The source repo
 
-SimpleLoop clones the source repo with `git clone --local --no-checkout` into a
-per-run bare clone, then makes a worktree per round. Requirements:
+SimpleLoop clones the source repo with `git clone --local` into a per-run
+clone, then makes a worktree per candidate. Requirements:
 
-- It must be a real git repo (`.git` exists). `source.path` in the config points
-  at it (relative to the config file, or absolute).
-- `source.baseline_ref` is the starting commit (a branch name or SHA). The
-  baseline eval runs once on this commit before round 0, so the judger has a
-  "vs baseline" axis. Pick the **unoptimized** starting point — the whole point
-  is to measure improvement from here.
-- The correctness reference (golden output, fixture, baseline-of-record) lives
-  in the repo under a **frozen** path. The executor must never regenerate or
-  touch it. (OMILREC's is `reference/ref_10evt.root`; tiny_algo_opt's is the
-  hardcoded `BASELINE` in `check_drift.py`.)
+- It must be a real git repo (`.git` exists) — `source.path` in the config
+  points at it (relative to the config file, or absolute). If the user hands
+  you a bare directory, initialize it:
+  `git init -q && git add -A && git commit -qm init`
+  (that is exactly what `examples/tiny_algo_opt/setup.sh` does).
+- `source.baseline_ref` is the starting commit (branch name or SHA; default
+  `HEAD`). The baseline eval runs once on this commit before round 0 — pick
+  the **unoptimized** starting point, since improvement is measured from here.
+- Binary fixtures must be real files, not LFS pointers — `git clone --local`
+  does not resolve LFS, so de-LFS any reference data the eval needs (the
+  omilrec repo did exactly this).
+- The correctness reference (golden output, fixture, baseline-of-record)
+  lives in the repo under a **frozen** path. The executor must never
+  regenerate or touch it. (tiny_algo_opt's is the hardcoded `BASELINE` table
+  in `scripts/check_drift.py`; omilrec's is a reference ROOT file.)
 
 ### 1.3 Editable / frozen discipline
-
-In the config:
 
 ```yaml
 safety:
   editable_paths:
-    - "src/**/*.cc"      # the executor may only change these
+    - "src/**/*.cc"      # the executor may ONLY change these (whitelist)
     - "src/**/*.h"
   frozen_paths:
-    - "tests/**"         # touching these rejects the round
+    - "tests/**"         # touching these rejects the round outright
+    - "scripts/**"
     - "reference/**"
+    - "benchmarks/**"
     - "CMakeLists.txt"
 ```
 
-The frozen gate is hard: if the executor's diff touches any frozen path, the
-round is voided (no commit, no score). Put everything the executor shouldn't
-touch here — tests, references, build files, benchmark scripts, docs. The most
-common onboarding bug is forgetting to freeze the benchmark script, so the
-executor's self-verification run appends a timing row to it and the gate rejects
-the real source edit.
+The diff gate is hard and deterministic: any changed path that matches a
+frozen glob, or fails to match an editable glob, voids the whole candidate (no
+commit, no score) and the judger is told why. Put everything the executor
+shouldn't touch in `frozen_paths` — tests, references, build files, benchmark
+and eval scripts, docs. A classic onboarding bug: the eval/benchmark script
+writes its output (a CSV, a log) into the worktree, the executor's
+self-verification run leaves that file modified, and the gate rejects the real
+source edit — freeze those output dirs or make the script write outside the
+tree.
+
+### 1.4 The runtime image (mandatory)
+
+The config's `runtime` block is **required** — validation fails without a
+readable SIF file. The host only needs Apptainer; Claude Code, bash, git,
+compilers, Node.js all live inside the image (Claude authentication is reused
+through Apptainer's normal home mount).
+
+- Start from an existing definition: `examples/apptainer.def` is the lean
+  runtime (bash/git/python + claude/node — enough for pure-Python tasks like
+  tiny_algo_opt); `examples/junosw-apptainer.def` adds gcc/cmake and the JUNO
+  system-library chain. For a new target, copy the lean def and add what the
+  target's build + eval need.
+- Build it: `simpleloop image build path/to/apptainer.def` (default output is
+  the adjacent `.sif`, matching a relative `runtime.image`; use `--output`
+  and `--force` to manage a shared image).
+- `runtime.binds` mounts host directories into the container at unchanged
+  absolute paths — use it for large external resources (data trees, `/cvmfs`).
+  Each entry must be an existing absolute directory. The run directory itself
+  is mounted read/write automatically; small fixtures should just live in the
+  source repo instead.
+- Because eval runs with `--cleanenv` in a non-login shell, the eval command
+  must source its own environment (e.g. a `setup.sh`) — do not rely on the
+  user's host environment or login-shell profile.
 
 ---
 
-## Part 2 — Author the config + structured eval output
+## Part 2 — Author the config + the eval script
 
 ### 2.1 The task config
 
-Minimal schema (see `simpleloop/config.py` for the strict validator — unknown
-keys fail at load, not silently):
+Current schema (see `simpleloop/config.py` for the strict validator — unknown
+keys at any level fail at load, not silently mid-run):
 
 ```yaml
 kind: task
 
 task:
   goal: >
-    <one paragraph: what to optimize, the correctness gate, the allowed edits.
-     The proposer and judger both read this — be specific about the objective
-     and the bit-identical / tolerance contract.>
+    <one paragraph: what to optimize, the correctness gates, the allowed
+     edits, where the hot code is. The proposer and judger both read this —
+     be specific about the objective and the tolerance contract.>
 
 safety:
-  editable_paths: ["src/**/*.cc", "src/**/*.h"]
-  frozen_paths: ["tests/**", "reference/**", "CMakeLists.txt"]
+  editable_paths: ["src/**/*.cc", "src/**/*.h"]   # required, non-empty
+  frozen_paths:  ["tests/**", "scripts/**", "CMakeLists.txt"]
 
 loop:
-  max_rounds: 20
-  agent_timeout_seconds: 3600   # per claude call; large refactors need the room
+  max_rounds: 20                # required
+  agent_timeout_seconds: 3600   # optional (default 3600); per claude call
+  candidates_per_round: 1       # optional (default 1); >1 fans out per round
+  max_workers: 1                # optional (default 1); candidate concurrency
+  proposer_recent_rounds: 6     # optional (default 6); history fed to proposer
 
-eval:
+runtime:                        # REQUIRED — no host fallback
+  image: apptainer.sif          # relative to this config file, or absolute
+  binds:                        # optional; absolute same-path dir mounts
+    - /cvmfs
+
+eval:                           # REQUIRED
   commands:
-    - "bash scripts/sl_eval.sh"   # one self-contained command: build + gate + bench
-  metrics:
+    - "bash scripts/sl_eval.sh" # run by the harness in the candidate worktree
+  metrics:                      # REQUIRED — declares what the harness parses
     objective:
-      key: SPEED_MS              # the KEY= line to parse; REPLACE with your metric
-      lower_is_better: true
+      key: SPEED_MS             # the KEY= line to parse; REPLACE per project
+      lower_is_better: true     # required bool
     gates:
-      - key: CORRECTNESS         # a KEY=PASS/FAIL line; REPLACE with your gate
+      - key: CORRECTNESS        # a KEY=PASS/FAIL line; REPLACE per project
+        description: >
+          <optional but recommended: what this gate checks and why a FAIL
+           vetoes the round — the LLM roles read this>
 
 source:
-  path: ../../my-repo
-  baseline_ref: main
+  path: ../../my-repo           # relative to this config file, or absolute
+  baseline_ref: main            # optional, default HEAD
 ```
 
-**The `eval.metrics` block is where "what gets optimized" is declared.**
-SimpleLoop never hardcodes `SPEED_MS` or `CORRECTNESS` — those are your keys.
-The next user's objective could be `binary_size_kb` or `coverage_pct`; the
-harness parses whatever keys the config declares. Only two roles exist:
+**The `eval.metrics` block is required and is where "what gets optimized" is
+declared.** SimpleLoop never hardcodes `SPEED_MS` or `CORRECTNESS` — those are
+your keys; the next project's objective could be `binary_size_kb` or
+`coverage_pct`. Exactly two roles exist:
 
-- `objective` — the thing being optimized. Required: `key` + `lower_is_better`.
-- `gates` — pass/fail keys that veto a round. Optional list of `{key}`.
+- `objective` — the thing being optimized: `key` + `lower_is_better`, nothing
+  else.
+- `gates` — pass/fail keys that veto a candidate. Optional list of
+  `{key, description?}`. Give each gate a `description` — it is the only place
+  the proposer/judger learn what the gate semantically means.
 
-Do **not** add `noise_floor`, `reps`, or any other metric-role key — they are
-rejected by the validator. They were intentionally deferred until a real run
-proves they're needed; adding them speculatively bloats the schema for an
-unvalidated requirement.
+Do **not** add `noise_floor`, `reps`, or any other metric-role key — the
+validator rejects them (intentionally deferred until a real run proves the
+need). Diff-only / score-based runs without metrics are **no longer
+supported**.
 
-Omitting `eval.metrics` entirely is legal — it drops to a diff-only judger with
-best-by-score (the legacy behavior). But then you get no harness-owned numbers
-and the judger will hallucinate them. **For any perf task, always declare
-metrics.**
+### 2.2 The eval script — emit structured `KEY=VALUE` lines
 
-### 2.2 Rewrite the eval script to emit structured `KEY=VALUE` lines
+**This is the contract the whole design rests on.** After each candidate's
+commit, the harness runs `eval.commands` in the worktree (inside the SIF) and
+scans the combined stdout+stderr for lines of the exact shape:
 
-**This is the contract the whole design rests on.** The harness parses eval
-output for lines of the exact shape `KEY=<value>` (key at line start, value up to
-the first whitespace). For every key you declared in `eval.metrics`, your eval
-script must print such a line. The harness parses them into a metrics dict; the
-judger cites those numbers and is forbidden from introducing any not listed.
+- `KEY=<value>` at the start of a line (leading whitespace allowed), value =
+  token up to the first whitespace. Match the key's case exactly as declared.
+- Objective value must parse as a number: `SPEED_MS=843.66  ms/evt (10 events)`
+  → 843.66 (the trailing annotation is ignored). A non-numeric value
+  (`SPEED_MS=NA` on a crashed round) is treated as unknown — best selection
+  skips it, never a placeholder.
+- Gate values are normalized: `PASS`/`ok`/`true`/`1`/`yes`/`success` → pass;
+  `FAIL`/`false`/`0`/`no`/`error`, or any token containing `fail`
+  (`build_fail`, `correctness_fail`) → fail; `NA`/empty/unrecognized → unknown,
+  which counts as **not passed**. Avoid bespoke tokens like
+  `CORRECTNESS=good` — that reads as unknown and the candidate is never
+  best-eligible.
+- A key absent from the output stays absent from the metrics dict —
+  downstream shows "unknown", never a default.
 
-The OMILREC eval (`scripts/sl_eval.sh`) is the reference shape — it prints, at
-the end:
+Two equally valid ways to produce the lines:
+
+**(a) Shell-level, no script changes** — wrap existing commands in the config
+(tiny_algo_opt does exactly this):
+
+```yaml
+eval:
+  commands:
+    - "PYTHONPATH=. python -m pytest tests/ -q && echo CORRECTNESS=PASS || echo CORRECTNESS=FAIL"
+    - "PYTHONPATH=. python scripts/check_drift.py && echo DRIFT=PASS || echo DRIFT=FAIL"
+    - "PYTHONPATH=. python scripts/bench.py"     # already prints ms_per_call=0.1234
+```
+
+**(b) A single self-contained eval script** — for builds and multi-stage
+pipelines, write one `scripts/sl_eval.sh` that sources the environment,
+builds, runs the gate(s), runs the benchmark, and prints all the lines at the
+end (the omilrec `sl_eval.sh` shape):
 
 ```
 CORRECTNESS=PASS
@@ -188,153 +285,119 @@ SPEED_MS=843.66630  ms/evt (10 events)
 EVAL_RESULT=ok
 ```
 
-The harness reads `CORRECTNESS=PASS` (gate → True), `SPEED_MS=843.66630`
-(objective → 843.66630 as float; the trailing `ms/evt (10 events)` is ignored
-because parsing stops at the first whitespace after the value), and
-`EVAL_RESULT=ok` (gate → True). Gate values are normalized: `PASS`/`ok`/`1`/
-`true`/`success` → pass; `FAIL`/`failed`/`*_fail`/`0`/`false` → fail; `NA`/
-empty/unrecognized → unknown (treated as not-passed). A non-numeric objective
-value (e.g. `SPEED_MS=NA` on a crashed round) is omitted — the FACTS block shows
-"unknown" and best selection skips it, never a hallucinated placeholder.
+On the failure paths, still print the lines: on build failure print
+`<GATE_KEY>=build_fail` and exit non-zero; on a failed gate print
+`<GATE_KEY>=FAIL`. Every declared key needs a line on **both** the pass path
+and the fail path.
 
-**Your eval script must do the equivalent for your keys.** Concretely:
+Hard constraints to design around:
 
-1. Run the build (if any). On failure, print `<GATE_KEY>=build_fail` and exit
-   non-zero — the harness reads the gate as failed.
-2. Run the correctness gate. Print `<GATE_KEY>=PASS` or `<GATE_KEY>=FAIL`.
-3. Run the benchmark / measurement. Print `<OBJECTIVE_KEY>=<number>` with the
-   number as the first whitespace-delimited token after `=`. Trailing units /
-   annotations are fine (`SPEED_MS=843.66  ms/evt (10 events)`) — they're
-   ignored.
-4. Print an overall result line if useful (`EVAL_RESULT=ok`), declared as a
-   second gate if you want it to veto.
+- **Each eval command has a fixed 600-second timeout** (not configurable).
+  Size the workload to fit — fewer events, a smaller benchmark n — or split
+  into multiple commands (the harness concatenates their output before
+  parsing). Remember each candidate starts from a **fresh worktree**: no build
+  cache, so the 600s includes a cold build unless the script sets up its own
+  external cache (e.g. ccache in a bound directory).
+- The eval script itself must live under a **frozen** path, and any files it
+  writes into the worktree will show up in the executor's diff — write
+  outputs outside the tree or freeze their directory.
+- The script must be self-sufficient inside `--cleanenv`: source its own
+  environment explicitly.
 
-If the eval currently prints prose like `drift OK: 12 cases match` or
-`ms_per_call=0.1234 (n=200)` (the tiny_algo_opt scripts do exactly this), you
-must **add** the bare `KEY=VALUE` lines. You can keep the prose for humans; just
-ensure the parseable lines are present. Example transform for tiny_algo_opt's
-`check_drift.py`:
+### 2.3 The failure modes this contract prevents — and the one it aborts on
 
-```
-# before (prose only — harness can't parse):
-drift OK: 12 cases match baseline
+**Baseline acceptance (new):** before the first proposer call, the harness
+runs the eval once on `baseline_ref`. If the eval command exits non-zero, the
+objective is missing/non-finite, or any gate does not pass, the run **aborts**
+with a `BaselineAcceptanceError` — no tokens spent. This catches a broken eval
+contract early, but only on the pass path; you must still hand-check the fail
+path (deliberately break something and confirm the `FAIL` line prints).
 
-# after (add a parseable gate line; keep the prose):
-DRIFT=PASS
-drift OK: 12 cases match baseline
-```
+**Metric hallucination:** if a candidate's eval stops printing the declared
+keys mid-run (e.g. only on some code path), the metrics dict comes back
+partial, FACTS go unknown, and the judger has nothing solid to cite. The fix
+is always in the eval script, not in SimpleLoop.
 
-and for `bench.py`:
+Checklist before launch:
 
-```
-# before:
-ms_per_call=0.1234  (n=200, radius=5)
-
-# after (the objective key must match eval.metrics.objective.key):
-MS_PER_CALL=0.1234
-ms_per_call=0.1234  (n=200, radius=5)
-```
-
-then declare in the config:
-
-```yaml
-eval:
-  commands:
-    - "PYTHONPATH=. python -m pytest tests/ -q && PYTHONPATH=. python scripts/check_drift.py && PYTHONPATH=. python scripts/bench.py"
-  metrics:
-    objective:
-      key: MS_PER_CALL
-      lower_is_better: true
-    gates:
-      - key: DRIFT
-```
-
-(Combining the three commands into one `&&`-chain is fine — the harness parses
-all `KEY=` lines from the combined stdout. Or list them separately; the harness
-concatenates.)
-
-### 2.3 The failure mode this contract exists to prevent — make it loud
-
-**If your eval does not print the declared keys, the harness cannot parse them.
-The metrics dict comes back empty. The judger falls back to reading the raw
-prose, extracts numbers itself, does arithmetic itself — and hallucinates.** This
-is not a hypothetical: a prior OMILRECV2 run had the judger invent a "baseline
-874.50 ms/evt" that appears in no ground-truth source (the real baseline was
-945.54, visible in the quick_bench `compare vs` line the judger was supposed to
-read but misread), and that invented number propagated across all 12 rounds of
-feedback, making every "vs baseline" delta wrong.
-
-There is **no dry-run enforcement** of this contract (intentionally — the skill
-is advisory). Nothing fails the launch if your eval script is wrong. So:
-
-- Double-check that every key in `eval.metrics` (objective + every gate) has a
-  matching `KEY=` line in the eval output, for both the PASS path and the FAIL
-  path (a crashed build, a failed gate).
-- The objective value must be a bare number as the first token after `=`. Not
-  `SPEED_MS: 843.66`, not `speed was 843.66` — `SPEED_MS=843.66`.
-- Gate values must be recognizable tokens: `PASS`/`FAIL`/`ok`/`*_fail`/etc.
-  Avoid bespoke tokens like `CORRECTNESS=good` — the harness reads `good` as
-  unknown (not-passed), and the round is never best-eligible.
+- Every key in `eval.metrics` (objective + every gate) has a matching `KEY=`
+  line in the eval output, on both PASS and FAIL paths.
+- Objective is a bare number as the first token after `=` — not
+  `SPEED_MS: 843.66`, not `speed was 843.66`.
+- Gate tokens are from the recognized set (`PASS`/`FAIL`/`ok`/`*_fail`/…).
+- The full eval chain finishes well under 600s per command from a cold
+  worktree, inside the SIF.
 
 ---
 
-## Part 3 — Launch and sanity-check round 0
+## Part 3 — Validate, launch, and sanity-check round 0
 
-### 3.1 Launch
-
-From the SimpleLoop repo root:
+### 3.1 Validate, then launch
 
 ```bash
-python -m simpleloop <path-to-task.yaml> <run-dir>
-# or, with a fixed proposal batch (skips the claude proposer):
-python -m simpleloop <path-to-task.yaml> <run-dir> --proposals <proposals.yaml>
+# 1. static validation — schema, paths, SIF existence; fails fast and clearly
+simpleloop validate --config path/to/task.yaml
+
+# 2. run
+simpleloop run --config path/to/task.yaml --run-dir runs/001
 ```
 
-The run dir holds `history.jsonl` (one record per round: proposal, sha, score,
-risk, feedback, eval_block, **metrics**), `final_report.md`, and the per-run
-repo clone + worktrees.
+Two extra run modes:
+
+- `--proposals batch.yaml` — a YAML/JSON list of direction strings; skips the
+  claude proposer, round i uses proposals[i] (controlled-experiment mode; runs
+  len(proposals) rounds, ignoring `max_rounds`).
+- `--continue` — resume an existing run-dir. Rounds already in
+  `history.jsonl` are skipped and the commit chain resumes;
+  `loop.max_rounds` becomes the target TOTAL round count, so bump it in the
+  config before continuing.
 
 ### 3.2 Sanity-check round 0 — do not skip
 
-After round 0 lands, read its record in `history.jsonl` and confirm:
+The baseline acceptance check already guarantees the baseline eval passed and
+the objective parsed. After round 0 lands, read its record in
+`<run-dir>/history.jsonl` (one JSON object per round; per-candidate details
+under `candidates[]`, the selected one mirrored at top level) and confirm:
 
-1. **`metrics` is populated.** The objective key and every gate key are present
-   with the right types (objective a float, gates `true`/`false`). If `metrics`
-   is `{}` or keys are missing, **stop** — the eval script isn't emitting the
-   declared `KEY=` lines. Fix the eval (Part 2.2) and re-run; do not let the
-   loop continue on hallucinated numbers.
-2. **The judger's feedback cites the harness-computed deltas**, not invented
-   numbers. The judger prompt now receives a FACTS block the harness built
-   (`THIS round: SPEED_MS = ... | CORRECTNESS = PASS`, `Delta vs prior: ...`,
-   `Delta vs baseline: ...`). The feedback should reference those exact numbers.
-   If the feedback names a number that isn't in the FACTS block, the judger is
-   hallucinating — which means the FACTS block was empty (metrics didn't parse),
-   and you're back to problem 1.
-3. **`best` is selected by the objective among gate-pass + risk-not-high
-   rounds**, not by judger score. The final report prints both the metric-best
-   and the highest-score round; if they differ, that's the design working as
-   intended (the fastest safe commit wins over the highest-scoring risky one).
+1. **`metrics` is populated for the candidate** — objective a float, each gate
+   `true`/`false`. If keys are missing on a candidate that took a different
+   code path than baseline (crash, gate fail), check the eval's fail path
+   prints its lines; fix the eval script, then `--continue`.
+2. **The judger's feedback cites the harness-computed deltas** (the FACTS
+   block: `THIS round: … | Delta vs prior: … | Delta vs baseline: …`), not
+   invented numbers. A number in the feedback that isn't in the metrics means
+   the FACTS block was empty — back to problem 1.
+3. **Selection behaves**: `selected_candidate`/`accepted` reflect gates + risk
+   + objective, not the judger's score. A gate-fail candidate must never be
+   selected.
 
-If any of these fail, the fix is almost always in the eval script (Part 2),
-not in SimpleLoop. The harness is deterministic; the contract is what varies
-per project.
+### 3.3 What a run produces, and how to inspect it
 
-### 3.3 What each run produces
+- `history.jsonl` — the append-only ground truth: per round `proposal`,
+  `sha`, `metrics`, `risk`, `feedback`, `changed_paths`, `candidates[]`,
+  `telemetry`.
+- `insights.jsonl` — the run's Search Memory (durable cross-round insights fed
+  back to the proposer).
+- `telemetry.json`, `progress.png` — multi-axis progress, refreshed each
+  round. For the nine per-panel detail images run:
+  `simpleloop plot --config task.yaml --run-dir runs/001`
+- The per-run repo clone — trace any accepted commit with
+  `git -C runs/001/repo log --oneline`.
+- Inspect one historical candidate in full:
+  `simpleloop memory show r3c0 --run-dir runs/001`
 
-- `history.jsonl` — the append-only record. `metrics` per round is the
-  harness-parsed ground truth; `eval_block` is the raw text (kept for the record
-  and for the judger to verify a specific claim, but not the source of numbers).
-- `final_report.md` — human summary: the metric-selected best, the highest-score
-  round (and the divergence if they differ), per-round metrics + risk + feedback.
-- The per-run repo (bare clone) + worktrees — for tracing any round's commit.
+If anything looks wrong, the fix is almost always in the eval script or the
+config (Part 2), not in SimpleLoop — the harness is deterministic; the
+contract is what varies per project.
 
 ---
 
 ## When to use each part
 
-- **Part 1 + 2** — when onboarding a new target project. Do them in order; 1.1
-  (the contract) is the part that fails silently if skipped.
-- **Part 3** — every launch, including re-runs. The round-0 sanity check catches
-  an eval contract break before it corrupts a long run.
-- If the user already has a working task and just wants to add `eval.metrics` to
-  an existing config + rewrite their eval to emit `KEY=` lines, skip to Part 2.
+- **Part 1 + 2** — when onboarding a new target project. Do them in order;
+  1.1 (the contract) is the part that fails silently if skipped.
+- **Part 3** — every launch, including re-runs. `validate` is cheap; the
+  round-0 check catches a fail-path contract break the baseline check can't.
+- If the user already has a working task and just wants to adjust gates,
+  fan-out (`candidates_per_round`), or the eval contract, jump to Part 2 and
+  re-run `simpleloop validate` before continuing the run.

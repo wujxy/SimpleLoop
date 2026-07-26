@@ -1,25 +1,5 @@
-"""Proposer: reads the per-run repo (read-only) + history -> proposes one direction.
-
-Sees: task goal, safety (editable/frozen), the authoritative accepted base SHA,
-and round history (proposal/candidate sha/accepted/base sha/score/metrics/
-changed_paths/feedback_for_proposer for each prior round). Its cwd is the
-PER-RUN working repo — the same clone the executor commits each round into —
-so every prior round's sha is a valid object it can `git show`/`git diff` to
-self-audit whether a direction was attempted and accepted (see the diff that
-round actually produced) or read the current accepted state of any file.
-It must NOT edit any file (the executor does that, in a per-round worktree)
-and must NOT read other runs' repos (cross-run answer-copyting); the per-run
-clone is physically isolated per run_dir.
-
-The per-run repo has NO working tree (cloned with --no-checkout), so the
-proposer reads committed content via git plumbing, not `cat`/`grep` of a live
-tree: `git show <sha>:<path>`, `git diff <a>..<b> -- <path>`, `git log`.
-
-Delivers: a Proposal(proposal=..., decision=..., reflection=...). `proposal` is the
-direction string the executor implements; `decision` (continue|switch) and
-`reflection` are stored in history.jsonl as human-audit evidence but NOT fed
-back into the next round's prompt.
-"""
+"""Proposer: reads the per-run repo (read-only) + history and proposes the next
+candidate directions. It never edits files; the executor implements in a worktree."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -40,16 +20,8 @@ _PROPOSAL_GENERATION_LIMIT = 800
 
 @dataclass
 class Proposal:
-    """What the proposer returns each round.
-
-    `proposal` is the only field the executor consumes — it stays a plain
-    direction string, so the executor is untouched. `reflection` and
-    `decision` are stored in history.jsonl as human-audit evidence (so you can
-    later see what the proposer reflected before re-proposing a direction),
-    but they are NOT fed back into the next round's prompt — `views.for_proposer`
-    does not project them — so they never bias the next round's decision.
-
-    """
+    """One candidate direction; only `proposal` is consumed by the executor,
+    the rest is stored in history.jsonl as audit evidence."""
     proposal: str
     decision: str = "switch"   # default switch (conservative) if the judger omitted it
     reflection: str = ""
@@ -58,21 +30,11 @@ class Proposal:
 
 @dataclass
 class ProposalBatch:
-    """One round's candidate directions.
-
-    `reflection` is shared search-context reasoning for the round. Each
-    candidate has its own family/decision/proposal triple.
-    """
+    """One round's candidate directions plus the shared batch-level reflection."""
     reflection: str
     insight: str
     insight_refs: list[str]
     proposals: list[Proposal]
-
-
-def _proposal_history_field(record: dict) -> tuple[str, str]:
-    if "proposal" in record:
-        return "proposal", str(record.get("proposal") or "")
-    return "proposal_head", str(record.get("proposal_head") or "")
 
 
 def _proposer_schema(candidates_per_round: int) -> dict:
@@ -130,58 +92,32 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             recent_rounds: int = views._PROPOSER_RECENT_ROUNDS_DEFAULT,
             gate_block: str = "") -> ProposalBatch:
     """Return ProposalBatch for the next round."""
-    # Project history through the proposer's view: this strips eval_block (the
-    # judger's axis — the judger summarizes it into `feedback_for_proposer` for
-    # us). The proposer only sees each prior round's proposal + score + concise
-    # search lesson.
+    # History is projected through the proposer's view (no raw eval_block).
     visible = views.for_proposer(history, recent_rounds=recent_rounds)
     insights_block = memory_mod.render_insights(insights)
     if visible:
         hist_lines = []
         for r in visible:
-            sha = r.get("sha")
-            sha_str = sha if sha else "(no commit)"
-            accepted = r.get("accepted")
-            accepted_str = "unknown" if accepted is None else str(bool(accepted)).lower()
-            round_base = r.get("base_sha") or "(legacy/unknown)"
-            m = r.get("metrics") or {}
-            m_parts = [f"{k}={v}" for k, v in m.items()] if m else ["(no metrics)"]
-            metrics_str = " ".join(m_parts)
-            paths = r.get("changed_paths") or []
-            paths_str = ",".join(paths) if paths else "(none)"
-            if "candidates" in r:
-                cand_lines = []
-                for c in r.get("candidates") or []:
-                    cm = c.get("metrics") or {}
-                    cm_parts = [f"{k}={v}" for k, v in cm.items()] if cm else ["(no metrics)"]
-                    c_paths = c.get("changed_paths") or []
-                    proposal_label, proposal_text = _proposal_history_field(c)
-                    cand_lines.append(
-                        f"    candidate {c.get('candidate')}: selected={bool(c.get('selected'))} | "
-                        f"family={c.get('family','?')} | candidate_sha={c.get('sha') or '(no commit)'} | "
-                        f"{' '.join(cm_parts)} | changed: {','.join(c_paths) if c_paths else '(none)'} | "
-                        f"score={c.get('score')} | risk={c.get('risk','?')} | "
-                        f"landing={c.get('landing_state')} | "
-                        f"feedback_for_proposer=\"{c.get('feedback_for_proposer','')}\" | "
-                        f'{proposal_label}="{proposal_text}"'
-                    )
-                hist_lines.append(
-                    f"  round {r['round']}: parent_sha={r.get('parent_sha') or round_base} | "
-                    f"selected_candidate={r.get('selected_candidate')} | "
-                    f"selected_sha={r.get('selected_sha') or r.get('base_sha')}\n" +
-                    "\n".join(cand_lines)
+            cand_lines = []
+            for c in r.get("candidates") or []:
+                cm = c.get("metrics") or {}
+                cm_parts = [f"{k}={v}" for k, v in cm.items()] if cm else ["(no metrics)"]
+                c_paths = c.get("changed_paths") or []
+                cand_lines.append(
+                    f"    candidate {c.get('candidate')}: selected={bool(c.get('selected'))} | "
+                    f"family={c.get('family','?')} | candidate_sha={c.get('sha') or '(no commit)'} | "
+                    f"{' '.join(cm_parts)} | changed: {','.join(c_paths) if c_paths else '(none)'} | "
+                    f"score={c.get('score')} | risk={c.get('risk','?')} | "
+                    f"landing={c.get('landing_state')} | "
+                    f"feedback_for_proposer=\"{c.get('feedback_for_proposer','')}\" | "
+                    f'proposal="{c.get("proposal") or ""}"'
                 )
-            else:
-                proposal_label, proposal_text = _proposal_history_field(r)
-                landing = r.get("landing_state")
-                hist_lines.append(
-                    f"  round {r['round']}: candidate_sha={sha_str} | "
-                    f"accepted={accepted_str} | base_sha={round_base} | {metrics_str} | "
-                    f"changed: {paths_str} | score={r['score']} | risk={r.get('risk','?')} | "
-                    f"landing={landing} | "
-                    f"feedback_for_proposer=\"{r.get('feedback_for_proposer','')}\" | "
-                    f'{proposal_label}="{proposal_text}"'
-                )
+            hist_lines.append(
+                f"  round {r['round']}: parent_sha={r.get('parent_sha') or r.get('base_sha')} | "
+                f"selected_candidate={r.get('selected_candidate')} | "
+                f"selected_sha={r.get('selected_sha') or r.get('base_sha')}\n" +
+                "\n".join(cand_lines)
+            )
         hist_block = "\n".join(hist_lines)
     else:
         hist_block = "  (none yet — this is the first round)"

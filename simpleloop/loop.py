@@ -1,31 +1,18 @@
 """The serial main loop. Scheduling only — the thinking is in the roles.
 
-For each of max_rounds rounds (one "generation"):
-  proposer.propose(history) -> N candidate proposals (candidates_per_round)
-  for each candidate (serial or ThreadPool, loop.max_workers):
-    executor.execute(proposal) -> sha (or None if gate-rejected / empty)
-    harness runs eval commands   -> raw text + parsed metrics
-    judger.judge(diff + metrics) -> {score, risk, feedback}
-  harness selects a winner (gate-pass + risk!=high + objective improved);
-  store.append_generation(...) records the whole generation;
-  winner -> parent_sha advances; no winner -> parent_sha stays put
-  (rejected candidates remain in history).
-
-No early stop. The orchestrator never decides whether a round is "good" — it
-just records the judger's score and feeds feedback forward.
-
-Static-proposal mode: pass `proposals=[str, ...]` (or a path to a YAML/JSON
-file of such a list) to SKIP the claude proposer and drive the loop from a
-fixed batch of directions you prepared. Round i uses proposals[i] as a
-one-candidate generation; the number of rounds is len(proposals) (max_rounds
-is ignored in this mode). The judger still runs and scores each, but its
-feedback no longer chooses the next proposal, and acceptance is by hard gates
-alone (a regressing-but-valid experiment still advances the chain).
+Each round: proposer -> N candidates; per candidate executor -> eval -> judger;
+the harness selects a winner (gate-pass + risk!=high + objective improved) and
+records the generation. Static-proposal mode (`proposals=[...]` or a YAML/JSON
+file) skips the claude proposer and accepts by hard gates alone.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import math
+import os
+import shutil
+import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -43,7 +30,7 @@ from .harness import memory as memory_mod
 from .reporting import plot as plot_mod
 from .roles import proposer as proposer_mod
 from .harness import views
-from .harness.store import Store
+from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
 from .container.runtime import ApptainerRuntime
 from .harness.workspace import Workspace
@@ -53,15 +40,14 @@ class BaselineAcceptanceError(RuntimeError):
     """Raised when the configured runtime cannot pass the task baseline."""
 
 
+class RunLockError(RuntimeError):
+    """Raised when another simpleloop process already holds the run_dir."""
+
+
 @dataclass
 class RunContext:
     """Per-run fixtures shared by every round: config, runtime, agents, stores.
-
-    Everything here is fixed for the run's lifetime; baseline_metrics is set
-    once after the baseline eval. Mutable per-round search state (parent_sha,
-    prior_metrics) stays in run()'s locals. Only cfg is required so tests can
-    build a minimal context for a single helper.
-    """
+    Mutable per-round search state (parent_sha, prior_metrics) stays in run()."""
     cfg: dict
     run_dir: Path | None = None
     runtime: ApptainerRuntime | None = None
@@ -83,27 +69,93 @@ class RunContext:
         return self.run_dir / "insights.jsonl"
 
 
+def _acquire_run_lock(run_dir: Path) -> int | None:
+    """flock run_dir/.lock exclusively so two runs cannot interleave writes to
+    history.jsonl. flock (not an O_EXCL pid file) because the kernel releases
+    it on any process death — no stale lock to clean up after a SIGKILL.
+
+    Returns the held fd, or None when the filesystem does not support flock
+    (some NFS/Lustre mounts): there we warn and run unprotected rather than
+    block a legitimate long run.
+    """
+    lock_path = run_dir / ".lock"
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = ""
+        try:
+            holder = os.pread(fd, 4096, 0).decode("utf-8", "replace").strip()
+        except OSError:
+            pass
+        os.close(fd)
+        raise RunLockError(
+            f"run_dir {run_dir} is locked by another simpleloop run"
+            + (f" ({holder})" if holder else "")
+            + "; wait for it to finish or use a different --run-dir")
+    except OSError as exc:
+        os.close(fd)
+        print(f"[{stamp()}] warning: could not flock {lock_path} ({exc}); "
+              "concurrent-run protection is DISABLED on this filesystem", flush=True)
+        return None
+    # Holder info is diagnostics only — the lock semantics live in flock.
+    info = json.dumps({"pid": os.getpid(), "host": socket.gethostname(),
+                       "started_at": stamp()})
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, info.encode("utf-8"), 0)
+    return fd
+
+
+def _release_run_lock(fd: int | None) -> None:
+    """Unlock and close; the .lock file stays (deleting would race a waiter)."""
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _write_config_snapshot(cfg: dict, config_path: str | Path,
+                           run_dir: Path) -> None:
+    """Persist run provenance: the RESOLVED config (overwritten every run, so a
+    --continue with a bumped max_rounds is reflected) plus a verbatim copy of
+    the original file (written once). `simpleloop plot`/`export` read the
+    resolved snapshot back instead of requiring --config."""
+    snapshot = run_dir / config_mod.RESOLVED_SNAPSHOT_NAME
+    # default=str: config.load only emits str/int/bool/list, but callers may
+    # inject Path values programmatically — degrade them to their string form.
+    snapshot.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8")
+    src = Path(config_path).expanduser().resolve()
+    orig = run_dir / f"config.orig{src.suffix}"
+    if src.is_file() and not orig.exists():
+        shutil.copyfile(src, orig)
+
+
 def run(config_path: str | Path, run_dir: str | Path,
         proposals: str | Path | list[str] | None = None,
         continue_run: bool = False) -> dict:
     """Run the full loop. Returns a summary dict.
 
-    If `proposals` is given (a list of strings, or a path to a YAML/JSON file
-    holding one), the claude proposer is skipped and round i uses proposals[i].
-
-    If `continue_run` is True, resume an existing run-dir: rounds already in
-    history.jsonl are skipped, the commit chain resumes from the last accepted
-    round's sha, and loop.max_rounds is treated as the target TOTAL round count
-    (so bump it in the config before continuing). Baseline eval is re-run for
-    the judger's vs-baseline axis (cheap relative to the rounds being added).
-    """
+    `proposals` switches to static-proposal mode; `continue_run` resumes an
+    existing run-dir with loop.max_rounds as the target TOTAL round count."""
     cfg = config_mod.load(config_path)
-    # Resolve to absolute now: every derived path (repo, worktrees) must be
-    # absolute so git and the agent subprocess (Popen cwd=) agree on location.
-    # A relative run_dir otherwise makes git create worktrees relative to the
-    # repo's cwd while Popen resolves them relative to the loop's cwd -> mismatch.
+    # Resolve run_dir now: git worktrees and Popen cwd must agree on location.
     run_dir_path = Path(run_dir).resolve()
     run_dir_path.mkdir(parents=True, exist_ok=True)
+    lock_fd = _acquire_run_lock(run_dir_path)
+    try:
+        _write_config_snapshot(cfg, config_path, run_dir_path)
+        return _run_locked(cfg, run_dir_path, proposals, continue_run)
+    finally:
+        _release_run_lock(lock_fd)
+
+
+def _run_locked(cfg: dict, run_dir_path: Path,
+                proposals: str | Path | list[str] | None,
+                continue_run: bool) -> dict:
     ctx = _build_context(cfg, run_dir_path, resume=continue_run)
 
     static_proposals = _load_proposals(proposals)
@@ -124,26 +176,20 @@ def run(config_path: str | Path, run_dir: str | Path,
 
     start = _starting_state(ctx, continue_run, n_rounds)
     if start is None:  # --continue with nothing left to do
-        return _summary(ctx.store, ctx.workspace, run_dir_path)
+        return _summary(ctx, run_dir_path)
     start_round, parent_sha, prior_metrics = start
 
     for round_id in range(start_round, n_rounds):
         print(f"\n[{stamp()}] === round {round_id + 1}/{n_rounds} ===", flush=True)
 
-        # 1. proposer (skipped in static mode — see _next_proposals).
         proposals_batch, reflection, pending_insight = _next_proposals(
             ctx, static_proposals, round_id, parent_sha)
 
-        # 2. executor + eval + judger, one shared pipeline per candidate. Static
-        #    mode is just a one-candidate generation with a different acceptance
-        #    rule (below).
         candidates = _run_candidates(
             ctx, proposals_batch, round_id, parent_sha, prior_metrics)
         if static_proposals is not None:
-            # Controlled-experiment rule (unchanged from the old serial path):
-            # hard gates alone decide whether the chain advances — no
-            # improvement or risk requirement, so a regressing-but-valid
-            # experiment still lands and the next static proposal builds on it.
+            # Controlled-experiment rule: hard gates alone decide, so a
+            # regressing-but-valid experiment still advances the chain.
             first = candidates[0] if candidates else None
             winner = (first if first and first.get("sha") and first.get("accepted")
                       else None)
@@ -185,28 +231,13 @@ def run(config_path: str | Path, run_dir: str | Path,
     print(f"\n[{stamp()}] done. best={ctx.store.best_sha} "
           f"(score {ctx.store.best_score:.2f})", flush=True)
     print(f"[{stamp()}] working repo (for tracing): {ctx.workspace.repo}", flush=True)
-    return _summary(ctx.store, ctx.workspace, run_dir_path)
+    return _summary(ctx, run_dir_path)
 
 
 def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext:
     """Construct the run's fixed fixtures: runtime (with preflight), the three
-    role-scoped agents, workspace, store, and telemetry.
-
-    The three agents are separated by the tools each role NEEDS so a role can't
-    do a job it isn't supposed to (reward-hacking / cross-run cheating):
-      - proposer: reads the source repo to propose a direction. Never edits —
-        giving it Edit/Write is pure attack surface (it could rewrite the
-        baseline). Read + Bash only.
-      - executor: edits the worktree and runs build/test to verify. Needs the
-        full set; its WRITE risk is bounded by gate.check_diff (frozen/editable).
-      - judger: reads the diff + re-runs eval to verify claims. Never edits — a
-        judger that can write could rewrite eval/reference to make itself pass.
-        Read + Bash only.
-    All three share the same 1h timeout ceiling (configurable per-task via
-    loop.agent_timeout_seconds): a proposal can be a large systematic change
-    spanning many call sites, and the executor must finish the WHOLE proposal in
-    one round (no half-work).
-    """
+    role-scoped agents (each restricted to the tools its role needs), workspace,
+    store, and telemetry."""
     telemetry = RunTelemetry(run_dir_path, resume=resume)
     runtime = ApptainerRuntime(
         image=cfg["runtime_image"],
@@ -219,17 +250,21 @@ def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext
     print("preflight: PASS", flush=True)
 
     timeout = cfg.get("agent_timeout_seconds", 3600)
+    max_output_tokens = cfg.get("agent_max_output_tokens", 64000)
     proposer_agent = Agent(runtime=runtime, command="claude",
                            timeout_seconds=timeout,
                            allowed_tools="Read,Bash",
+                           max_output_tokens=max_output_tokens,
                            usage_observer=telemetry.record_usage)
     executor_agent = Agent(runtime=runtime, command="claude",
                            timeout_seconds=timeout,
                            allowed_tools="Read,Edit,Write,Bash",
+                           max_output_tokens=max_output_tokens,
                            usage_observer=telemetry.record_usage)
     judger_agent = Agent(runtime=runtime, command="claude",
                          timeout_seconds=timeout,
                          allowed_tools="Read,Bash",
+                         max_output_tokens=max_output_tokens,
                          usage_observer=telemetry.record_usage)
     workspace = Workspace(
         run_dir=run_dir_path,
@@ -237,11 +272,9 @@ def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext
         baseline_ref=cfg["baseline_ref"],
         editable=cfg["editable_paths"],
     )
-    store = Store(run_dir_path, metrics_schema=cfg["metrics"])
-    # Pre-render the gates' list lines once for the run: the same bullet lines
-    # go into both the proposer's (reference) and executor's (acceptance) prompt,
-    # each prefixed by its own fixed framing sentence in that role's prompt. Empty
-    # when no gate declares a description.
+    store = Store(run_dir_path, metrics_schema=cfg["metrics"],
+                  history_eval_cap=cfg.get("eval_history_cap_chars", 6000))
+    # Same gate bullet lines go into both the proposer's and executor's prompt.
     gate_lines = views.gate_block(cfg.get("metrics"))
     return RunContext(
         cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
@@ -256,27 +289,14 @@ def _starting_state(ctx: RunContext, continue_run: bool,
     """Run the baseline eval and resolve where the round loop starts.
 
     Returns (start_round, parent_sha, prior_metrics), or None when --continue
-    finds nothing left to do (target round count already recorded).
-
-    Baseline eval: run the eval commands once on the unoptimized baseline
-    commit so every round's judger has a "vs baseline" axis. It is also the
-    runtime acceptance test: a failure aborts before any optimization role is
-    called. Skipped entirely when no eval is configured.
-
-    Continue mode: rounds already in history.jsonl are skipped; the commit
-    chain resumes from the last accepted round's sha. max_rounds becomes the
-    target TOTAL round count (caller bumps it in the config before continuing).
-    The prior-round axis is rebuilt from the last accepted round's metrics so
-    the resumed round's judger sees a real prior.
-    """
+    finds nothing left to do. The baseline eval doubles as the runtime
+    acceptance test: a failure aborts before any optimization role is called."""
     baseline_sha = ctx.workspace.baseline_sha()
     if not continue_run:
         _, baseline_metrics = _eval_baseline(
             ctx.workspace, ctx.cfg, baseline_sha, ctx.runtime)
         ctx.telemetry.set_baseline(baseline_metrics)
         ctx.baseline_metrics = baseline_metrics
-        # round 0's "prior round" is the baseline. Updated to each accepted
-        # round's parsed metrics (the judger FACTS block's vs-prior axis).
         return 0, baseline_sha, baseline_metrics
 
     done = ctx.store.history()
@@ -297,9 +317,7 @@ def _starting_state(ctx: RunContext, continue_run: bool,
     print(f"[{stamp()}] --continue: resuming from round {start_round + 1} "
           f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
           flush=True)
-    # baseline eval still runs (judger's vs-baseline axis); its metrics are
-    # only used if start_round == 0, which continue mode excludes, but the
-    # judger may cite baseline numbers so keep them available.
+    # Baseline eval still runs so the resumed judger keeps its vs-baseline axis.
     _, baseline_metrics = _eval_baseline(
         ctx.workspace, ctx.cfg, baseline_sha, ctx.runtime)
     ctx.baseline_metrics = baseline_metrics
@@ -314,18 +332,8 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
                                tuple[str, list[str]] | None]:
     """One round's candidate directions: (proposals, reflection, pending_insight).
 
-    Normal mode calls the claude proposer, which reads the per-run repo (the
-    SAME clone the executor commits into, so the round shas in history are
-    valid objects here and the proposer can `git show`/`git diff` any prior
-    round's actual changes). It never edits — the executor edits in a
-    per-round worktree; the per-run repo is a bare-ish --no-checkout clone, so
-    the proposer can only inspect commit history/diffs, not a live tree. It
-    must NOT read other runs' repos (cross-run answer-copying); the per-run
-    clone is physically isolated per run_dir.
-
-    Static mode skips the proposer: the proposal is taken verbatim from the
-    supplied batch as a one-candidate generation (no reflection, no insight).
-    """
+    Normal mode calls the claude proposer against the per-run repo (read-only);
+    static mode takes the proposal verbatim as a one-candidate generation."""
     if static_proposals is not None:
         proposal_text = static_proposals[round_id]
         print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
@@ -363,20 +371,48 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
     return proposal_obj.proposals, proposal_obj.reflection, pending_insight
 
 
-def _summary(store: Store, workspace: Workspace, run_dir_path: Path) -> dict:
-    """Build the run summary dict (shared by the normal exit and continue no-op)."""
-    return {
+def _summary(ctx: RunContext, run_dir_path: Path) -> dict:
+    """Build the run summary dict and persist it as run_dir/summary.json
+    (shared by the normal exit and the continue no-op exit)."""
+    store, workspace = ctx.store, ctx.workspace
+    history = store.history()
+    schema = ctx.metrics_schema or {}
+    obj_key = (schema.get("objective") or {}).get("key")
+    # continue-no-op exits before the baseline eval runs; fall back to the
+    # baseline metrics persisted in telemetry.json by the original session.
+    baseline_metrics = ctx.baseline_metrics or (
+        ctx.telemetry.plot_context().get("baseline_metrics")
+        if ctx.telemetry else {}) or {}
+    best = _best_candidate(history, schema) if history and obj_key else None
+    baseline_sha = workspace.baseline_sha()
+    summary = {
         "best_sha": store.best_sha,
+        "best_round": store.best_round,
+        "best_candidate": store.best_candidate,
         "best_score": store.best_score,
-        "rounds": len(store.history()),
+        "objective_key": obj_key,
+        "best_objective": (best.get("metrics") or {}).get(obj_key) if best else None,
+        "baseline_objective": baseline_metrics.get(obj_key),
+        "baseline_sha": baseline_sha,
+        "final_chain_sha": (history[-1].get("base_sha") if history
+                            else baseline_sha),
+        "rounds": len(history),
         "run_dir": str(run_dir_path),
         "repo": str(workspace.repo),
     }
+    try:
+        (run_dir_path / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+    except OSError as exc:
+        print(f"[{stamp()}] warning: could not write summary.json: {exc}",
+              flush=True)
+    return summary
 
 
 def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> None:
     """Refresh the 3x3 overview only; detail images are drawn offline via
-    `simpleloop plot` (redrawing nine extra PNGs every round was pure cost)."""
+    scripts/plot_details.py."""
     try:
         history = store.history()
     except Exception as exc:
@@ -414,8 +450,7 @@ def _run_candidates(ctx: RunContext, proposals: list[proposer_mod.Proposal],
             try:
                 results[i] = future.result()
             except Exception as exc:
-                # Last-resort guard: candidate failures should stay local and not
-                # kill the whole generation.
+                # Last-resort guard: candidate failures stay local to the candidate.
                 p = proposals[i]
                 print(f"[{stamp()}] candidate r{round_id}-c{i} worker failed: {exc}",
                       flush=True)
@@ -464,6 +499,8 @@ def _run_one_candidate(ctx: RunContext, candidate_id: int,
                     cwd=worktree,
                     runtime=ctx.runtime,
                     metrics_schema=metrics_schema,
+                    timeout_seconds=cfg.get("eval_timeout_seconds", 600),
+                    output_cap=cfg.get("eval_output_cap_chars", 16000),
                 )
                 eval_block = eval_result.text
                 eval_metrics = eval_result.metrics
@@ -547,32 +584,16 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
 def _select_winner(candidates: list[dict],
                    metrics_schema: dict,
                    prior_metrics: dict | None = None) -> dict | None:
-    """Select an eligible candidate only when it improves the incumbent.
-
-    metrics_schema is always configured (eval.metrics is required) — there is
-    deliberately no score-based fallback: ranking by the judger's subjective
-    score is the "best by score" failure the harness-owned objective replaced.
-    """
+    """Select an eligible candidate only when it improves the incumbent
+    (deliberately no score-based fallback — the harness owns the objective)."""
     obj = metrics_schema["objective"]
     key = obj["key"]
-    gate_keys = [g["key"] for g in metrics_schema.get("gates", [])]
-    eligible = []
-    for c in candidates:
-        metrics = c.get("metrics") or {}
-        if not c.get("sha"):
-            continue
-        if str(c.get("risk", "high")).lower() == "high":
-            continue
-        if not all(metrics.get(gk) is True for gk in gate_keys):
-            continue
-        if not isinstance(metrics.get(key), (int, float)):
-            continue
-        eligible.append(c)
-    if not eligible:
+    eligible_cands = [c for c in candidates if _eligible(c, metrics_schema)]
+    if not eligible_cands:
         return None
     lower = obj["lower_is_better"]
     direction = 1 if lower else -1
-    winner = min(eligible, key=lambda c: (
+    winner = min(eligible_cands, key=lambda c: (
         direction * c["metrics"][key],
         -(c.get("score") or 0.0),
         c.get("candidate") or 0,
@@ -588,11 +609,8 @@ def _select_winner(candidates: list[dict],
 
 def _candidate_accepted(candidate_sha: str | None, metrics: dict | None,
                         metrics_schema: dict | None) -> bool:
-    """Whether a candidate becomes the next cumulative base.
-
-    Every declared gate must be explicitly True. Missing/unknown gate values are
-    rejection, while configs without gates keep the legacy commit-on-SHA behavior.
-    """
+    """Whether a candidate becomes the next cumulative base: every declared
+    gate must be explicitly True (missing/unknown is rejection)."""
     if not candidate_sha:
         return False
     gates = (metrics_schema or {}).get("gates", [])
@@ -604,12 +622,7 @@ def _candidate_accepted(candidate_sha: str | None, metrics: dict | None,
 
 def _resume_chain(history: list[dict],
                   baseline_sha: str) -> tuple[str, dict | None]:
-    """Return the last accepted SHA and its record, skipping rejected tails.
-
-    Every record is a generation (append_generation shape): a round with a
-    selected candidate carries its selected_sha; a round with no winner is
-    skipped so the chain resumes from the last round that actually advanced it.
-    """
+    """Return the last accepted SHA and its record, skipping rejected tails."""
     for record in reversed(history):
         selected_sha = record.get("selected_sha")
         if selected_sha:
@@ -661,14 +674,8 @@ def _eval_baseline(
     baseline_sha: str,
     runtime: ApptainerRuntime,
 ) -> tuple[str, dict]:
-    """Run the eval commands once on the unoptimized baseline commit.
-
-    Returns (eval_block, metrics) — the raw text (kept for the record) and the
-    parsed metrics dict (the authoritative baseline numbers the judger's FACTS
-    block cites). A failed command, missing objective, or failed gate aborts
-    the run. Uses a throwaway worktree on the baseline SHA (the bare per-run
-    clone has no working tree, same reason the per-round eval uses a worktree).
-    """
+    """Run the eval commands once on the unoptimized baseline commit; returns
+    (eval_block, metrics). A failure aborts the run."""
     print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]}) for the judger's "
           f"vs-baseline axis...", flush=True)
     wt = None
@@ -690,6 +697,8 @@ def _eval_baseline(
                 cwd=wt,
                 runtime=runtime,
                 metrics_schema=cfg.get("metrics"),
+                timeout_seconds=cfg.get("eval_timeout_seconds", 600),
+                output_cap=cfg.get("eval_output_cap_chars", 16000),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise BaselineAcceptanceError(
@@ -715,17 +724,8 @@ def stamp() -> str:
 
 def _print_objective(metrics: dict | None, prior: dict | None, baseline: dict | None,
                      schema: dict | None) -> None:
-    """Print the round's measured objective value with vs-prior and vs-baseline deltas.
-
-    All three values are harness-parsed (authoritative) — never the judger's prose,
-    which is the number-hallucination vector this loop was built to avoid. Silent
-    (no line) when the eval has no metrics schema or this round produced no
-    objective value (e.g. no-commit / failed-eval rounds): the score+feedback line
-    above already says "no commit" for those, so a redundant "objective: unknown"
-    line would just be noise. lower_is_better is read from the schema so the delta
-    arrow points the right way regardless of whether the objective is ms/evt,
-    binary size, or throughput.
-    """
+    """Print the round's harness-parsed objective value with vs-prior and
+    vs-baseline deltas; silent when there is no measurement this round."""
     if not schema or not metrics:
         return
     obj = schema.get("objective", {})
@@ -734,13 +734,13 @@ def _print_objective(metrics: dict | None, prior: dict | None, baseline: dict | 
         return
     val = metrics.get(key)
     if val is None:
-        return  # no measurement this round (no commit / eval crashed) — stay silent
+        return
     lower_is_better = obj.get("lower_is_better", True)
     def _fmt_delta(this, other, label):
-        if not isinstance(this, (int, float)) or not isinstance(other, (int, float)) or other == 0:
+        delta = evals.objective_delta(this, other, lower_is_better)
+        if delta is None:
             return None
-        pct = (this - other) / other * 100.0
-        improved = (pct < 0) if lower_is_better else (pct > 0)
+        pct, improved = delta
         arrow = "↓ better" if improved else ("↑ worse" if pct != 0 else "= same")
         return f"{label} {other:g} ({pct:+.1f}%, {arrow})"
     parts = [f"{key}={val:g}"]
@@ -754,16 +754,7 @@ def _print_objective(metrics: dict | None, prior: dict | None, baseline: dict | 
 
 def _load_proposals(proposals: str | Path | list[str] | None) -> list[str] | None:
     """Resolve the `proposals` argument to a list of non-empty strings, or None.
-
-    - None -> None (normal loop: claude proposer each round).
-    - list[str] -> used directly (the Python-call path: loop.run(proposals=[...])).
-    - str/Path -> a YAML/JSON file; the document must be a list of strings, or an
-      object with a "proposals" key holding such a list. YAML block scalars (``- |``)
-      are the convenient way to write multi-line directions.
-
-    Every entry must be a non-empty string — an empty proposal would waste a whole
-    executor+judger round, so fail fast here instead.
-    """
+    Accepts a list, or a YAML/JSON file holding a list (or {"proposals": [...]})."""
     if proposals is None:
         return None
     if isinstance(proposals, list):

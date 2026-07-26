@@ -1,16 +1,6 @@
-"""Workspace: per-run git repo isolation, worktree lifecycle, harness-owned commit, diff.
-
-Design (see design overview):
-  - Each run clones the source repo locally into run_dir/repo (git clone --local,
-    hardlinks the object store, LFS skipped). The source repo is never touched.
-  - Each round creates a worktree inside that repo from parent_sha; the agent edits
-    files there but does NOT commit. The harness stages allowed files and commits,
-    returning the SHA (the executor's deliverable).
-  - Rounds chain: round 0 forks baseline_ref; round n forks round n-1's SHA (only
-    if a SHA was produced; a gate-rejected/empty round leaves the chain in place).
-  - Run-to-run isolation is physical: different run = different repo, so an agent
-    rummaging in git only ever sees its own run's chain.
-"""
+"""Workspace: per-run git repo isolation, worktree lifecycle, harness-owned
+commit, diff. Each run clones the source repo into run_dir/repo (physical
+run-to-run isolation); each round edits in a worktree and the harness commits."""
 from __future__ import annotations
 
 import os
@@ -52,9 +42,8 @@ class Workspace:
         return self._baseline_sha
 
     def _git_clone_local(self, src: Path, dst: Path, env: dict) -> None:
-        # Prefer --local (hardlinks the object store: fast, no re-compression) but
-        # hardlinks only work within one filesystem. A run_dir commonly lives on a
-        # different mount than the source repo, so fall back to a full copy there.
+        # Prefer --local (hardlinked objects); fall back to a full copy when
+        # run_dir is on a different filesystem.
         for args in (
             ["git", "clone", "--local", "--no-checkout", str(src), str(dst)],
             ["git", "clone", "--no-checkout", str(src), str(dst)],
@@ -88,9 +77,6 @@ class Workspace:
         )
         if completed.returncode != 0:
             raise WorkspaceError(f"git worktree add failed: {completed.stderr.strip()}")
-        # materialize the working tree (HEAD was checked out by worktree add, but
-        # --no-checkout on clone left the repo bare of a worktree; worktree add
-        # checks out by default, so files are present)
         return wt
 
     def remove_worktree(self, round_id: int | str) -> None:

@@ -31,12 +31,8 @@ _BLOCKED_PREFIXES = (
     "APPTAINERENV_",
     "SINGULARITY_",
     "SINGULARITYENV_",
-    # Bash exports shell functions to subprocesses as BASH_FUNC_<name>%%
-    # env vars. An outer shell (e.g. the IHEP JUNO sandbox's environment
-    # modules) exports `which`, `module`, `scl`, etc. Inheriting these into
-    # the container poisons any child `/bin/sh` (dash-like syntax error on
-    # `importing function definition`) and breaks junosw's Sniper DLL load
-    # path resolution. `which_declare` is the matching helper var.
+    # Exported shell functions (BASH_FUNC_*) from an outer environment poison
+    # /bin/sh children inside the container; `which_declare` is the helper var.
     "BASH_FUNC_",
 )
 _BLOCKED_EXACT = frozenset({"which_declare"})
@@ -81,12 +77,8 @@ class ApptainerRuntime:
     ) -> list[str]:
         """Return one shell-free Apptainer argv for a payload command."""
         argv = [self.executable, "exec", "--cleanenv", "--no-eval"]
-        # Unprivileged user namespace: the default on shared HPC nodes and
-        # inside an outer Apptainer sandbox, where starter-suid has no setuid
-        # bit (the root overlay strips it) and setuid root is unavailable.
-        # --userns drives container setup via an unprivileged user namespace,
-        # so no setuid is needed. Set SIMPLELOOP_APPTAINER_USERNS=0 to fall
-        # back to setuid on a normal root-owned host.
+        # --userns (default) avoids needing setuid on shared HPC nodes; set
+        # SIMPLELOOP_APPTAINER_USERNS=0 to fall back to setuid.
         if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
             argv.append("--userns")
         for bind in self.binds:

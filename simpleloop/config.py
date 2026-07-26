@@ -7,6 +7,7 @@ Minimal schema:
   safety.frozen_paths: [glob]        (optional, default [])
   loop.max_rounds: int                (required)
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
+  loop.agent_max_output_tokens: int  (optional, default 64000; per claude call output ceiling)
   loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
   loop.max_workers: int              (optional, default 1; candidate concurrency)
   loop.proposer_recent_rounds: int   (optional, default 6; rounds of history fed to proposer)
@@ -14,11 +15,13 @@ Minimal schema:
   runtime.binds: [absolute dir]      (optional, default [])
   eval.commands: [str]                (required non-empty; harness-run after each commit)
   eval.metrics: {objective, gates}    (required; the key=value lines the harness parses)
+  eval.timeout_seconds: int           (optional, default 600; per eval command budget)
+  eval.output_cap_chars: int          (optional, default 16000; per-command output kept for the judger)
+  eval.history_cap_chars: int         (optional, default 6000; eval text kept per round in history.jsonl)
   source.path: path                   (required; the repo to optimize)
   source.baseline_ref: str            (optional, default HEAD)
 
-Paths in the config are relative to the config file. Strict: unknown top-level
-keys are errors so a misspelled knob fails at validate, not silently mid-run.
+Paths are relative to the config file; unknown keys are errors (strict).
 """
 from __future__ import annotations
 
@@ -36,6 +39,29 @@ TASK_TOP_KEYS = {
 
 class ConfigError(ValueError):
     """User-facing config error with a field path."""
+
+
+# Provenance snapshot written into every run_dir at loop start: the RESOLVED
+# config dict (absolute paths, defaults filled in). `simpleloop plot` and
+# `simpleloop export` read it back so a run stays self-describing after the
+# original config file moves or changes.
+RESOLVED_SNAPSHOT_NAME = "config.resolved.json"
+
+
+def load_resolved(run_dir: str | Path) -> dict[str, Any]:
+    """Read the resolved-config snapshot a run wrote into its run_dir."""
+    path = Path(run_dir).expanduser().resolve() / RESOLVED_SNAPSHOT_NAME
+    if not path.exists():
+        raise ConfigError(
+            f"no {RESOLVED_SNAPSHOT_NAME} in {path.parent} — the run predates "
+            "config snapshots; pass --config explicitly")
+    try:
+        resolved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"could not read {path}: {exc}") from exc
+    if not isinstance(resolved, dict):
+        raise ConfigError(f"{path}: top-level value must be an object")
+    return resolved
 
 
 def load(config_path: str | Path) -> dict[str, Any]:
@@ -83,6 +109,9 @@ def _resolve(raw: dict, path: Path) -> dict:
     agent_timeout = loop.get("agent_timeout_seconds", 3600)
     if not isinstance(agent_timeout, int) or agent_timeout < 60:
         raise ConfigError("loop.agent_timeout_seconds: must be an integer >= 60 (seconds)")
+    agent_max_output_tokens = loop.get("agent_max_output_tokens", 64000)
+    if not isinstance(agent_max_output_tokens, int) or agent_max_output_tokens < 8000:
+        raise ConfigError("loop.agent_max_output_tokens: must be an integer >= 8000")
     candidates_per_round = loop.get("candidates_per_round", 1)
     if not isinstance(candidates_per_round, int) or candidates_per_round < 1:
         raise ConfigError("loop.candidates_per_round: must be a positive integer")
@@ -108,16 +137,18 @@ def _resolve(raw: dict, path: Path) -> dict:
         raise ConfigError("eval.commands: required non-empty list of strings")
     eval_commands = [str(c) for c in eval_commands]
 
-    # metrics: declares the structured key=value lines the harness parses out
-    # of eval output (NOT the judger — the judger only interprets). Two roles
-    # only, both project-agnostic: `objective` (the thing being optimized +
-    # its direction) and `gates` (pass/fail keys that veto a round). The harness
-    # owns these numbers and selects `best` by the objective among gate-pass,
-    # risk-not-high rounds. REQUIRED: without it the judger would have to read
-    # numbers out of prose (known to hallucinate — see memory
-    # simpleloop-judger-prior-round-compare) and best selection would degrade to
-    # the judger's subjective score. No noise_floor / reps — deferred until a
-    # run proves they're needed.
+    eval_timeout = eval_block.get("timeout_seconds", 600)
+    if not isinstance(eval_timeout, int) or eval_timeout < 1:
+        raise ConfigError("eval.timeout_seconds: must be a positive integer (seconds)")
+    eval_output_cap = eval_block.get("output_cap_chars", 16000)
+    if not isinstance(eval_output_cap, int) or eval_output_cap < 1000:
+        raise ConfigError("eval.output_cap_chars: must be an integer >= 1000")
+    eval_history_cap = eval_block.get("history_cap_chars", 6000)
+    if not isinstance(eval_history_cap, int) or eval_history_cap < 500:
+        raise ConfigError("eval.history_cap_chars: must be an integer >= 500")
+
+    # eval.metrics declares the key=value lines the harness parses (objective +
+    # gates); required so best selection never degrades to the judger's score.
     if "metrics" not in eval_block:
         raise ConfigError(
             "eval.metrics: required — declare the objective (and gates) the "
@@ -131,12 +162,16 @@ def _resolve(raw: dict, path: Path) -> dict:
         "frozen_paths": [str(g) for g in frozen],
         "max_rounds": int(max_rounds),
         "agent_timeout_seconds": int(agent_timeout),
+        "agent_max_output_tokens": int(agent_max_output_tokens),
         "candidates_per_round": int(candidates_per_round),
         "max_workers": int(max_workers),
         "proposer_recent_rounds": int(proposer_recent_rounds),
         "runtime_image": runtime_image,
         "runtime_binds": runtime_binds,
         "eval_commands": eval_commands,
+        "eval_timeout_seconds": int(eval_timeout),
+        "eval_output_cap_chars": int(eval_output_cap),
+        "eval_history_cap_chars": int(eval_history_cap),
         "metrics": metrics,
         "repo_path": str(repo),
         "baseline_ref": baseline_ref,
@@ -194,20 +229,8 @@ def _resolve_runtime(raw: object, config_path: Path) -> tuple[str, list[str]]:
 
 
 def _resolve_metrics(raw: object) -> dict:
-    """Validate the eval.metrics block. Returns a normalized dict.
-
-    Schema (two roles only — anything else is an error, matching the strict
-    unknown-top-level-key policy so a misspelled knob fails at load):
-      metrics:
-        objective:
-          key: SPEED_MS          # the key=value line to parse
-          lower_is_better: true  # required bool — direction is not guessable
-        gates:                   # optional; list of {key: str, description?: str}
-          - key: CORRECTNESS
-
-    The harness never hardcodes SPEED_MS / CORRECTNESS — these are config-declared,
-    so the next user's objective can be binary_size or coverage_p99.
-    """
+    """Validate the eval.metrics block. Returns a normalized dict:
+    {objective: {key, lower_is_better}, gates: [{key, description?}]}."""
     if not isinstance(raw, dict):
         raise ConfigError("eval.metrics: must be an object")
     unknown = set(raw) - {"objective", "gates"}

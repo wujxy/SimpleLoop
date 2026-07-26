@@ -1,46 +1,15 @@
-"""Judger: looks at the diff + eval output, grades the round, gives feedback.
+"""Judger: grades one round's diff + eval output and returns score/risk/feedback.
 
-The harness (not the LLM) computes the diff, runs the eval commands, AND parses
-the structured metrics out of eval output - these are deterministic and must
-not be delegated to the agent (they live in evals.py). The loop runs eval in
-the worktree (the real checked-out tree the executor committed) BEFORE calling
-the judger, parses `KEY=VALUE` lines into a metrics dict, then passes both the
-raw text and the parsed metrics in. The judger agent only judges: it sees goal
-+ proposal + diff + an authoritative metrics block (computed by the harness)
-and returns a score, a risk band, and feedback.
-
-Why the metrics block is harness-computed, not judger-computed: an LLM asked to
-extract numbers from prose and do arithmetic on them will hallucinate. A prior
-run invented a "baseline 874.50" that appears in no ground-truth source and
-propagated it across 12 rounds of feedback (see memory
-simpleloop-judger-prior-round-compare). The fix: the harness parses the real
-numbers, computes the deltas, and hands them to the judger as authoritative
-facts. The judger may cite them but must not introduce any number not in the
-block.
-
-The judger runs with cwd = the worktree, so it may `cat`/`grep` the actual
-committed source or re-run a command to verify a claim the eval headline makes.
-That is verification, not the primary evidence - the metrics block is the
-ground truth.
-
-When there's no SHA (gate rejected / no change), the judger is still called but
-shown the rejection reason instead of a diff, and asked for a low score + feedback
-telling the proposer to avoid that direction.
-
-Delivers: {"score": 0.0-1.0, "risk": "low"|"medium"|"high",
-"feedback": "...", "feedback_for_proposer": "..."}.
-`feedback` begins with a `LANDED_STATE: <already-implemented|not-implemented|
-gate-rejected>` tag so the proposer can self-audit whether a direction is already
-landed without guessing from prose. The judger does NOT propose the next
-direction - it gives effect + landing-state facts only; direction choice is the
-proposer's job.
-"""
+The harness computes the diff, runs eval, and parses/computes all metrics and
+deltas (an LLM asked to extract numbers from prose hallucinates them); the
+judger only interprets the authoritative FACTS block it is handed."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import Agent, normalize_free_text
+from ..harness import evals
 from ..harness.workspace import Workspace
 
 
@@ -97,17 +66,8 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
           label: str = "judger") -> Judgment:
     """Grade one round. Returns both full and proposer-facing feedback.
 
-    eval_block is the harness-run eval output (run in the worktree before this
-    call). metrics/prior_metrics/baseline_metrics are the harness-parsed
-    key=value dicts for this round / the prior round / the baseline commit,
-    paired with metrics_schema (the config-declared objective+gates) so the
-    harness can compute the authoritative deltas the judger cites.
-
-    The judger does NOT run eval, parse numbers, or compute deltas - all of
-    that is harness-owned. Empty eval_block / empty metrics means no commit was
-    produced this round (eval only runs on a committed candidate). See the
-    hallucination note in the module docstring.
-    """
+    All metrics/deltas passed in are harness-parsed; an empty eval_block means
+    no commit was produced this round."""
     if sha is not None:
         diff = workspace.diff(parent_sha, sha)
     else:
@@ -128,11 +88,8 @@ def _build_prompt(goal: str, proposal: str, diff: str, eval_block: str,
                   metrics: dict | None, prior_metrics: dict | None,
                   baseline_metrics: dict | None,
                   metrics_schema: dict | None) -> str:
-    # ---- the authoritative FACTS block (harness-computed) -------------------
-    # Replaces the old approach of handing the judger raw prior/baseline eval
-    # TEXT and asking it to read the number out - that's where the 874.50
-    # hallucination came from. Now the harness parses the numbers and computes
-    # the deltas; the judger cites them by name and does no extraction/arithmetic.
+    # The authoritative FACTS block is harness-computed; the judger cites its
+    # numbers by name and does no extraction/arithmetic.
     facts_block = ""
     facts_guidance = ""
     if metrics_schema and (metrics or prior_metrics or baseline_metrics):
@@ -260,13 +217,12 @@ def _fmt_val(v) -> str:
 
 def _delta_line(key: str, axis: str, this, other, lower_is_better: bool) -> str:
     """'Delta vs prior:   SPEED_MS -30.5%  (improvement)'."""
-    if not isinstance(this, (int, float)) or not isinstance(other, (int, float)) or other == 0:
+    delta = evals.objective_delta(this, other, lower_is_better)
+    if delta is None:
         return f"  Delta vs {axis:<8}: {key} unknown (prior value missing or zero)"
-    pct = (this - other) / other * 100.0
-    improved = (pct < 0) if lower_is_better else (pct > 0)
+    pct, improved = delta
     tag = "improvement" if improved else ("regression" if pct != 0 else "no change")
-    sign = f"{pct:+.1f}%"
-    return f"  Delta vs {axis:<8}: {key} {sign}  ({tag})"
+    return f"  Delta vs {axis:<8}: {key} {pct:+.1f}%  ({tag})"
 
 
 def _parse(data: dict, *, label: str = "judger") -> Judgment:
@@ -317,5 +273,3 @@ def _parse(data: dict, *, label: str = "judger") -> Judgment:
             field="feedback_for_proposer",
         ),
     )
-
-

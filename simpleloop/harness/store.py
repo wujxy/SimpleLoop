@@ -1,35 +1,9 @@
-"""History store: append-only JSONL of one generation record per round.
+"""History store: append-only JSONL, one generation record per round.
 
-Each generation records {round, parent_sha, selected_candidate, selected_sha,
-candidates: [...], reflection, telemetry} plus selected-candidate convenience
-fields (proposal, score, risk, feedback, base_sha, ...). The best commit is
-selected by the HARNESS, by the real objective metric — NOT by the judger's
-subjective 0-1 score. This is the fix for the "best by score" problem surfaced
-in the 12-round OMILRECV2 run, where the highest-score round (r5, 0.88, 571ms)
-locked out the fastest correct commit (r10, 0.85, 321ms): once the harness owns
-the real speed (parsed from eval output), best selection becomes "among
-gate-pass + risk-not-high rounds, take the best objective" — score demotes to a
-quality signal, not a ranking number.
-
-Best selection rule (metrics_schema is always configured — eval.metrics is a
-required config block; there is deliberately no score-based fallback):
-  eligible = candidates where every declared gate metric is True (PASS) AND
-             judger-risk != "high" AND the objective metric is present+numeric.
-  best = the eligible candidate with the best objective (min if lower_is_better,
-         else max). First such candidate wins ties.
-A failed-gate or high-risk candidate is never best, even if its objective is
-best — this is what keeps a latent-risk flag (e.g. r5's MODE-keyed cache
-validity) from being the chosen ship commit when a safer later round is nearly
-as fast.
-
-eval_block is the raw harness-run eval output for the round (capped), stored so
-the loop can feed the prior round's eval + the baseline eval to the next round's
-judger as explicit comparison axes. metrics is the harness-parsed key=value dict
-(the authoritative numbers); the raw text is kept for the record and for the
-judger to verify a specific claim, but the parsed metrics are what the judger
-cites and what best selection uses.
-
-No separate event/artifact/execution stores — one JSONL covers everything.
+The best commit is selected by the HARNESS from the real objective metric —
+never by the judger's subjective score: among candidates where every declared
+gate is True, risk != "high" and the objective is numeric, take the best
+objective value (min if lower_is_better, else max; judger score breaks ties).
 """
 from __future__ import annotations
 
@@ -38,22 +12,57 @@ from pathlib import Path
 
 from . import memory as memory_mod
 
-# Cap the eval_block stored per round. The live eval_block fed to the judger is
-# capped separately (run_eval's _OUT_CAP); this cap just keeps history.jsonl from
-# ballooning when eval is verbose. 6000 chars is plenty for sl_eval's ~5KB output
-# plus headroom, and the judger only needs the result lines (CORRECTNESS=/SPEED_MS=).
-_HIST_EVAL_CAP = 6000
+def eligible(candidate: dict, metrics_schema: dict) -> bool:
+    """Shared winner/best rule: committed, risk not high, all declared gates
+    True, and a numeric objective value."""
+    if not candidate.get("sha"):
+        return False
+    if str(candidate.get("risk", "high")).lower() == "high":
+        return False
+    metrics = candidate.get("metrics") or {}
+    if not all(metrics.get(g["key"]) is True
+               for g in metrics_schema.get("gates", [])):
+        return False
+    return isinstance(metrics.get(metrics_schema["objective"]["key"]),
+                      (int, float))
+
+
+def best_candidate(rounds: list[dict], metrics_schema: dict) -> dict | None:
+    """The eligible candidate with the best objective over a full history.
+
+    Returns the candidate row (with its "round" attached) or None. Judger
+    score breaks objective ties; used by both Store best tracking and
+    `simpleloop export`.
+    """
+    obj = metrics_schema["objective"]
+    obj_key = obj["key"]
+    lower = obj["lower_is_better"]
+    best: dict | None = None
+    for r in _iter_candidates(rounds):
+        if not eligible(r, metrics_schema):
+            continue
+        if best is None:
+            best = r
+            continue
+        ov, bv = r["metrics"][obj_key], best["metrics"][obj_key]
+        better = (ov < bv) if lower else (ov > bv)
+        if ov == bv:
+            better = (r.get("score") or -1.0) > (best.get("score") or -1.0)
+        if better:
+            best = r
+    return best
 
 
 class Store:
-    def __init__(self, run_dir: Path, metrics_schema: dict):
+    def __init__(self, run_dir: Path, metrics_schema: dict,
+                 history_eval_cap: int = 6000):
         self.run_dir = Path(run_dir)
         self.path = self.run_dir / "history.jsonl"
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        # metrics_schema: {"objective": {key, lower_is_better}, "gates": [{key}]}.
-        # Always configured (eval.metrics is required). Set once at loop start;
-        # drives best selection.
         self.metrics_schema = metrics_schema
+        # Cap the eval_block stored per round so history.jsonl doesn't balloon;
+        # the live eval_block fed to the judger is capped separately in run_eval.
+        self.history_eval_cap = history_eval_cap
         self.best_score: float = -1.0           # judger quality number (report only)
         self.best_sha: str | None = None        # harness-selected best commit
         self.best_round: int | None = None
@@ -82,7 +91,7 @@ class Store:
                 "decision": c.get("decision", ""),
                 "feedback": c.get("feedback", ""),
                 "feedback_for_proposer": c.get("feedback_for_proposer", ""),
-                "eval_block": (c.get("eval_block") or "")[:_HIST_EVAL_CAP],
+                "eval_block": (c.get("eval_block") or "")[:self.history_eval_cap],
                 "metrics": c.get("metrics") or {},
                 "changed_paths": c.get("changed_paths") or [],
                 "accepted": bool(c.get("accepted")),
@@ -118,54 +127,17 @@ class Store:
         self._recompute_best()
 
     def _recompute_best(self) -> None:
-        """Recompute the metric-based best over the full history.
-
-        Done from scratch each append (cheap for tens-of-rounds histories) so
-        that a rule change never leaves stale best state.
-        """
-        rounds = self.history()
-        if not rounds:
+        """Recompute the metric-based best over the full history (from scratch
+        each append, so a rule change never leaves stale best state)."""
+        best = best_candidate(self.history(), self.metrics_schema)
+        if best is None:
             return
-        candidates = list(_iter_candidates(rounds))
-        obj = self.metrics_schema["objective"]
-        obj_key = obj["key"]
-        lower = obj["lower_is_better"]
-        gate_keys = [g["key"] for g in self.metrics_schema.get("gates", [])]
-
-        best = None  # (round, sha, obj_value)
-        for r in candidates:
-            sha = r.get("sha")
-            if not sha:
-                continue
-            m = r.get("metrics") or {}
-            # gate-pass: every declared gate must be True (present + PASS).
-            if not all(m.get(gk) is True for gk in gate_keys):
-                continue
-            # risk not high
-            if str(r.get("risk", "high")).lower() == "high":
-                continue
-            # objective present + numeric
-            ov = m.get(obj_key)
-            if not isinstance(ov, (int, float)):
-                continue
-            if best is None:
-                best = (r["round"], sha, ov, r.get("candidate"), r.get("score") or -1.0)
-                continue
-            better = (ov < best[2]) if lower else (ov > best[2])
-            tied = ov == best[2]
-            if tied:
-                better = (r.get("score") or -1.0) > best[4]
-            if better:
-                best = (r["round"], sha, ov, r.get("candidate"), r.get("score") or -1.0)
-        if best is not None:
-            self.best_sha = best[1]
-            self.best_round = best[0]
-            self.best_candidate = best[3]
-            # keep best_score as the judger score exposed by the run summary
-            rec = next((r for r in candidates
-                        if r["round"] == best[0] and r.get("sha") == best[1]), None)
-            if rec and isinstance(rec.get("score"), (int, float)):
-                self.best_score = rec["score"]
+        self.best_sha = best["sha"]
+        self.best_round = best["round"]
+        self.best_candidate = best.get("candidate")
+        # keep best_score as the judger score exposed by the run summary
+        if isinstance(best.get("score"), (int, float)):
+            self.best_score = best["score"]
 
 
 

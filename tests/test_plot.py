@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import importlib.util
 import math
+from pathlib import Path
 
 import pytest
 
 from simpleloop import loop as loop_mod
 from simpleloop.reporting import plot as plot_mod
 from simpleloop.roles.judger import _parse as parse_judgment
-from simpleloop.reporting.plot import build_series, write_detail_pngs
+from simpleloop.reporting.plot import build_series
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry
+
+# The nine detail images are drawn by the offline script, not the package.
+_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plot_details.py"
+_spec = importlib.util.spec_from_file_location("plot_details", _SCRIPT)
+plot_details = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(plot_details)
+write_detail_pngs = plot_details.write_detail_pngs
 
 
 def _single_candidate_record(round_id: int, *, score, metrics,
@@ -561,14 +570,14 @@ def test_one_detail_failure_preserves_old_file_and_other_outputs(
 ):
     failed = tmp_path / "progress-score-vs-round.png"
     failed.write_bytes(b"previous")
-    real_render = plot_mod._render_detail
+    real_render = plot_details._render_detail
 
     def fail_one(series, y_kind, x_kind, output):
         if y_kind == "score" and x_kind == "round":
             raise RuntimeError("boom")
         return real_render(series, y_kind, x_kind, output)
 
-    monkeypatch.setattr(plot_mod, "_render_detail", fail_one)
+    monkeypatch.setattr(plot_details, "_render_detail", fail_one)
 
     outputs = write_detail_pngs(tmp_path, HISTORY, SCHEMA, CONTEXT)
 
@@ -695,7 +704,7 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
 
 # ---- offline plotting entry: simpleloop plot ----
 
-def test_plot_command_redraws_overview_and_details_offline(tmp_path, capsys):
+def test_plot_command_redraws_overview_offline(tmp_path, capsys):
     import json
     import yaml
 
@@ -747,9 +756,16 @@ def test_plot_command_redraws_overview_and_details_offline(tmp_path, capsys):
     ])
 
     written = {p.name for p in run_dir.glob("progress*.png")}
-    assert written == {"progress.png"} | DETAIL_OUTPUTS
+    assert written == {"progress.png"}
     out = capsys.readouterr().out
-    assert out.count("Wrote ") == 10
+    assert out.count("Wrote ") == 1
+
+    # the offline script draws the nine detail images on top
+    plot_details.main([
+        "--config", str(config_path), "--run-dir", str(run_dir),
+    ])
+    written = {p.name for p in run_dir.glob("progress*.png")}
+    assert written == {"progress.png"} | DETAIL_OUTPUTS
 
 
 def test_plot_command_requires_existing_history(tmp_path):

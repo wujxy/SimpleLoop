@@ -67,18 +67,38 @@ def main(argv: list[str] | None = None) -> None:
 
     plot_parser = sub.add_parser(
         "plot",
-        help="Redraw a run's progress images offline (overview + nine "
-             "detail plots). The loop only maintains the 3x3 overview at "
-             "run time; use this to get the per-panel detail images.",
+        help="Redraw a run's 3x3 overview image offline. For the nine "
+             "single-panel detail images use scripts/plot_details.py.",
     )
     plot_parser.add_argument(
-        "--config", required=True,
-        help="The task config the run used (source of eval.metrics — the "
-             "objective key/direction is not stored in the run dir).",
+        "--config",
+        help="The task config the run used (source of eval.metrics). Optional: "
+             "defaults to the config.resolved.json snapshot in the run dir.",
     )
     plot_parser.add_argument(
         "--run-dir", required=True,
         help="The run directory holding history.jsonl / telemetry.json.",
+    )
+
+    export_parser = sub.add_parser(
+        "export",
+        help="Export a run's winning commit: diff + bundle + EXPORT.md into "
+             "run_dir/export (and optionally a branch in the source repo).",
+    )
+    export_parser.add_argument(
+        "--run-dir", required=True,
+        help="The run directory holding repo/, history.jsonl and "
+             "config.resolved.json.",
+    )
+    export_parser.add_argument(
+        "--what", choices=("best", "head"), default="best",
+        help="best = the harness-selected best candidate (default); "
+             "head = the end of the cumulative accepted chain.",
+    )
+    export_parser.add_argument(
+        "--to-branch",
+        help="Also push the exported sha into the SOURCE repo as this new "
+             "branch (refused if the branch already exists).",
     )
 
     memory_parser = sub.add_parser(
@@ -109,13 +129,35 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Built image: {output}")
         return
 
-    if args.command == "plot":
+    if args.command == "export":
+        from .harness import export as export_mod
         try:
-            cfg = config_mod.load(args.config)
+            info = export_mod.export_run(
+                args.run_dir, what=args.what, to_branch=args.to_branch)
+        except (export_mod.ExportError, config_mod.ConfigError, ValueError) as exc:
+            print(f"Export error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        obj = info["objective_key"]
+        print(f"Exported {info['what']}: {info['sha']}")
+        if info["objective"] is not None:
+            baseline = (f" (baseline: {info['baseline_objective']})"
+                        if info["baseline_objective"] is not None else "")
+            print(f"  {obj} = {info['objective']}{baseline}")
+        print(f"  diff:   {info['diff']}")
+        print(f"  bundle: {info['bundle']}")
+        print(f"  notes:  {info['readme']}")
+        if info["branch"]:
+            print(f"  branch: {info['branch']} -> {info['source_repo']}")
+        return
+
+    if args.command == "plot":
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        try:
+            cfg = (config_mod.load(args.config) if args.config
+                   else config_mod.load_resolved(run_dir))
         except config_mod.ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             raise SystemExit(1)
-        run_dir = Path(args.run_dir).expanduser().resolve()
         history_path = run_dir / "history.jsonl"
         if not history_path.exists():
             print(f"Error: no history.jsonl at {run_dir}", file=sys.stderr)
@@ -126,18 +168,12 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         plot_context = telemetry_mod.load_plot_context(run_dir)
-        outputs = []
         overview = plot_mod.write_progress_png(
             run_dir, history, cfg["metrics"], plot_context)
-        if overview is not None:
-            outputs.append(overview)
-        outputs.extend(plot_mod.write_detail_pngs(
-            run_dir, history, cfg["metrics"], plot_context))
-        if not outputs:
+        if overview is None:
             print("Error: no image could be written", file=sys.stderr)
             raise SystemExit(1)
-        for path in outputs:
-            print(f"Wrote {path}")
+        print(f"Wrote {overview}")
         return
 
     if args.command == "memory":
@@ -190,6 +226,9 @@ def main(argv: list[str] | None = None) -> None:
         except config_mod.ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             raise SystemExit(1)
+        except loop.RunLockError as exc:
+            print(f"Lock error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
         except RuntimePreflightError as exc:
             print(f"Runtime error: {exc}", file=sys.stderr)
             raise SystemExit(1)
@@ -197,8 +236,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Baseline error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         except ValueError as exc:
-            # bad --proposals file (wrong shape / empty entry) or a static batch
-            # that is empty — surface it clearly, do not start a half-run.
+            # bad --proposals file or empty static batch — do not start a half-run.
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         print(f"\nBest: {summary['best_sha']} (score {summary['best_score']:.2f}) "

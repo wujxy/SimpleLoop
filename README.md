@@ -55,11 +55,13 @@ Each run:
 - writes `history.jsonl`, `insights.jsonl`, `telemetry.json`, and the 3×3
   `progress.png` overview (refreshed after every round).
 
-The nine single-panel detail images are drawn offline, from the persisted run
-artifacts, so a live run never spends time redrawing them:
+Offline replotting: `simpleloop plot` redraws the 3×3 overview from the
+persisted run artifacts; the nine single-panel detail images are drawn by an
+external script so a live run never spends time on them:
 
 ```bash
 simpleloop plot --config examples/task.yaml --run-dir ./runs/001
+python scripts/plot_details.py --config examples/task.yaml --run-dir ./runs/001
 ```
 
 Trace any run's commits with `git -C runs/001/repo log --oneline`. Inspect one
@@ -150,7 +152,7 @@ boundary, `reporting/` is observability.
 | `container/runtime.py` | mandatory Apptainer argv, environment policy, binds, preflight |
 | `container/image.py` | `apptainer build --fakeroot` shortcut |
 | `reporting/telemetry.py` | baseline, active worktime, and processed-token state |
-| `reporting/plot.py` | 3×3 overview (loop-refreshed) + nine detail plots (`simpleloop plot`) |
+| `reporting/plot.py` | 3×3 overview (loop-refreshed; details via `scripts/plot_details.py`) |
 
 **Commit chain:** rounds link — round 0 forks `baseline_ref`, round n forks the
 last accepted round's SHA (a round with no accepted winner leaves the chain in
