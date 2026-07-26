@@ -41,7 +41,7 @@ class PlotSeries:
     lower_is_better: bool | None
     rounds: list[int]
 
-    # Preserve the small public transformation surface used by existing callers.
+    # Convenience views over the observations; exercised by the plot tests.
     @property
     def score_points(self) -> list[tuple[int, float]]:
         return [

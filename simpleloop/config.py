@@ -9,7 +9,7 @@ Minimal schema:
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
   loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
   loop.max_workers: int              (optional, default 1; candidate concurrency)
-loop.proposer_recent_rounds: int   (optional, default 3; rounds of history fed to proposer)
+  loop.proposer_recent_rounds: int   (optional, default 6; rounds of history fed to proposer)
   runtime.image: path                (required; readable SIF image)
   runtime.binds: [absolute dir]      (optional, default [])
   eval.commands: [str]                (optional; omit -> judger is diff-only)

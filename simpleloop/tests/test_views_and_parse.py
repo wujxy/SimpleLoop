@@ -3,7 +3,6 @@
 These do NOT spawn the claude agent — they test the pure pieces:
   - views.for_proposer projects sha/metrics/changed_paths (landing-state signals)
     while still excluding eval_block
-  - views.for_executor / for_judger carry only their role's fields
   - judger._parse handles the four-field contract + the missing-report fallback
     (LANDED_STATE prefix is a feedback-string convention, not a parsed field)
   - Store.append persists both feedback fields + changed_paths
@@ -118,7 +117,7 @@ def test_for_proposer_preserves_order():
                 "metrics": {}, "changed_paths": []}
                for r in range(5)]
     out = views.for_proposer(history)
-    assert [row["round"] for row in out] == [2, 3, 4]
+    assert [row["round"] for row in out] == [0, 1, 2, 3, 4]
 
 
 def _serial_history_record(round_id: int, proposal: str) -> dict:
@@ -176,9 +175,9 @@ def test_for_proposer_recent_window_uses_position_and_full_proposals():
 
     projected = views.for_proposer(history)
 
-    assert [row["round"] for row in projected] == round_ids[4:]
+    assert [row["round"] for row in projected] == round_ids[1:]
     assert [row["proposal"] for row in projected] == [
-        f"proposal-{round_id}" for round_id in round_ids[4:]
+        f"proposal-{round_id}" for round_id in round_ids[1:]
     ]
     assert all("proposal_head" not in row for row in projected)
 
@@ -192,7 +191,7 @@ def test_for_proposer_recent_window_does_not_mutate_history():
 
     projected = views.for_proposer(history)
 
-    assert [row["round"] for row in projected] == [4, 5, 6]
+    assert [row["round"] for row in projected] == [1, 2, 3, 4, 5, 6]
     assert history == original
 
 
@@ -212,7 +211,7 @@ def test_for_proposer_drops_old_generation_and_keeps_recent_candidates():
 
     projected = views.for_proposer(history)
 
-    assert [row["round"] for row in projected] == [50, 60, 100]
+    assert [row["round"] for row in projected] == [20, 30, 40, 50, 60, 100]
     recent_candidates = projected[-1]["candidates"]
     assert [c["proposal"] for c in recent_candidates] == [
         "recent candidate zero",
@@ -220,27 +219,6 @@ def test_for_proposer_drops_old_generation_and_keeps_recent_candidates():
     ]
     assert all("proposal_head" not in c for c in recent_candidates)
     assert all("eval_block" not in c for c in recent_candidates)
-
-
-# --- views.for_executor / for_judger: role isolation ---
-
-def test_for_executor_has_no_history():
-    """The executor sees only the current proposal + safety + goal anchor."""
-    out = views.for_executor("do X", "goal", ["a.py"], ["b.py"])
-    assert out == {"proposal": "do X", "goal": "goal",
-                   "editable": ["a.py"], "frozen": ["b.py"]}
-    assert "history" not in out
-
-
-def test_for_judger_carries_eval_axes_not_history():
-    """The judger sees the parsed-metrics axes (passed by the loop), not other rounds."""
-    out = views.for_judger(goal="g", proposal="p", diff="d", eval_block="e",
-                           metrics={"SPEED_MS": 100.0}, prior_metrics=None,
-                           baseline_metrics={"SPEED_MS": 945.0}, metrics_schema=None)
-    assert out == {"goal": "g", "proposal": "p", "diff": "d", "eval_block": "e",
-                   "metrics": {"SPEED_MS": 100.0}, "prior_metrics": None,
-                   "baseline_metrics": {"SPEED_MS": 945.0}, "metrics_schema": None}
-    assert "history" not in out
 
 
 # --- judger._parse: four-field contract + fallback (risk now required) ---

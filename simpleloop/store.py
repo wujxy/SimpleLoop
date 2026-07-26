@@ -37,6 +37,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import memory as memory_mod
+
 # Cap the eval_block stored per round. The live eval_block fed to the judger is
 # capped separately (run_eval's _OUT_CAP); this cap just keeps history.jsonl from
 # ballooning when eval is verbose. 6000 chars is plenty for sl_eval's ~5KB output
@@ -118,10 +120,7 @@ class Store:
 
     def history(self) -> list[dict]:
         """Read all rounds back (for the proposer's prompt)."""
-        if not self.path.exists():
-            return []
-        with self.path.open(encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+        return memory_mod.read_history(self.path)
 
     def append_generation(self, round_id: int, *, parent_sha: str,
                           selected_candidate: int | None,
@@ -176,17 +175,6 @@ class Store:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._recompute_best()
-
-    def last_eval_block(self) -> str | None:
-        """The most recent round's eval_block, or None if no rounds yet.
-
-        The loop uses this as the 'prior round' comparison axis for the next
-        round's judger (round 0's prior falls back to the baseline eval).
-        """
-        rounds = self.history()
-        if not rounds:
-            return None
-        return rounds[-1].get("eval_block") or None
 
     def _recompute_best(self) -> None:
         """Recompute best over the full history.

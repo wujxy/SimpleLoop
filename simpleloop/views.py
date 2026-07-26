@@ -4,13 +4,14 @@ The store holds the full raw record per round:
     {round, proposal, sha, score, risk, feedback, feedback_for_proposer,
      eval_block, metrics, changed_paths}
 
-Each role sees only the fields it should, via these projections. The store stays
+The proposer sees only the fields it should, via `for_proposer`; the executor
+and judger build their prompts from loop-passed locals directly. The store stays
 the single source of truth (full record, for the judger's prior/baseline eval
-axis); projection happens at prompt-build time in each role.
+axis); projection happens at prompt-build time.
 
 Why projections instead of a central Context object: SimpleLoop's data model is
 flat — one record per round, serial single-parent chain. A Context pool class
-would wrap a list[dict] with no added structure. Three pure functions are enough
+would wrap a list[dict] with no added structure. Pure functions are enough
 and leave explicit, auditable seams for future mechanisms.
 
 The proposer projection keeps only the `recent_rounds` most recent round
@@ -146,39 +147,3 @@ def gate_block(metrics_schema: dict | None) -> str:
     return "\n".join(f"- {g['key']}: {g['description']}" for g in described)
 
 
-def for_executor(proposal: str, goal: str, editable: list[str],
-                 frozen: list[str]) -> dict:
-    """What the executor sees: the proposal + safety + a goal anchor. No history.
-
-    The executor implements one direction; it must not be influenced by prior
-    rounds' outcomes (that would tempt it to "fix" earlier attempts or second-guess
-    the proposal). It gets only what the current round's proposal needs.
-    """
-    return {"proposal": proposal, "goal": goal,
-            "editable": editable, "frozen": frozen}
-
-
-def for_judger(*, goal: str, proposal: str, diff: str, eval_block: str,
-               metrics: dict | None, prior_metrics: dict | None,
-               baseline_metrics: dict | None,
-               metrics_schema: dict | None) -> dict:
-    """What the judger sees.
-
-    The parsed metrics (this/prior/baseline) + the declared schema are passed in
-    by the loop as locals — they do NOT come from store.history() (which would
-    also drag in the proposer's view of other rounds). The judger is the one role
-    that legitimately sees raw eval output, but only to verify a specific claim;
-    the parsed metrics block is the authoritative numbers it cites (the harness
-    parses + computes deltas so the judger never reads numbers out of prose,
-    which hallucinated a baseline number across 12 rounds before).
-    """
-    return {
-        "goal": goal,
-        "proposal": proposal,
-        "diff": diff,
-        "eval_block": eval_block,
-        "metrics": metrics,
-        "prior_metrics": prior_metrics,
-        "baseline_metrics": baseline_metrics,
-        "metrics_schema": metrics_schema,
-    }

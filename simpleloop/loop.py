@@ -169,26 +169,22 @@ def run(config_path: str | Path, run_dir: str | Path,
         parent_sha, last_accepted = _resume_chain(
             done, workspace.baseline_sha(), metrics_schema)
         prior_metrics = (last_accepted or {}).get("metrics") or {}
-        prior_eval_block = (last_accepted or {}).get("eval_block") or ""
         print(f"[{stamp()}] --continue: resuming from round {start_round + 1} "
               f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
               flush=True)
         # baseline eval still runs (judger's vs-baseline axis); its metrics are
         # only used if start_round == 0, which continue mode excludes, but the
         # judger may cite baseline numbers so keep them available.
-        baseline_eval_block, baseline_metrics = _eval_baseline(
+        _, baseline_metrics = _eval_baseline(
             workspace, cfg, workspace.baseline_sha(), runtime)
         if last_accepted is None:
             prior_metrics = baseline_metrics
-            prior_eval_block = baseline_eval_block or ""
     else:
-        baseline_eval_block, baseline_metrics = _eval_baseline(
+        _, baseline_metrics = _eval_baseline(
             workspace, cfg, parent_sha, runtime)
         telemetry.set_baseline(baseline_metrics)
-        # round 0's "prior round" is the baseline. Updated to each round's eval after
-        # that round is recorded. Both the raw text (for the record) and the parsed
-        # metrics (for the FACTS block) are threaded forward.
-        prior_eval_block = baseline_eval_block
+        # round 0's "prior round" is the baseline. Updated to each accepted
+        # round's parsed metrics (the judger FACTS block's vs-prior axis).
         prior_metrics = baseline_metrics
 
     for round_id in range(start_round, n_rounds):
@@ -262,7 +258,6 @@ def run(config_path: str | Path, run_dir: str | Path,
                 print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
                       f"{selected_sha[:10]}", flush=True)
                 prior_metrics = winner.get("metrics") or prior_metrics
-                prior_eval_block = winner.get("eval_block") or prior_eval_block
             else:
                 print(f"[{stamp()}] no eligible candidate improved the incumbent; "
                       f"accepted base stays {parent_sha[:10]}", flush=True)
@@ -354,7 +349,6 @@ def run(config_path: str | Path, run_dir: str | Path,
                             accepted=accepted, base_sha=next_base_sha,
                             telemetry_tracker=telemetry)
             if accepted:
-                prior_eval_block = eval_block or prior_eval_block
                 prior_metrics = eval_metrics or prior_metrics
             parent_sha = next_base_sha
             continue
@@ -388,7 +382,6 @@ def run(config_path: str | Path, run_dir: str | Path,
                      telemetry=telemetry.snapshot(persist=True))
         _refresh_progress_plot(store, telemetry.plot_context())
         if accepted:
-            prior_eval_block = eval_block or prior_eval_block
             prior_metrics = eval_metrics or prior_metrics
         parent_sha = next_base_sha
 

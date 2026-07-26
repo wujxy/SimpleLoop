@@ -10,10 +10,6 @@ Design (see design overview):
     if a SHA was produced; a gate-rejected/empty round leaves the chain in place).
   - Run-to-run isolation is physical: different run = different repo, so an agent
     rummaging in git only ever sees its own run's chain.
-
-This module also owns the runtime environment (cwd/env) the agent runs in — for v1
-that is just the worktree path and a passthrough env. Kept here rather than a
-separate sandbox module since the two are set up together.
 """
 from __future__ import annotations
 
@@ -126,12 +122,6 @@ class Workspace:
     def diff(self, parent_sha: str, sha: str) -> str:
         """Unified diff between two commits (the judger's core evidence)."""
         return self._git(self.repo, "diff", f"{parent_sha}..{sha}")
-
-    # ---- runtime env (absorbed sandbox responsibility) ----
-
-    def agent_env(self) -> dict[str, str]:
-        """Env for the agent subprocess. v1: passthrough host env."""
-        return dict(os.environ)
 
     # ---- git helper ----
 
