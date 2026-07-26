@@ -5,6 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from simpleloop import loop as loop_mod
+from simpleloop.loop import RunContext, _run_candidates
+from simpleloop.harness.store import Store
+from simpleloop.roles.proposer import Proposal
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
 
 
@@ -127,3 +131,163 @@ def test_missing_resume_state_keeps_resource_axes_unavailable(tmp_path):
         "worktime_seconds": None,
         "processed_tokens": None,
     }
+
+
+# ---- loop wiring persists telemetry (merged from test_run_telemetry.py) ----
+
+def test_fresh_run_wires_agents_and_persists_fixed_baseline(
+    monkeypatch, tmp_path,
+):
+    run_dir = tmp_path / "run"
+    config = {
+        "goal": "make it faster",
+        "max_rounds": 0,
+        "candidates_per_round": 1,
+        "max_workers": 1,
+        "agent_timeout_seconds": 10,
+        "repo_path": tmp_path / "source",
+        "baseline_ref": "HEAD",
+        "editable_paths": ["src/**"],
+        "frozen_paths": [],
+        "eval_commands": ["eval"],
+        "metrics": {
+            "objective": {"key": "SPEED_MS", "lower_is_better": True},
+            "gates": [],
+        },
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [],
+    }
+    observers = []
+
+    class FakeRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            observers.append(kwargs.get("usage_observer"))
+
+    class FakeWorkspace:
+        def __init__(self, *, run_dir, **_kwargs):
+            self.repo = run_dir / "repo"
+
+        def setup(self):
+            self.repo.mkdir(parents=True, exist_ok=True)
+
+        def baseline_sha(self):
+            return "baseline"
+
+    monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
+    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
+    monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(
+        loop_mod,
+        "_eval_baseline",
+        lambda *_args: ("baseline eval", {"SPEED_MS": 100.0}),
+    )
+
+    loop_mod.run("config.yaml", run_dir)
+
+    assert len(observers) == 3
+    assert all(callable(observer) for observer in observers)
+    state = json.loads((run_dir / "telemetry.json").read_text())
+    assert state["baseline_metrics"] == {"SPEED_MS": 100.0}
+    assert state["baseline_telemetry"]["processed_tokens"] == 0
+
+    observers[0]({"input_tokens": 2, "output_tokens": 1})
+    updated = json.loads((run_dir / "telemetry.json").read_text())
+    assert updated["processed_tokens"] == 3
+
+
+# ---- store/candidate telemetry integration (merged from test_telemetry_integration.py) ----
+
+class SnapshotTracker:
+    def __init__(self):
+        self.value = 0
+        self.persist_flags = []
+
+    def snapshot(self, *, persist=False):
+        self.value += 1
+        self.persist_flags.append(persist)
+        return {
+            "worktime_seconds": float(self.value),
+            "processed_tokens": self.value * 10,
+        }
+
+    def plot_context(self):
+        return {}
+
+
+def test_store_persists_serial_telemetry(tmp_path):
+    store = Store(tmp_path)
+    snapshot = {"worktime_seconds": 12.5, "processed_tokens": 100}
+
+    store.append(
+        0,
+        "proposal",
+        "sha",
+        0.5,
+        "feedback",
+        telemetry=snapshot,
+    )
+
+    assert store.history()[0]["telemetry"] == snapshot
+
+
+def test_store_persists_candidate_and_generation_telemetry(tmp_path):
+    store = Store(tmp_path)
+    candidate_snapshot = {"worktime_seconds": 2.0, "processed_tokens": 10}
+    generation_snapshot = {"worktime_seconds": 3.0, "processed_tokens": 12}
+
+    store.append_generation(
+        0,
+        parent_sha="base",
+        selected_candidate=0,
+        selected_sha="sha",
+        candidates=[{
+            "candidate": 0,
+            "sha": "sha",
+            "telemetry": candidate_snapshot,
+        }],
+        telemetry=generation_snapshot,
+    )
+
+    row = store.history()[0]
+    assert row["telemetry"] == generation_snapshot
+    assert row["candidates"][0]["telemetry"] == candidate_snapshot
+
+
+def test_run_candidates_attaches_persisted_snapshot_after_each_worker(
+    monkeypatch,
+):
+    def fake_candidate(_ctx, candidate_id, proposal, *_args):
+        return {
+            "candidate": candidate_id,
+            "proposal": proposal.proposal,
+            "score": 0.5,
+        }
+
+    monkeypatch.setattr(loop_mod, "_run_one_candidate", fake_candidate)
+    tracker = SnapshotTracker()
+
+    ctx = RunContext(cfg={"max_workers": 2}, telemetry=tracker)
+    candidates = _run_candidates(
+        ctx,
+        [Proposal("p0"), Proposal("p1")],
+        0,
+        "base",
+        {},
+    )
+
+    assert {c["candidate"] for c in candidates} == {0, 1}
+    assert {
+        c["telemetry"]["worktime_seconds"] for c in candidates
+    } == {1.0, 2.0}
+    assert tracker.persist_flags == [True, True]
