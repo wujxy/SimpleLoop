@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from simpleloop import loop as loop_mod
-from simpleloop.store import Store
+from simpleloop.harness.store import Store
 
 
 def test_store_has_no_final_report_generator():

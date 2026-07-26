@@ -25,7 +25,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .runtime import ApptainerRuntime
+from ..container.runtime import ApptainerRuntime
 
 
 @dataclass(frozen=True)

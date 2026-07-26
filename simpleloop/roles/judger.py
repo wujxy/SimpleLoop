@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import Agent, normalize_free_text
-from .workspace import Workspace
+from ..harness.workspace import Workspace
 
 
 _STRUCTURED_TEXT_MARGIN = 500

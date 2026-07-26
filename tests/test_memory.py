@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from simpleloop import cli
-from simpleloop import memory
+from simpleloop.harness import memory
 
 
 def _parallel_history() -> list[dict]:

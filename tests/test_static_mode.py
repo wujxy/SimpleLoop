@@ -10,7 +10,7 @@ decision="static", and gate-only chain advance.
 from __future__ import annotations
 
 from simpleloop import loop as loop_mod
-from simpleloop.store import Store
+from simpleloop.harness.store import Store
 
 SCHEMA = {
     "objective": {"key": "SPEED_MS", "lower_is_better": True},

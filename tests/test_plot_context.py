@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from simpleloop import loop as loop_mod
-from simpleloop.store import Store
-from simpleloop.telemetry import RunTelemetry
+from simpleloop.harness.store import Store
+from simpleloop.reporting.telemetry import RunTelemetry
 
 
 SCHEMA = {

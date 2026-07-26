@@ -9,12 +9,12 @@ import yaml
 
 from simpleloop import config as config_mod
 from simpleloop import cli as cli_mod
-from simpleloop import evals as evals_mod
-from simpleloop import judger as judger_mod
+from simpleloop.harness import evals as evals_mod
+from simpleloop.roles import judger as judger_mod
 from simpleloop import loop as loop_mod
-from simpleloop import runtime as runtime_mod
-from simpleloop.evals import EvalResult
-from simpleloop.runtime import ApptainerRuntime, RuntimePreflightError
+from simpleloop.container import runtime as runtime_mod
+from simpleloop.harness.evals import EvalResult
+from simpleloop.container.runtime import ApptainerRuntime, RuntimePreflightError
 
 
 _MISSING = object()

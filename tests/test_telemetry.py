@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from simpleloop.telemetry import RunTelemetry, processed_tokens
+from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
 
 
 class Clock:
@@ -114,7 +114,7 @@ def test_persistence_failure_warns_without_losing_in_memory_state(
     def fail_replace(*_args):
         raise OSError("boom")
 
-    monkeypatch.setattr("simpleloop.telemetry.os.replace", fail_replace)
+    monkeypatch.setattr("simpleloop.reporting.telemetry.os.replace", fail_replace)
     tracker.record_usage({"input_tokens": 2, "output_tokens": 1})
 
     assert tracker.snapshot()["processed_tokens"] == 3

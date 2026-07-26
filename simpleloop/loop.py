@@ -34,19 +34,19 @@ from pathlib import Path
 
 import yaml
 
-from .agent import Agent, AgentError
+from .roles.agent import Agent, AgentError
 from . import config as config_mod
-from . import executor as executor_mod
-from . import evals
-from . import judger as judger_mod
-from . import memory as memory_mod
-from . import plot as plot_mod
-from . import proposer as proposer_mod
-from . import views
-from .store import Store
-from .telemetry import RunTelemetry
-from .runtime import ApptainerRuntime
-from .workspace import Workspace
+from .roles import executor as executor_mod
+from .harness import evals
+from .roles import judger as judger_mod
+from .harness import memory as memory_mod
+from .reporting import plot as plot_mod
+from .roles import proposer as proposer_mod
+from .harness import views
+from .harness.store import Store
+from .reporting.telemetry import RunTelemetry
+from .container.runtime import ApptainerRuntime
+from .harness.workspace import Workspace
 
 
 class BaselineAcceptanceError(RuntimeError):

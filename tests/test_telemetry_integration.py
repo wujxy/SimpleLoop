@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from simpleloop import loop as loop_mod
 from simpleloop.loop import RunContext, _run_candidates
-from simpleloop.proposer import Proposal
-from simpleloop.store import Store
+from simpleloop.roles.proposer import Proposal
+from simpleloop.harness.store import Store
 
 
 class SnapshotTracker:

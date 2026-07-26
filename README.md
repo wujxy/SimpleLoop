@@ -3,7 +3,7 @@
 A minimal LLM optimization loop: **proposer → executor → judger**, one
 generation per round, serial single-parent commit chain, no early stop.
 
-```
+```text
 user goal → proposer (reads history + insights, proposes N candidate directions)
           → executor (edits code in a worktree, delivers a commit SHA)   ┐ per
           → harness (computes diff + runs eval + parses metrics)         │ candidate
@@ -119,25 +119,30 @@ expose its objective, and pass every gate before the first proposer starts.
 
 ## Design
 
+The package is split by trust boundary: `roles/` holds the LLM roles (they
+think, they never own ground truth), `harness/` holds the deterministic
+machinery an LLM must not be trusted with, `container/` is the Apptainer
+boundary, `reporting/` is observability.
+
 | module | role |
-|---|---|
+| --- | --- |
 | `loop.py` | main loop: RunContext, generations, winner selection, chaining |
-| `runtime.py` | mandatory Apptainer argv, environment policy, binds, preflight |
-| `image.py` | `apptainer build --fakeroot` shortcut |
-| `agent.py` | containerized `claude -p` wrapper (timeout, JSON/no-JSON modes) |
-| `proposer.py` | goal+history+insights → N candidate directions (+ reflection) |
-| `executor.py` | proposal → agent edits → gate → harness commit → SHA |
-| `judger.py` | diff+metrics → `{"score","risk","feedback",...}` |
-| `evals.py` | harness-owned eval execution + `KEY=VALUE` metric parsing |
-| `gate.py` | pre-commit frozen/editable diff check (deterministic) |
-| `workspace.py` | repo clone, worktree, harness commit, diff |
 | `config.py` | read+validate task config |
-| `store.py` | history JSONL + harness-owned best selection |
-| `memory.py` | `r<round>c<candidate>` episode refs + insights JSONL |
-| `views.py` | per-role history projections (what the proposer may see) |
-| `telemetry.py` | baseline, active worktime, and processed-token state |
-| `plot.py` | 3×3 overview and nine detail progress plots |
 | `cli.py` | entry point (`run` / `validate` / `image build` / `memory show`) |
+| `roles/agent.py` | containerized `claude -p` wrapper (timeout, JSON/no-JSON modes) |
+| `roles/proposer.py` | goal+history+insights → N candidate directions (+ reflection) |
+| `roles/executor.py` | proposal → agent edits → gate → harness commit → SHA |
+| `roles/judger.py` | diff+metrics → `{"score","risk","feedback",...}` |
+| `harness/evals.py` | harness-owned eval execution + `KEY=VALUE` metric parsing |
+| `harness/gate.py` | pre-commit frozen/editable diff check (deterministic) |
+| `harness/workspace.py` | repo clone, worktree, harness commit, diff |
+| `harness/store.py` | history JSONL + harness-owned best selection |
+| `harness/memory.py` | `r<round>c<candidate>` episode refs + insights JSONL |
+| `harness/views.py` | per-role history projections (what the proposer may see) |
+| `container/runtime.py` | mandatory Apptainer argv, environment policy, binds, preflight |
+| `container/image.py` | `apptainer build --fakeroot` shortcut |
+| `reporting/telemetry.py` | baseline, active worktime, and processed-token state |
+| `reporting/plot.py` | 3×3 overview and nine detail progress plots |
 
 **Commit chain:** rounds link — round 0 forks `baseline_ref`, round n forks the
 last accepted round's SHA (a round with no accepted winner leaves the chain in

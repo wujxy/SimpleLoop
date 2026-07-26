@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .runtime import ApptainerRuntime
+from ..container.runtime import ApptainerRuntime
 
 
 class AgentError(RuntimeError):

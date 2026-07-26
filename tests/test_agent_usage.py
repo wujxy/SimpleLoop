@@ -4,8 +4,8 @@ import io
 import json
 from pathlib import Path
 
-from simpleloop import agent as agent_mod
-from simpleloop.agent import Agent, _decode_output
+from simpleloop.roles import agent as agent_mod
+from simpleloop.roles.agent import Agent, _decode_output
 
 
 class RecordingRuntime:

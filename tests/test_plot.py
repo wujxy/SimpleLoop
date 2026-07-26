@@ -3,10 +3,10 @@ from __future__ import annotations
 import math
 
 from simpleloop import loop as loop_mod
-from simpleloop import plot as plot_mod
-from simpleloop.judger import _parse as parse_judgment
-from simpleloop.plot import build_series
-from simpleloop.store import Store
+from simpleloop.reporting import plot as plot_mod
+from simpleloop.roles.judger import _parse as parse_judgment
+from simpleloop.reporting.plot import build_series
+from simpleloop.harness.store import Store
 
 
 SCHEMA = {

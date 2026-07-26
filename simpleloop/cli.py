@@ -11,9 +11,9 @@ from pathlib import Path
 
 from . import loop
 from . import config as config_mod
-from . import memory
-from .image import ImageBuildError, build_image
-from .runtime import RuntimePreflightError
+from .harness import memory
+from .container.image import ImageBuildError, build_image
+from .container.runtime import RuntimePreflightError
 
 
 def main(argv: list[str] | None = None) -> None:

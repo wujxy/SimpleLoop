@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import Agent
-from . import gate
-from .workspace import Workspace
+from ..harness import gate
+from ..harness.workspace import Workspace
 
 
 @dataclass

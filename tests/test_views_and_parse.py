@@ -7,7 +7,7 @@ These do NOT spawn the claude agent — they test the pure pieces:
     (LANDED_STATE prefix is a feedback-string convention, not a parsed field)
   - Store.append persists both feedback fields + changed_paths
 
-Run: python -m pytest simpleloop/tests/   (from SimpleLoop/)
+Run: python -m pytest tests/   (from SimpleLoop/)
 """
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ import pytest
 import yaml
 
 from simpleloop import config as config_mod
-from simpleloop import views
-from simpleloop.agent import normalize_free_text
-from simpleloop.judger import Judgment, _parse, _build_prompt, _judger_schema, judge
-from simpleloop.store import Store
+from simpleloop.harness import views
+from simpleloop.roles.agent import normalize_free_text
+from simpleloop.roles.judger import Judgment, _parse, _build_prompt, _judger_schema, judge
+from simpleloop.harness.store import Store
 
-EXAMPLES = Path(__file__).parents[2] / "examples"
+EXAMPLES = Path(__file__).parents[1] / "examples"
 
 
 def test_normalize_free_text_accepts_limit_without_warning(capsys):
@@ -557,7 +557,7 @@ def test_parse_batch_enforces_exact_count():
     into structure: the JSON Schema pins minItems=maxItems=N, and _parse_batch
     rejects a response whose proposals count != candidates_per_round. This is
     the structural anchor for the prose sentence that was deleted."""
-    from simpleloop.proposer import _parse_batch, ProposalBatch
+    from simpleloop.roles.proposer import _parse_batch, ProposalBatch
     one = {"family": "f", "decision": "continue", "proposal": "p"}
     two = [one, dict(one, family="g")]
     # right count passes

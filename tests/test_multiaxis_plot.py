@@ -4,8 +4,8 @@ import math
 
 import pytest
 
-from simpleloop import plot as plot_mod
-from simpleloop.plot import build_series, write_progress_pngs
+from simpleloop.reporting import plot as plot_mod
+from simpleloop.reporting.plot import build_series, write_progress_pngs
 
 
 SCHEMA = {

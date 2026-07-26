@@ -8,21 +8,21 @@ import yaml
 
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
-from simpleloop import memory as memory_mod
-from simpleloop import views
-from simpleloop.agent import Agent, AgentError, AgentResult
-from simpleloop.executor import ExecResult
-from simpleloop.evals import EvalResult
-from simpleloop.judger import Judgment, _parse as parse_judgment
+from simpleloop.harness import memory as memory_mod
+from simpleloop.harness import views
+from simpleloop.roles.agent import Agent, AgentError, AgentResult
+from simpleloop.roles.executor import ExecResult
+from simpleloop.harness.evals import EvalResult
+from simpleloop.roles.judger import Judgment, _parse as parse_judgment
 from simpleloop.loop import RunContext, _run_candidates, _select_winner
-from simpleloop.proposer import Proposal, ProposalBatch
-from simpleloop.proposer import _parse_batch
-from simpleloop.proposer import _proposer_schema
-from simpleloop.proposer import propose
-from simpleloop.store import Store
+from simpleloop.roles.proposer import Proposal, ProposalBatch
+from simpleloop.roles.proposer import _parse_batch
+from simpleloop.roles.proposer import _proposer_schema
+from simpleloop.roles.proposer import propose
+from simpleloop.harness.store import Store
 
 
-EXAMPLES = Path(__file__).parents[2] / "examples"
+EXAMPLES = Path(__file__).parents[1] / "examples"
 
 
 def _example_yaml(relative_path: str) -> dict:
