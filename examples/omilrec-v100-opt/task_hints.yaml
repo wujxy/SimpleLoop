@@ -2,18 +2,26 @@ kind: task
 
 task:
   goal: >
-    Optimize OMILREC v1.0.0 production runtime under OMILRECV2/src. The
-    authoritative baseline is 919.94892 ms/event: the median of three
-    probe-free, single-thread, 100-event measurements. Candidate ranking uses
-    probe-free SPEED_MS. FCN invokes the real production member at four stages
-    for four fixed events and requires exactly 16 finite unique results below
-    1e-13 relative error against v1.0.0 truth. E2E checks every one of 18 events
-    against v1.0.0 truth with 3D position <= 4 mm, energy <= 7 keV, t0 <= 10 ps,
-    and peSum <= 0.1 PE. Fixtures, input, reference, and map assets are SHA-256
-    pinned. Explore invariant hoisting, caching, SoA layout, index partitioning,
-    allocation reduction, and dead-work elimination. Arithmetic changes are
-    acceptable only when both gates pass. Never weaken or regenerate the gate
-    and never add an alternate likelihood implementation.
+    Optimize the OMILREC v1.0.0 production reconstruction under OMILRECV2/src
+    by minimizing probe-free SPEED_MS. OMILREC v1.0.0 is the sole source of
+    algorithm and numerical truth, and a candidate is usable only when
+    CONTRACT, FCN, CONSISTENCY, and EVAL_RESULT all pass. Explore structural
+    improvements such as invariant-work hoisting, repeated-value caching, SoA
+    or other data-layout changes, allocation reduction, precomputation, index
+    partitioning, and removal of demonstrably unused work. These suggestions
+    are not exhaustive: inspect the production code and propose new
+    code-grounded directions when justified.
+
+    Treat the FCN path as rounding-sensitive. Reordering or reassociating
+    reductions, changing floating-point types or casts, substituting nominally
+    equivalent mathematical expressions, or folding constants may change the
+    tested likelihood values. Prefer changes to fetching, layout, caching, and
+    invariant work that preserve the tested production results, but do not
+    assume the listed techniques are the only safe or useful directions.
+    Arithmetic changes elsewhere remain possible when every gate passes. Do
+    not weaken, regenerate, bypass, or replace the evaluator, fixtures,
+    references, thresholds, or build wiring, and do not introduce a second
+    likelihood implementation. Edit only the admitted source files.
 
 safety:
   editable_paths:
@@ -56,13 +64,35 @@ eval:
       lower_is_better: true
     gates:
       - key: CONTRACT
-        description: Single-source v1.0.0 gate contract passes.
+        description: >
+          Protects the measuring system itself: the FCN test must remain linked
+          directly to the production member, and the frozen numerical assets,
+          thresholds, and complete evaluator structure must remain intact.
+          Modifying, reducing, bypassing, or replacing any check, including
+          introducing a second likelihood implementation for testing, fails
+          this gate.
       - key: FCN
-        description: All 16 direct production-member FCN comparisons pass.
+        description: >
+          Evaluates the real production OMILRECV2::Calculate_EVLikelihood at
+          QMLE, TMLE, QTMLE, and ENERGY for four fixed events. It requires
+          exactly 16 finite unique results, each with relative error strictly
+          below 1e-13 against frozen v1.0.0 truth. Reordering or reassociating
+          reductions, changing floating-point types or casts, replacing
+          mathematical expressions with nominally equivalent forms, or folding
+          constants can change rounding and fail this gate.
       - key: CONSISTENCY
-        description: All 18 v1.0.0 E2E comparisons pass.
+        description: >
+          Requires all 18 reconstructed events to be finite and within the
+          v1.0.0 end-to-end limits: Euclidean 3D position <= 4 mm, energy
+          <= 7 keV, t0 <= 10 ps, and peSum <= 0.1 PE. Arithmetic and structural
+          changes are allowed only when every reconstructed result remains
+          within every limit.
       - key: EVAL_RESULT
-        description: Complete evaluation exits successfully.
+        description: >
+          Requires the complete evaluator to finish successfully: the
+          probe-enabled build and tests, the probe-free production rebuild, and
+          the benchmark. A build or test failure, crash, timeout, missing metric,
+          or incomplete evaluator execution fails this gate.
 
 source:
   path: ../../../omilrec-v100-gated

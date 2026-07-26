@@ -2,10 +2,15 @@ kind: task
 
 task:
   goal: >
-    Optimize OMILREC v1.0.0 production runtime under OMILRECV2/src. Minimize
-    probe-free SPEED_MS while CONTRACT, FCN, CONSISTENCY, and EVAL_RESULT pass.
-    All numerical truth and the performance baseline originate from v1.0.0.
-    Do not modify the evaluator or add another likelihood implementation.
+    Optimize the OMILREC v1.0.0 production reconstruction under OMILRECV2/src
+    by minimizing probe-free SPEED_MS. OMILREC v1.0.0 is the sole source of
+    algorithm and numerical truth, and a candidate is usable only when
+    CONTRACT, FCN, CONSISTENCY, and EVAL_RESULT all pass. Inspect the production
+    implementation and independently identify new code-grounded optimization
+    directions; no particular optimization recipe is prescribed. Do not
+    weaken, regenerate, bypass, or replace the evaluator, fixtures, references,
+    thresholds, or build wiring, and do not introduce a second likelihood
+    implementation.
 
 safety:
   editable_paths:
@@ -48,13 +53,35 @@ eval:
       lower_is_better: true
     gates:
       - key: CONTRACT
-        description: Frozen v1.0.0 gate contract passes.
+        description: >
+          Protects the measuring system itself: the FCN test must remain linked
+          directly to the production member, and the frozen numerical assets,
+          thresholds, and complete evaluator structure must remain intact.
+          Modifying, reducing, bypassing, or replacing any check, including
+          introducing a second likelihood implementation for testing, fails
+          this gate.
       - key: FCN
-        description: Direct v1.0.0 production-member FCN gate passes.
+        description: >
+          Evaluates the real production OMILRECV2::Calculate_EVLikelihood at
+          QMLE, TMLE, QTMLE, and ENERGY for four fixed events. It requires
+          exactly 16 finite unique results, each with relative error strictly
+          below 1e-13 against frozen v1.0.0 truth. Reordering or reassociating
+          reductions, changing floating-point types or casts, replacing
+          mathematical expressions with nominally equivalent forms, or folding
+          constants can change rounding and fail this gate.
       - key: CONSISTENCY
-        description: All 18 v1.0.0 E2E comparisons pass.
+        description: >
+          Requires all 18 reconstructed events to be finite and within the
+          v1.0.0 end-to-end limits: Euclidean 3D position <= 4 mm, energy
+          <= 7 keV, t0 <= 10 ps, and peSum <= 0.1 PE. Arithmetic and structural
+          changes are allowed only when every reconstructed result remains
+          within every limit.
       - key: EVAL_RESULT
-        description: Complete evaluation exits successfully.
+        description: >
+          Requires the complete evaluator to finish successfully: the
+          probe-enabled build and tests, the probe-free production rebuild, and
+          the benchmark. A build or test failure, crash, timeout, missing metric,
+          or incomplete evaluator execution fails this gate.
 
 source:
   path: ../../../omilrec-v100-gated
