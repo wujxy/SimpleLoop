@@ -24,6 +24,9 @@ from simpleloop.harness.store import Store
 
 EXAMPLES = Path(__file__).parents[1] / "examples"
 
+_SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
+           "gates": [{"key": "CORRECTNESS"}]}
+
 
 def _example_yaml(relative_path: str) -> dict:
     return yaml.safe_load((EXAMPLES / relative_path).read_text(encoding="utf-8"))
@@ -42,6 +45,13 @@ def _write_config(tmp_path: Path, loop_block: dict | None = None) -> Path:
         "loop": {"max_rounds": 3, **(loop_block or {})},
         "runtime": {"image": "runtime.sif"},
         "source": {"path": str(repo), "baseline_ref": "HEAD"},
+        "eval": {
+            "commands": ["run-eval"],
+            "metrics": {
+                "objective": {"key": "SPEED_MS", "lower_is_better": True},
+                "gates": [{"key": "CORRECTNESS"}],
+            },
+        },
     }
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
@@ -581,11 +591,17 @@ def test_proposer_prompt_uses_only_feedback_for_proposer(tmp_path: Path):
         frozen=[],
         history=[{
             "round": 0,
-            "proposal": "old proposal",
-            "sha": "old-sha",
-            "score": 0.5,
-            "feedback": "FULL_TECHNICAL_SENTINEL",
-            "feedback_for_proposer": "SHORT_SEARCH_SENTINEL",
+            "selected_candidate": 0,
+            "selected_sha": "old-sha",
+            "candidates": [{
+                "candidate": 0,
+                "proposal": "old proposal",
+                "sha": "old-sha",
+                "selected": True,
+                "score": 0.5,
+                "feedback": "FULL_TECHNICAL_SENTINEL",
+                "feedback_for_proposer": "SHORT_SEARCH_SENTINEL",
+            }],
         }],
         insights=[],
         base_sha="base",
@@ -809,7 +825,7 @@ def _run_insight_integration(
     corrupt_insights=False, proposer_calls=None,
 ):
     run_dir = tmp_path / "run"
-    seed = Store(run_dir)
+    seed = Store(run_dir, metrics_schema=_SCHEMA)
     seed.append_generation(
         0,
         parent_sha="baseline-sha",
@@ -844,7 +860,7 @@ def _run_insight_integration(
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
-        "metrics": None,
+        "metrics": _SCHEMA,
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "eval_commands": [],
@@ -937,7 +953,7 @@ def test_run_persists_valid_insight_after_generation(monkeypatch, tmp_path):
         "text": "Sparse gathers benefit from packing.",
         "refs": ["r0c0"],
     }
-    assert [row["round"] for row in Store(run_dir).history()] == [0, 1]
+    assert [row["round"] for row in Store(run_dir, metrics_schema=_SCHEMA).history()] == [0, 1]
 
 
 def test_run_skips_invalid_insight_without_skipping_generation(
@@ -952,7 +968,7 @@ def test_run_skips_invalid_insight_without_skipping_generation(
 
     assert executed == [True]
     assert not (run_dir / "insights.jsonl").exists()
-    assert [row["round"] for row in Store(run_dir).history()] == [0, 1]
+    assert [row["round"] for row in Store(run_dir, metrics_schema=_SCHEMA).history()] == [0, 1]
     output = capsys.readouterr().out
     assert "insight skipped: memory reference not found: r99c0" in output
 

@@ -237,7 +237,7 @@ def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext
         baseline_ref=cfg["baseline_ref"],
         editable=cfg["editable_paths"],
     )
-    store = Store(run_dir_path, metrics_schema=cfg.get("metrics"))
+    store = Store(run_dir_path, metrics_schema=cfg["metrics"])
     # Pre-render the gates' list lines once for the run: the same bullet lines
     # go into both the proposer's (reference) and executor's (acceptance) prompt,
     # each prefixed by its own fixed framing sentence in that role's prompt. Empty
@@ -292,8 +292,7 @@ def _starting_state(ctx: RunContext, continue_run: bool,
               f"the config to add more rounds.", flush=True)
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         return None
-    parent_sha, last_accepted = _resume_chain(
-        done, baseline_sha, ctx.metrics_schema)
+    parent_sha, last_accepted = _resume_chain(done, baseline_sha)
     prior_metrics = (last_accepted or {}).get("metrics") or {}
     print(f"[{stamp()}] --continue: resuming from round {start_round + 1} "
           f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
@@ -376,17 +375,16 @@ def _summary(store: Store, workspace: Workspace, run_dir_path: Path) -> dict:
 
 
 def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> None:
+    """Refresh the 3x3 overview only; detail images are drawn offline via
+    `simpleloop plot` (redrawing nine extra PNGs every round was pure cost)."""
     try:
         history = store.history()
     except Exception as exc:
         print(f"[plot] warning: could not read {store.path}: {exc}", flush=True)
         return
-    if plot_context is None:
-        plot_mod.write_progress_png(store.run_dir, history, store.metrics_schema)
-    else:
-        plot_mod.write_progress_pngs(
-            store.run_dir, history, store.metrics_schema, plot_context,
-        )
+    plot_mod.write_progress_png(
+        store.run_dir, history, store.metrics_schema, plot_context,
+    )
 
 
 def _run_candidates(ctx: RunContext, proposals: list[proposer_mod.Proposal],
@@ -459,7 +457,7 @@ def _run_one_candidate(ctx: RunContext, candidate_id: int,
         else:
             print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} no commit: "
                   f"{result.reason}", flush=True)
-        if result.sha and cfg["eval_commands"]:
+        if result.sha:
             try:
                 eval_result = evals.run_eval(
                     cfg["eval_commands"],
@@ -547,48 +545,45 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
 
 
 def _select_winner(candidates: list[dict],
-                   metrics_schema: dict | None,
+                   metrics_schema: dict,
                    prior_metrics: dict | None = None) -> dict | None:
-    """Select an eligible candidate only when it improves the incumbent."""
+    """Select an eligible candidate only when it improves the incumbent.
+
+    metrics_schema is always configured (eval.metrics is required) — there is
+    deliberately no score-based fallback: ranking by the judger's subjective
+    score is the "best by score" failure the harness-owned objective replaced.
+    """
+    obj = metrics_schema["objective"]
+    key = obj["key"]
+    gate_keys = [g["key"] for g in metrics_schema.get("gates", [])]
     eligible = []
-    if metrics_schema:
-        obj = metrics_schema["objective"]
-        key = obj["key"]
-        gate_keys = [g["key"] for g in metrics_schema.get("gates", [])]
-        for c in candidates:
-            metrics = c.get("metrics") or {}
-            if not c.get("sha"):
-                continue
-            if str(c.get("risk", "high")).lower() == "high":
-                continue
-            if not all(metrics.get(gk) is True for gk in gate_keys):
-                continue
-            if not isinstance(metrics.get(key), (int, float)):
-                continue
-            eligible.append(c)
-        if not eligible:
-            return None
-        lower = obj["lower_is_better"]
-        direction = 1 if lower else -1
-        winner = min(eligible, key=lambda c: (
-            direction * c["metrics"][key],
-            -(c.get("score") or 0.0),
-            c.get("candidate") or 0,
-        ))
-        prior_value = (prior_metrics or {}).get(key)
-        if isinstance(prior_value, (int, float)):
-            winner_value = winner["metrics"][key]
-            improved = winner_value < prior_value if lower else winner_value > prior_value
-            if not improved:
-                return None
-        return winner
     for c in candidates:
-        if c.get("sha") and str(c.get("risk", "high")).lower() != "high":
-            eligible.append(c)
+        metrics = c.get("metrics") or {}
+        if not c.get("sha"):
+            continue
+        if str(c.get("risk", "high")).lower() == "high":
+            continue
+        if not all(metrics.get(gk) is True for gk in gate_keys):
+            continue
+        if not isinstance(metrics.get(key), (int, float)):
+            continue
+        eligible.append(c)
     if not eligible:
         return None
-    return max(eligible, key=lambda c: (c.get("score") or 0.0,
-                                       -(c.get("candidate") or 0)))
+    lower = obj["lower_is_better"]
+    direction = 1 if lower else -1
+    winner = min(eligible, key=lambda c: (
+        direction * c["metrics"][key],
+        -(c.get("score") or 0.0),
+        c.get("candidate") or 0,
+    ))
+    prior_value = (prior_metrics or {}).get(key)
+    if isinstance(prior_value, (int, float)):
+        winner_value = winner["metrics"][key]
+        improved = winner_value < prior_value if lower else winner_value > prior_value
+        if not improved:
+            return None
+    return winner
 
 
 def _candidate_accepted(candidate_sha: str | None, metrics: dict | None,
@@ -607,36 +602,26 @@ def _candidate_accepted(candidate_sha: str | None, metrics: dict | None,
     return all(values.get(g["key"]) is True for g in gates)
 
 
-def _resume_chain(history: list[dict], baseline_sha: str,
-                  metrics_schema: dict | None) -> tuple[str, dict | None]:
+def _resume_chain(history: list[dict],
+                  baseline_sha: str) -> tuple[str, dict | None]:
     """Return the last accepted SHA and its record, skipping rejected tails.
 
-    New records carry an explicit accepted flag. For old history, infer the flag
-    from the currently configured hard gates so a legacy correctness-failing tail
-    is not accidentally resumed. Without gates, legacy SHA behavior is preserved.
+    Every record is a generation (append_generation shape): a round with a
+    selected candidate carries its selected_sha; a round with no winner is
+    skipped so the chain resumes from the last round that actually advanced it.
     """
     for record in reversed(history):
-        if "candidates" in record:
-            selected_sha = record.get("selected_sha")
-            if selected_sha:
-                selected = next((c for c in record.get("candidates", [])
-                                 if c.get("selected")), None)
-                return selected_sha, selected or record
-            continue
-        sha = record.get("sha")
-        if "accepted" in record:
-            accepted = bool(sha) and record.get("accepted") is True
-        else:
-            accepted = _candidate_accepted(
-                sha, record.get("metrics") or {}, metrics_schema)
-        if accepted:
-            return sha, record
+        selected_sha = record.get("selected_sha")
+        if selected_sha:
+            selected = next((c for c in record.get("candidates") or []
+                             if c.get("selected")), None)
+            return selected_sha, selected or record
     return baseline_sha, None
 
 
 def _require_baseline_acceptance(
     result: evals.EvalResult,
-    metrics_schema: dict | None,
+    metrics_schema: dict,
 ) -> None:
     """Reject an unusable baseline before any optimization agent is called."""
     failed_codes = [code for code in result.returncodes if code != 0]
@@ -645,8 +630,6 @@ def _require_baseline_acceptance(
             "baseline evaluation command failed with exit "
             f"{failed_codes[0]}:\n{result.text[:8000]}"
         )
-    if not metrics_schema:
-        return
 
     objective = metrics_schema["objective"]["key"]
     value = result.metrics.get(objective)
@@ -677,18 +660,15 @@ def _eval_baseline(
     cfg: dict,
     baseline_sha: str,
     runtime: ApptainerRuntime,
-) -> tuple[str | None, dict]:
+) -> tuple[str, dict]:
     """Run the eval commands once on the unoptimized baseline commit.
 
     Returns (eval_block, metrics) — the raw text (kept for the record) and the
     parsed metrics dict (the authoritative baseline numbers the judger's FACTS
-    block cites). (None, {}) if no eval is configured. A failed command,
-    missing objective, or failed gate aborts the run. Uses a throwaway worktree
-    on the baseline SHA (the bare per-run clone has no working tree, same reason
-    the per-round eval uses a worktree).
+    block cites). A failed command, missing objective, or failed gate aborts
+    the run. Uses a throwaway worktree on the baseline SHA (the bare per-run
+    clone has no working tree, same reason the per-round eval uses a worktree).
     """
-    if not cfg["eval_commands"]:
-        return None, {}
     print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]}) for the judger's "
           f"vs-baseline axis...", flush=True)
     wt = None

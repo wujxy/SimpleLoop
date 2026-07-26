@@ -30,6 +30,13 @@ def _write_task(tmp_path: Path, runtime=_MISSING) -> Path:
         "safety": {"editable_paths": ["src/**"]},
         "loop": {"max_rounds": 1},
         "source": {"path": str(repo)},
+        "eval": {
+            "commands": ["run-eval"],
+            "metrics": {
+                "objective": {"key": "SPEED_MS", "lower_is_better": True},
+                "gates": [{"key": "CORRECTNESS"}],
+            },
+        },
     }
     if runtime is not _MISSING:
         raw["runtime"] = runtime
@@ -672,13 +679,6 @@ def test_require_baseline_acceptance_rejects_unusable_objective(value):
         loop_mod._require_baseline_acceptance(result, schema)
 
 
-def test_require_baseline_acceptance_accepts_commands_without_schema():
-    loop_mod._require_baseline_acceptance(
-        EvalResult("ok", {}, (0, 0)),
-        None,
-    )
-
-
 def test_require_baseline_acceptance_accepts_objective_and_all_gates():
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -736,8 +736,9 @@ def test_run_preflights_before_agent_or_workspace(
         "agent_timeout_seconds": 60,
         "runtime_image": str(tmp_path / "runtime.sif"),
         "runtime_binds": [],
-        "eval_commands": [],
-        "metrics": None,
+        "eval_commands": ["run-eval"],
+        "metrics": {"objective": {"key": "SPEED_MS", "lower_is_better": True},
+                    "gates": []},
         "repo_path": str(tmp_path / "source"),
         "baseline_ref": "HEAD",
     }
@@ -745,6 +746,10 @@ def test_run_preflights_before_agent_or_workspace(
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(
+        loop_mod, "_eval_baseline",
+        lambda *_args, **_kwargs: ("", {"SPEED_MS": 100.0}),
+    )
 
     loop_mod.run("task.yaml", tmp_path / "run")
 

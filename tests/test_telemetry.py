@@ -225,24 +225,9 @@ class SnapshotTracker:
         return {}
 
 
-def test_store_persists_serial_telemetry(tmp_path):
-    store = Store(tmp_path)
-    snapshot = {"worktime_seconds": 12.5, "processed_tokens": 100}
-
-    store.append(
-        0,
-        "proposal",
-        "sha",
-        0.5,
-        "feedback",
-        telemetry=snapshot,
-    )
-
-    assert store.history()[0]["telemetry"] == snapshot
-
-
 def test_store_persists_candidate_and_generation_telemetry(tmp_path):
-    store = Store(tmp_path)
+    store = Store(tmp_path, metrics_schema={
+        "objective": {"key": "SPEED_MS", "lower_is_better": True}, "gates": []})
     candidate_snapshot = {"worktime_seconds": 2.0, "processed_tokens": 10}
     generation_snapshot = {"worktime_seconds": 3.0, "processed_tokens": 12}
 

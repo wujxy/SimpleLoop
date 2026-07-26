@@ -68,30 +68,6 @@ def test_resolve_parallel_episode_returns_only_compact_fields():
     assert "feedback" not in episode
 
 
-def test_resolve_serial_episode_normalizes_candidate_zero():
-    history = [{
-        "round": 7,
-        "proposal": "legacy proposal",
-        "sha": "legacy-sha",
-        "accepted": True,
-        "base_sha": "legacy-sha",
-        "score": 0.7,
-        "risk": "low",
-        "metrics": {"SPEED_MS": 100.0},
-        "feedback": "legacy feedback",
-        "changed_paths": ["src/legacy.cc"],
-    }]
-
-    episode = memory.resolve_episode(history, "r7c0")
-
-    assert episode["ref"] == "r7c0"
-    assert episode["proposal"] == "legacy proposal"
-    assert episode["candidate_sha"] == "legacy-sha"
-    assert episode["selected"] is True
-    assert episode["feedback_for_proposer"] == ""
-    assert "feedback" not in episode
-
-
 @pytest.mark.parametrize("ref", ["r2", "2c1", "r-1c0", "r2c-1", "r2c9"])
 def test_resolve_episode_rejects_invalid_or_missing_refs(ref: str):
     with pytest.raises(ValueError):

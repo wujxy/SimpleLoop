@@ -1,8 +1,10 @@
 """Per-role projection functions.
 
-The store holds the full raw record per round:
-    {round, proposal, sha, score, risk, feedback, feedback_for_proposer,
-     eval_block, metrics, changed_paths}
+The store holds one full generation record per round:
+    {round, parent_sha, selected_candidate, selected_sha, reflection,
+     candidates: [{candidate, family, proposal, sha, score, risk, feedback,
+                   feedback_for_proposer, eval_block, metrics, changed_paths,
+                   accepted, selected}, ...]}
 
 The proposer sees only the fields it should, via `for_proposer`; the executor
 and judger build their prompts from loop-passed locals directly. The store stays
@@ -75,51 +77,36 @@ def for_proposer(history: list[dict], *, recent_rounds: int = _PROPOSER_RECENT_R
 
     Still excludes eval_block: raw eval text, too noisy, hallucination risk.
     """
-    out = []
-    for r in history[-recent_rounds:]:
-        if "candidates" in r:
-            out.append({
-                "round": r["round"],
-                "parent_sha": r.get("parent_sha"),
-                "selected_candidate": r.get("selected_candidate"),
-                "selected_sha": r.get("selected_sha"),
-                "base_sha": r.get("base_sha"),
-                "reflection": r.get("reflection", ""),
-                "candidates": [
-                    {
-                        "candidate": c.get("candidate"),
-                        "family": c.get("family"),
-                        "proposal": c.get("proposal") or "",
-                        "sha": c.get("sha") or None,
-                        "selected": bool(c.get("selected")),
-                        "accepted": c.get("accepted"),
-                        "score": c.get("score"),
-                        "risk": c.get("risk"),
-                        "metrics": c.get("metrics") or {},
-                        "changed_paths": c.get("changed_paths") or [],
-                        "landing_state": _landing_state(c.get("feedback", "")),
-                        "feedback_for_proposer": (
-                            c.get("feedback_for_proposer") or ""
-                        ),
-                    }
-                    for c in (r.get("candidates") or [])
-                ],
-            })
-            continue
-        out.append({
+    return [
+        {
             "round": r["round"],
-            "proposal": r.get("proposal") or "",
-            "sha": r.get("sha") or None,
-            "accepted": r.get("accepted"),
+            "parent_sha": r.get("parent_sha"),
+            "selected_candidate": r.get("selected_candidate"),
+            "selected_sha": r.get("selected_sha"),
             "base_sha": r.get("base_sha"),
-            "score": r["score"],
-            "risk": r.get("risk"),
-            "metrics": r.get("metrics") or {},
-            "changed_paths": r.get("changed_paths") or [],
-            "landing_state": _landing_state(r.get("feedback", "")),
-            "feedback_for_proposer": r.get("feedback_for_proposer") or "",
-        })
-    return out
+            "reflection": r.get("reflection", ""),
+            "candidates": [
+                {
+                    "candidate": c.get("candidate"),
+                    "family": c.get("family"),
+                    "proposal": c.get("proposal") or "",
+                    "sha": c.get("sha") or None,
+                    "selected": bool(c.get("selected")),
+                    "accepted": c.get("accepted"),
+                    "score": c.get("score"),
+                    "risk": c.get("risk"),
+                    "metrics": c.get("metrics") or {},
+                    "changed_paths": c.get("changed_paths") or [],
+                    "landing_state": _landing_state(c.get("feedback", "")),
+                    "feedback_for_proposer": (
+                        c.get("feedback_for_proposer") or ""
+                    ),
+                }
+                for c in (r.get("candidates") or [])
+            ],
+        }
+        for r in history[-recent_rounds:]
+    ]
 
 
 def gate_block(metrics_schema: dict | None) -> str:

@@ -104,9 +104,9 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
     harness can compute the authoritative deltas the judger cites.
 
     The judger does NOT run eval, parse numbers, or compute deltas - all of
-    that is harness-owned. Empty eval_block / None metrics means either no eval
-    configured (diff-only judger) or no commit. See the hallucination note in the
-    module docstring.
+    that is harness-owned. Empty eval_block / empty metrics means no commit was
+    produced this round (eval only runs on a committed candidate). See the
+    hallucination note in the module docstring.
     """
     if sha is not None:
         diff = workspace.diff(parent_sha, sha)

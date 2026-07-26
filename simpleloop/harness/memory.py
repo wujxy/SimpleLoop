@@ -46,21 +46,15 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
     if record is None:
         raise ValueError(f"memory reference not found: {ref}")
 
-    is_generation = "candidates" in record
-    if is_generation:
-        candidate = next(
-            (
-                item for item in (record.get("candidates") or [])
-                if item.get("candidate") == candidate_id
-            ),
-            None,
-        )
-        if candidate is None:
-            raise ValueError(f"memory reference not found: {ref}")
-    else:
-        if candidate_id != 0:
-            raise ValueError(f"memory reference not found: {ref}")
-        candidate = record
+    candidate = next(
+        (
+            item for item in (record.get("candidates") or [])
+            if item.get("candidate") == candidate_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise ValueError(f"memory reference not found: {ref}")
 
     return {
         "ref": f"r{round_id}c{candidate_id}",
@@ -68,10 +62,7 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
         "proposal": candidate.get("proposal") or "",
         "parent_sha": record.get("parent_sha"),
         "candidate_sha": candidate.get("sha"),
-        "selected": (
-            bool(candidate.get("selected"))
-            if is_generation else bool(candidate.get("accepted"))
-        ),
+        "selected": bool(candidate.get("selected")),
         "accepted": bool(candidate.get("accepted")),
         "metrics": candidate.get("metrics") or {},
         "risk": candidate.get("risk"),

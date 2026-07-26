@@ -57,54 +57,78 @@ def test_for_proposer_projects_landing_state():
     risk + empty) from "latent bug" (high risk). The proposer must NOT see eval_block
     (raw, noisy, hallucination risk)."""
     history = [
-        {"round": 0, "proposal": "p0", "sha": "aaaa1111bbbb2222", "score": 0.7,
-         "accepted": True, "base_sha": "aaaa1111bbbb2222",
-         "risk": "low", "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z", "eval_block": "e0",
-         "feedback_for_proposer": "The mechanism remains promising.",
-         "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
-         "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]},
-        {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444", "score": 0.05,
-         "accepted": False, "base_sha": "aaaa1111bbbb2222", "risk": "low",
-         "feedback": "LANDED_STATE: not-implemented correctness FAIL",
-         "feedback_for_proposer": "This attempt failed correctness.",
-         "eval_block": "e1",
-         "metrics": {"CORRECTNESS": False},
-         "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]},
+        {"round": 0, "parent_sha": "base0000", "selected_candidate": 0,
+         "selected_sha": "aaaa1111bbbb2222", "base_sha": "aaaa1111bbbb2222",
+         "reflection": "r0",
+         "candidates": [
+             {"candidate": 0, "family": "single", "proposal": "p0",
+              "sha": "aaaa1111bbbb2222", "selected": True, "accepted": True,
+              "score": 0.7, "risk": "low",
+              "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z",
+              "eval_block": "e0",
+              "feedback_for_proposer": "The mechanism remains promising.",
+              "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
+              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]}]},
+        {"round": 1, "parent_sha": "aaaa1111bbbb2222", "selected_candidate": None,
+         "selected_sha": None, "base_sha": "aaaa1111bbbb2222",
+         "reflection": "r1",
+         "candidates": [
+             {"candidate": 0, "family": "single", "proposal": "p1",
+              "sha": "cccc3333dddd4444", "selected": False, "accepted": False,
+              "score": 0.05, "risk": "low",
+              "feedback": "LANDED_STATE: not-implemented correctness FAIL",
+              "eval_block": "e1",
+              "feedback_for_proposer": "This attempt failed correctness.",
+              "metrics": {"CORRECTNESS": False},
+              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]}]},
     ]
     out = views.for_proposer(history)
     assert out == [
-        {"round": 0, "proposal": "p0", "sha": "aaaa1111bbbb2222",
-         "accepted": True, "base_sha": "aaaa1111bbbb2222",
-         "score": 0.7, "risk": "low",
-         "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
-         "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
-         "landing_state": "not-implemented",
-         "feedback_for_proposer": "The mechanism remains promising."},
-        {"round": 1, "proposal": "p1", "sha": "cccc3333dddd4444",
-         "accepted": False, "base_sha": "aaaa1111bbbb2222",
-         "score": 0.05, "risk": "low",
-         "metrics": {"CORRECTNESS": False},
-         "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
-         "landing_state": "not-implemented",
-         "feedback_for_proposer": "This attempt failed correctness."},
+        {"round": 0, "parent_sha": "base0000", "selected_candidate": 0,
+         "selected_sha": "aaaa1111bbbb2222", "base_sha": "aaaa1111bbbb2222",
+         "reflection": "r0",
+         "candidates": [
+             {"candidate": 0, "family": "single", "proposal": "p0",
+              "sha": "aaaa1111bbbb2222", "selected": True, "accepted": True,
+              "score": 0.7, "risk": "low",
+              "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
+              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
+              "landing_state": "not-implemented",
+              "feedback_for_proposer": "The mechanism remains promising."}]},
+        {"round": 1, "parent_sha": "aaaa1111bbbb2222", "selected_candidate": None,
+         "selected_sha": None, "base_sha": "aaaa1111bbbb2222",
+         "reflection": "r1",
+         "candidates": [
+             {"candidate": 0, "family": "single", "proposal": "p1",
+              "sha": "cccc3333dddd4444", "selected": False, "accepted": False,
+              "score": 0.05, "risk": "low",
+              "metrics": {"CORRECTNESS": False},
+              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
+              "landing_state": "not-implemented",
+              "feedback_for_proposer": "This attempt failed correctness."}]},
     ]
     # belt-and-braces: the noisy/raw fields never leak
     for row in out:
-        assert "eval_block" not in row
-        assert "feedback" not in row
+        for c in row["candidates"]:
+            assert "eval_block" not in c
+            assert "feedback" not in c
 
 
-def test_for_proposer_legacy_feedback_does_not_fall_back_to_full_text():
+def test_for_proposer_feedback_does_not_fall_back_to_full_text():
     projected = views.for_proposer([{
         "round": 0,
-        "proposal": "legacy",
-        "sha": "sha",
-        "score": 0.2,
-        "feedback": "FULL_TECHNICAL_SENTINEL",
+        "candidates": [{
+            "candidate": 0,
+            "proposal": "direction",
+            "sha": "sha",
+            "score": 0.2,
+            "feedback": "FULL_TECHNICAL_SENTINEL",
+        }],
     }])
 
-    assert projected[0]["feedback_for_proposer"] == ""
-    assert "feedback" not in projected[0]
+    candidate = projected[0]["candidates"][0]
+    assert candidate["feedback_for_proposer"] == ""
+    assert "feedback" not in candidate
 
 
 def test_for_proposer_empty_history():
@@ -112,28 +136,37 @@ def test_for_proposer_empty_history():
 
 
 def test_for_proposer_preserves_order():
-    history = [{"round": r, "proposal": f"p{r}", "sha": f"x{r}", "score": 0.1 * r,
-                "feedback": f"f{r}", "feedback_for_report": "R", "eval_block": "E",
-                "metrics": {}, "changed_paths": []}
-               for r in range(5)]
+    history = [_serial_history_record(r, f"p{r}") for r in range(5)]
     out = views.for_proposer(history)
     assert [row["round"] for row in out] == [0, 1, 2, 3, 4]
 
 
 def _serial_history_record(round_id: int, proposal: str) -> dict:
+    """A one-candidate generation record (the shape append_generation writes)."""
     return {
         "round": round_id,
-        "proposal": proposal,
-        "sha": f"sha-{round_id}",
-        "accepted": True,
+        "parent_sha": f"parent-{round_id}",
+        "selected_candidate": 0,
+        "selected_sha": f"sha-{round_id}",
         "base_sha": f"sha-{round_id}",
-        "score": 0.5,
-        "risk": "low",
-        "metrics": {"SPEED_MS": 500.0 + round_id},
-        "changed_paths": ["src/a.cc"],
-        "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{round_id}\nResult: y{round_id}\nAnalysis: z{round_id}",
-        "feedback_for_proposer": f"short lesson {round_id}",
-        "eval_block": "raw output",
+        "reflection": "reflection",
+        "candidates": [
+            {
+                "candidate": 0,
+                "family": "single",
+                "proposal": proposal,
+                "sha": f"sha-{round_id}",
+                "selected": True,
+                "accepted": True,
+                "score": 0.5,
+                "risk": "low",
+                "metrics": {"SPEED_MS": 500.0 + round_id},
+                "changed_paths": ["src/a.cc"],
+                "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{round_id}\nResult: y{round_id}\nAnalysis: z{round_id}",
+                "feedback_for_proposer": f"short lesson {round_id}",
+                "eval_block": "raw output",
+            }
+        ],
     }
 
 
@@ -176,10 +209,12 @@ def test_for_proposer_recent_window_uses_position_and_full_proposals():
     projected = views.for_proposer(history)
 
     assert [row["round"] for row in projected] == round_ids[1:]
-    assert [row["proposal"] for row in projected] == [
+    assert [row["candidates"][0]["proposal"] for row in projected] == [
         f"proposal-{round_id}" for round_id in round_ids[1:]
     ]
-    assert all("proposal_head" not in row for row in projected)
+    assert all(
+        "proposal_head" not in c for row in projected for c in row["candidates"]
+    )
 
 
 def test_for_proposer_recent_window_does_not_mutate_history():
@@ -406,66 +441,94 @@ def test_parse_warns_and_truncates_judger_text_with_candidate_label(capsys):
 
 # --- Store: feedback fields remain persisted in history ---
 
+_STORE_SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
+                 "gates": [{"key": "CORRECTNESS"}]}
+
+
 def test_store_persists_feedback(tmp_path: Path):
-    store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.7, "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: -10% speed\nAnalysis: cache locality",
-                 eval_block="e0",
-                 feedback_for_proposer="Precomputation is worth revisiting.")
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=0, selected_sha="sha0",
+        candidates=[{
+            "candidate": 0, "proposal": "p0", "sha": "sha0", "score": 0.7,
+            "risk": "low", "accepted": True,
+            "feedback": "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: -10% speed\nAnalysis: cache locality",
+            "eval_block": "e0",
+            "feedback_for_proposer": "Precomputation is worth revisiting.",
+        }])
     rows = store.history()
     assert len(rows) == 1
     assert "LANDED_STATE" in rows[0]["feedback"]
     assert "Implemented:" in rows[0]["feedback"]
     assert rows[0]["feedback_for_proposer"] == "Precomputation is worth revisiting."
-    assert rows[0]["eval_block"] == "e0"
+    assert rows[0]["candidates"][0]["eval_block"] == "e0"
 
 
 # --- Store: changed_paths persisted (landing-state signal for the proposer) ---
 
 def test_store_persists_changed_paths(tmp_path: Path):
-    """append stores changed_paths so the proposer can see what each round
-    touched without running git."""
-    store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.7, "LANDED_STATE: not-implemented\nImplemented: precompute\nResult: -5% speed\nAnalysis: good",
-                 eval_block="e0", changed_paths=["a.cc", "a.h"])
+    """append_generation stores changed_paths so the proposer can see what each
+    round touched without running git."""
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=0, selected_sha="sha0",
+        candidates=[{
+            "candidate": 0, "proposal": "p0", "sha": "sha0", "score": 0.7,
+            "risk": "low", "accepted": True, "feedback": "f",
+            "changed_paths": ["a.cc", "a.h"],
+        }])
     rows = store.history()
     assert rows[0]["changed_paths"] == ["a.cc", "a.h"]
+    assert rows[0]["candidates"][0]["changed_paths"] == ["a.cc", "a.h"]
 
 
 def test_store_persists_candidate_acceptance_and_resulting_base(tmp_path: Path):
     """A rejected implementation keeps its candidate SHA while the accepted
     base stays on the prior commit."""
-    store = Store(tmp_path)
-    store.append(0, "p0", "candidate0", 0.1, "correctness failed",
-                 eval_metrics={"CORRECTNESS": False},
-                 changed_paths=["a.cc"], accepted=False, base_sha="baseline")
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+    store.append_generation(
+        0, parent_sha="baseline", selected_candidate=None, selected_sha=None,
+        candidates=[{
+            "candidate": 0, "proposal": "p0", "sha": "candidate0", "score": 0.1,
+            "risk": "low", "accepted": False, "feedback": "correctness failed",
+            "metrics": {"CORRECTNESS": False}, "changed_paths": ["a.cc"],
+        }])
     row = store.history()[0]
-    assert row["sha"] == "candidate0"
-    assert row["accepted"] is False
+    assert row["candidates"][0]["sha"] == "candidate0"
+    assert row["candidates"][0]["accepted"] is False
+    assert row["selected_sha"] is None
     assert row["base_sha"] == "baseline"
 
 
 def test_store_changed_paths_default_empty(tmp_path: Path):
-    """Rounds without changed_paths (gate-rejected / failed / legacy records)
-    read back as an empty list, not a missing key — the proposer can rely on
-    the field always being present."""
-    store = Store(tmp_path)
-    store.append(0, "p0", "sha0", 0.0, "[loop failure] boom", eval_block="")
+    """Candidates without changed_paths (gate-rejected / failed rounds) read
+    back as an empty list, not a missing key — the proposer can rely on the
+    field always being present."""
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=None, selected_sha=None,
+        candidates=[{
+            "candidate": 0, "proposal": "p0", "sha": "sha0", "score": 0.0,
+            "risk": "high", "accepted": False,
+            "feedback": "[loop failure] boom",
+        }])
     rows = store.history()
-    assert rows[0]["changed_paths"] == []
+    assert rows[0]["candidates"][0]["changed_paths"] == []
 
 
-def test_store_changed_paths_legacy_record_defaults_empty(tmp_path: Path):
-    """A history.jsonl written before changed_paths existed must read back with
-    [] (the projection does .get('changed_paths') or []), so old runs still feed
-    the proposer without a KeyError."""
-    store = Store(tmp_path)
+def test_store_changed_paths_missing_key_defaults_empty(tmp_path: Path):
+    """A candidate record missing changed_paths must project as [] (the
+    projection does .get('changed_paths') or []), never a KeyError."""
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
     with store.path.open("w", encoding="utf-8") as f:
-        f.write(json.dumps({"round": 0, "proposal": "p0", "sha": "s", "score": 0.5,
-                            "feedback": "legacy", "eval_block": ""}) + "\n")
+        f.write(json.dumps({
+            "round": 0,
+            "candidates": [{"candidate": 0, "proposal": "p0", "sha": "s",
+                            "score": 0.5, "feedback": "f"}],
+        }) + "\n")
     rows = store.history()
-    # the raw record has no changed_paths key; for_proposer's .get() handles it
     proj = views.for_proposer(rows)
-    assert proj[0]["changed_paths"] == []
+    assert proj[0]["candidates"][0]["changed_paths"] == []
 
 
 # --- judger: LANDED_STATE prefix is a feedback convention, not a parsed field ---
@@ -517,41 +580,29 @@ def test_candidate_acceptance_keeps_legacy_no_gate_behavior():
 def test_resume_chain_skips_rejected_tail_and_uses_last_accepted_metrics():
     from simpleloop import loop as loop_mod
 
-    schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
-              "gates": [{"key": "CORRECTNESS"}]}
     history = [
-        {"sha": "good", "accepted": True,
-         "metrics": {"CORRECTNESS": True, "SPEED_MS": 100.0}},
-        {"sha": "bad", "accepted": False, "base_sha": "good",
-         "metrics": {"CORRECTNESS": False}},
+        {"round": 0, "selected_candidate": 0, "selected_sha": "good",
+         "candidates": [{"candidate": 0, "sha": "good", "selected": True,
+                         "metrics": {"CORRECTNESS": True, "SPEED_MS": 100.0}}]},
+        {"round": 1, "selected_candidate": None, "selected_sha": None,
+         "candidates": [{"candidate": 0, "sha": "bad", "selected": False,
+                         "metrics": {"CORRECTNESS": False}}]},
     ]
-    sha, record = loop_mod._resume_chain(history, "baseline", schema)
+    sha, record = loop_mod._resume_chain(history, "baseline")
     assert sha == "good"
-    assert record is history[0]
-
-
-def test_resume_chain_infers_old_history_acceptance_from_gate_metrics():
-    from simpleloop import loop as loop_mod
-
-    schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
-              "gates": [{"key": "CORRECTNESS"}]}
-    legacy_history = [
-        {"sha": "good", "metrics": {"CORRECTNESS": True}},
-        {"sha": "bad", "metrics": {"CORRECTNESS": False}},
-    ]
-    sha, record = loop_mod._resume_chain(legacy_history, "baseline", schema)
-    assert sha == "good"
-    assert record is legacy_history[0]
+    assert record is history[0]["candidates"][0]
+    assert record["metrics"]["SPEED_MS"] == 100.0
 
 
 def test_resume_chain_falls_back_to_baseline_when_no_candidate_was_accepted():
     from simpleloop import loop as loop_mod
 
-    schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
-              "gates": [{"key": "CORRECTNESS"}]}
-    history = [{"sha": "bad", "accepted": False,
-                "metrics": {"CORRECTNESS": False}}]
-    assert loop_mod._resume_chain(history, "baseline", schema) == ("baseline", None)
+    history = [
+        {"round": 0, "selected_candidate": None, "selected_sha": None,
+         "candidates": [{"candidate": 0, "sha": "bad", "selected": False,
+                         "metrics": {"CORRECTNESS": False}}]},
+    ]
+    assert loop_mod._resume_chain(history, "baseline") == ("baseline", None)
 def test_parse_batch_enforces_exact_count():
     """The 'produce exactly N candidates' invariant moved out of prompt prose
     into structure: the JSON Schema pins minItems=maxItems=N, and _parse_batch
@@ -600,7 +651,7 @@ def test_print_objective_silent_when_no_measurement(capsys):
     schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True}, "gates": []}
     _print_objective({}, {"SPEED_MS": 762.7}, {"SPEED_MS": 910.0}, schema)
     assert capsys.readouterr().out == ""
-    # also silent when no schema (diff-only judger):
+    # defensively silent when passed no schema:
     _print_objective({"SPEED_MS": 705.0}, None, None, None)
     assert capsys.readouterr().out == ""
 
@@ -668,6 +719,13 @@ def _write_min_task(tmp_path: Path, loop: dict) -> Path:
         "loop": loop,
         "source": {"path": str(repo)},
         "runtime": {"image": str(image)},
+        "eval": {
+            "commands": ["run-eval"],
+            "metrics": {
+                "objective": {"key": "SPEED_MS", "lower_is_better": True},
+                "gates": [{"key": "CORRECTNESS"}],
+            },
+        },
     }
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")

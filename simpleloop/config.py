@@ -12,8 +12,8 @@ Minimal schema:
   loop.proposer_recent_rounds: int   (optional, default 6; rounds of history fed to proposer)
   runtime.image: path                (required; readable SIF image)
   runtime.binds: [absolute dir]      (optional, default [])
-  eval.commands: [str]                (optional; omit -> judger is diff-only)
-  eval.metrics: {objective, gates}    (optional; omit -> judger reads prose, best by score)
+  eval.commands: [str]                (required non-empty; harness-run after each commit)
+  eval.metrics: {objective, gates}    (required; the key=value lines the harness parses)
   source.path: path                   (required; the repo to optimize)
   source.baseline_ref: str            (optional, default HEAD)
 
@@ -101,28 +101,29 @@ def _resolve(raw: dict, path: Path) -> dict:
         raise ConfigError(f"source.path: not a git repo: {repo}")
     baseline_ref = str(source.get("baseline_ref") or "HEAD")
 
-    eval_commands: list[str] = []
-    metrics: dict | None = None
-    if "eval" in raw:
-        eval_block = raw["eval"]
-        if not isinstance(eval_block, dict):
-            raise ConfigError("eval: must be an object")
-        eval_commands = eval_block.get("commands", [])
-        if not isinstance(eval_commands, list):
-            raise ConfigError("eval.commands: must be a list of strings")
-        eval_commands = [str(c) for c in eval_commands]
+    eval_block = _need(raw, "eval", dict)
+    eval_commands = eval_block.get("commands")
+    if (not isinstance(eval_commands, list) or not eval_commands
+            or not all(isinstance(c, str) and c.strip() for c in eval_commands)):
+        raise ConfigError("eval.commands: required non-empty list of strings")
+    eval_commands = [str(c) for c in eval_commands]
 
-        # metrics: declares the structured key=value lines the harness parses out
-        # of eval output (NOT the judger — the judger only interprets). Two roles
-        # only, both project-agnostic: `objective` (the thing being optimized +
-        # its direction) and `gates` (pass/fail keys that veto a round). The harness
-        # owns these numbers and selects `best` by the objective among gate-pass,
-        # risk-not-high rounds. Without this block the judger falls back to reading
-        # prose and is known to hallucinate numbers (see memory
-        # simpleloop-judger-prior-round-compare). No noise_floor / reps — deferred
-        # until a run proves they're needed.
-        if "metrics" in eval_block:
-            metrics = _resolve_metrics(eval_block["metrics"])
+    # metrics: declares the structured key=value lines the harness parses out
+    # of eval output (NOT the judger — the judger only interprets). Two roles
+    # only, both project-agnostic: `objective` (the thing being optimized +
+    # its direction) and `gates` (pass/fail keys that veto a round). The harness
+    # owns these numbers and selects `best` by the objective among gate-pass,
+    # risk-not-high rounds. REQUIRED: without it the judger would have to read
+    # numbers out of prose (known to hallucinate — see memory
+    # simpleloop-judger-prior-round-compare) and best selection would degrade to
+    # the judger's subjective score. No noise_floor / reps — deferred until a
+    # run proves they're needed.
+    if "metrics" not in eval_block:
+        raise ConfigError(
+            "eval.metrics: required — declare the objective (and gates) the "
+            "harness parses out of eval output; score-based best selection "
+            "without metrics is no longer supported")
+    metrics = _resolve_metrics(eval_block["metrics"])
 
     return {
         "goal": str(goal),

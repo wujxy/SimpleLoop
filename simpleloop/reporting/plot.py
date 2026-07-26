@@ -228,17 +228,12 @@ def build_series(
             if index < len(worktime_offsets)
             else 0.0
         )
-        parallel = isinstance(record.get("candidates"), list)
-        attempts = record["candidates"] if parallel else [record]
-        selected_id = record.get("selected_candidate") if parallel else None
+        attempts = record.get("candidates") or []
+        selected_id = record.get("selected_candidate")
         selected_observation: Observation | None = None
 
         for attempt in attempts:
-            selected = (
-                attempt.get("candidate") == selected_id
-                if parallel
-                else bool(record.get("accepted"))
-            )
+            selected = attempt.get("candidate") == selected_id
             metrics = attempt.get("metrics") or {}
             point = _observation(
                 round_number=round_number,
@@ -254,9 +249,7 @@ def build_series(
             if selected:
                 selected_observation = point
 
-        accepted = bool(record.get("selected_sha")) if parallel else bool(
-            record.get("accepted")
-        )
+        accepted = bool(record.get("selected_sha"))
         if (
             accepted
             and selected_observation is not None
@@ -505,22 +498,38 @@ def _publish(output: Path, render: Callable[[Path], None]) -> bool:
         return False
 
 
-def write_progress_pngs(
+def write_progress_png(
+    run_dir: str | Path,
+    history: list[dict],
+    metrics_schema: dict | None,
+    plot_context: dict | None = None,
+) -> Path | None:
+    """Redraw the 3x3 overview image (the only plot refreshed at run time)."""
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    series = build_series(history, metrics_schema, plot_context)
+    overview = run_path / "progress.png"
+    if _publish(overview, lambda path: _render_progress_png(series, path)):
+        return overview
+    return None
+
+
+def write_detail_pngs(
     run_dir: str | Path,
     history: list[dict],
     metrics_schema: dict | None,
     plot_context: dict | None = None,
 ) -> list[Path]:
-    """Redraw the overview and nine detail images independently."""
+    """Redraw the nine single-panel detail images.
+
+    Offline entry point (`simpleloop plot`) — the loop no longer refreshes
+    these every round; it only maintains the 3x3 overview. Each image is
+    published independently so one failure doesn't block the rest.
+    """
     run_path = Path(run_dir)
     run_path.mkdir(parents=True, exist_ok=True)
     series = build_series(history, metrics_schema, plot_context)
     published: list[Path] = []
-
-    overview = run_path / "progress.png"
-    if _publish(overview, lambda path: _render_progress_png(series, path)):
-        published.append(overview)
-
     for y_kind in _Y_KINDS:
         for x_kind in _X_KINDS:
             output = run_path / (
@@ -534,20 +543,3 @@ def write_progress_pngs(
             ):
                 published.append(output)
     return published
-
-
-def write_progress_png(
-    run_dir: str | Path,
-    history: list[dict],
-    metrics_schema: dict | None,
-    plot_context: dict | None = None,
-) -> Path | None:
-    """Compatibility entry point; it now refreshes all progress images."""
-    overview = Path(run_dir) / "progress.png"
-    outputs = write_progress_pngs(
-        run_dir,
-        history,
-        metrics_schema,
-        plot_context,
-    )
-    return overview if overview in outputs else None

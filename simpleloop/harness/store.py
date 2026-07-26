@@ -1,27 +1,26 @@
-"""History store: append-only JSONL of each round + best tracking.
+"""History store: append-only JSONL of one generation record per round.
 
-Each round records {round, proposal, sha, accepted, base_sha, score, risk,
-feedback, feedback_for_proposer, eval_block, metrics}. `sha` is the attempted
-candidate; `base_sha` is the accepted cumulative source after that round. The
-best commit is selected by the HARNESS, by the real objective metric — NOT by
-the judger's subjective 0-1 score. This is the fix for
-the "best by score" problem surfaced in the 12-round OMILRECV2 run, where the
-highest-score round (r5, 0.88, 571ms) locked out the fastest correct commit
-(r10, 0.85, 321ms): once the harness owns the real speed (parsed from eval
-output), best selection becomes "among gate-pass + risk-not-high rounds, take
-the best objective" — score demotes to a quality signal, not a ranking number.
+Each generation records {round, parent_sha, selected_candidate, selected_sha,
+candidates: [...], reflection, telemetry} plus selected-candidate convenience
+fields (proposal, score, risk, feedback, base_sha, ...). The best commit is
+selected by the HARNESS, by the real objective metric — NOT by the judger's
+subjective 0-1 score. This is the fix for the "best by score" problem surfaced
+in the 12-round OMILRECV2 run, where the highest-score round (r5, 0.88, 571ms)
+locked out the fastest correct commit (r10, 0.85, 321ms): once the harness owns
+the real speed (parsed from eval output), best selection becomes "among
+gate-pass + risk-not-high rounds, take the best objective" — score demotes to a
+quality signal, not a ranking number.
 
-Best selection rule (only when metrics_schema is configured):
-  eligible = rounds where every declared gate metric is True (PASS) AND
+Best selection rule (metrics_schema is always configured — eval.metrics is a
+required config block; there is deliberately no score-based fallback):
+  eligible = candidates where every declared gate metric is True (PASS) AND
              judger-risk != "high" AND the objective metric is present+numeric.
-  best = the eligible round with the best objective (min if lower_is_better,
-         else max). First such round wins ties.
-A failed-gate or high-risk round is never best, even if its objective is best —
-this is what keeps a latent-risk flag (e.g. r5's MODE-keyed cache validity) from
-being the chosen ship commit when a safer later round is nearly as fast.
-
-Without a metrics_schema (diff-only / legacy configs), best falls back to the
-old score-based rule so nothing breaks.
+  best = the eligible candidate with the best objective (min if lower_is_better,
+         else max). First such candidate wins ties.
+A failed-gate or high-risk candidate is never best, even if its objective is
+best — this is what keeps a latent-risk flag (e.g. r5's MODE-keyed cache
+validity) from being the chosen ship commit when a safer later round is nearly
+as fast.
 
 eval_block is the raw harness-run eval output for the round (capped), stored so
 the loop can feed the prior round's eval + the baseline eval to the next round's
@@ -47,82 +46,18 @@ _HIST_EVAL_CAP = 6000
 
 
 class Store:
-    def __init__(self, run_dir: Path, metrics_schema: dict | None = None):
+    def __init__(self, run_dir: Path, metrics_schema: dict):
         self.run_dir = Path(run_dir)
         self.path = self.run_dir / "history.jsonl"
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        # metrics_schema: {"objective": {key, lower_is_better}, "gates": [{key}]}
-        # or None (diff-only / legacy -> best by score). Set once at loop start;
+        # metrics_schema: {"objective": {key, lower_is_better}, "gates": [{key}]}.
+        # Always configured (eval.metrics is required). Set once at loop start;
         # drives best selection.
         self.metrics_schema = metrics_schema
         self.best_score: float = -1.0           # judger quality number (report only)
         self.best_sha: str | None = None        # harness-selected best commit
         self.best_round: int | None = None
         self.best_candidate: int | None = None
-        # For score-based fallback / report divergence:
-        self.best_by_score_sha: str | None = None
-        self.best_by_score_round: int | None = None
-
-    def append(self, round_id: int, proposal: str, sha: str | None,
-               score: float | None, feedback: str,
-               eval_block: str = "",
-               eval_metrics: dict | None = None,
-               risk: str = "high",
-               changed_paths: list[str] | None = None,
-               reflection: str = "",
-               decision: str = "",
-               accepted: bool = False,
-               base_sha: str | None = None,
-               feedback_for_proposer: str = "",
-               telemetry: dict | None = None) -> None:
-        """Record one legacy flat (single-candidate) round and update best.
-
-        The loop no longer writes this shape — every round is recorded as a
-        generation via append_generation, static mode included. This writer is
-        kept because old runs' history.jsonl files still hold flat records that
-        --continue/plot/views must keep reading, and tests use it to build such
-        legacy histories.
-
-        risk defaults to 'high' — a caller that doesn't supply one (e.g. a loop
-        failure) is treated as not-best-eligible, which is the safe default for a
-        round where we couldn't even get a risk read.
-
-        changed_paths: the files the executor touched this round (already computed
-        by workspace.changed_paths for the gate). Stored so the proposer can see
-        what each prior round changed without running git — a cheap landing-state
-        signal that complements sha (the proposer can `git diff` the sha for
-        detail). Empty list on gate-rejected / no-change / failed rounds.
-
-        reflection + decision: the proposer's reflection paragraph and continue|
-        switch token. Stored as HUMAN-AUDIT EVIDENCE (so you can later see what
-        the proposer reflected before re-proposing a direction) but NOT projected
-        back into the next round's prompt (views.for_proposer omits them), so a
-        prior decision never biases the next round's choice.
-
-        sha remains the candidate commit for backward compatibility. accepted
-        says whether all configured hard gates passed; base_sha is the accepted
-        source after this round and therefore the next executor's starting point.
-        """
-        record = {
-            "round": round_id,
-            "proposal": proposal,
-            "sha": sha,
-            "score": score,
-            "risk": risk,
-            "feedback": feedback,
-            "feedback_for_proposer": feedback_for_proposer,
-            "eval_block": (eval_block or "")[:_HIST_EVAL_CAP],
-            "metrics": eval_metrics or {},
-            "changed_paths": changed_paths or [],
-            "reflection": reflection,
-            "decision": decision,
-            "accepted": bool(accepted),
-            "base_sha": base_sha,
-            "telemetry": dict(telemetry or {}),
-        }
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._recompute_best()
 
     def history(self) -> list[dict]:
         """Read all rounds back (for the proposer's prompt)."""
@@ -183,33 +118,15 @@ class Store:
         self._recompute_best()
 
     def _recompute_best(self) -> None:
-        """Recompute best over the full history.
+        """Recompute the metric-based best over the full history.
 
-        Metric-based when a schema is set; score-based fallback otherwise. Done
-        from scratch each append (cheap for tens-of-rounds histories) so that
-        adding a schema or changing the rule never leaves stale best state.
+        Done from scratch each append (cheap for tens-of-rounds histories) so
+        that a rule change never leaves stale best state.
         """
         rounds = self.history()
         if not rounds:
             return
-        # always track the highest-score round (for the report's divergence line)
         candidates = list(_iter_candidates(rounds))
-        scored = [c for c in candidates
-                  if c.get("sha") and isinstance(c.get("score"), (int, float))]
-        if scored:
-            top = max(scored, key=lambda c: c["score"])
-            self.best_by_score_sha = top["sha"]
-            self.best_by_score_round = top["round"]
-            # score-based fallback (and the legacy public field)
-            if self.metrics_schema is None:
-                self.best_sha = top["sha"]
-                self.best_round = top["round"]
-                self.best_candidate = top.get("candidate")
-                self.best_score = top["score"]
-
-        if self.metrics_schema is None:
-            return  # score-based best already set above
-
         obj = self.metrics_schema["objective"]
         obj_key = obj["key"]
         lower = obj["lower_is_better"]
@@ -254,10 +171,7 @@ class Store:
 
 def _iter_candidates(rounds: list[dict]):
     for r in rounds:
-        if "candidates" in r:
-            for c in r.get("candidates") or []:
-                row = dict(c)
-                row["round"] = r.get("round")
-                yield row
-        else:
-            yield r
+        for c in r.get("candidates") or []:
+            row = dict(c)
+            row["round"] = r.get("round")
+            yield row

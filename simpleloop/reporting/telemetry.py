@@ -41,6 +41,39 @@ def _non_negative_number(value: object) -> float | None:
     return float(value)
 
 
+def load_plot_context(run_dir: str | Path) -> dict:
+    """Rebuild a live run's plot_context from its persisted telemetry.json.
+
+    Offline entry (`simpleloop plot`): the baseline metrics/telemetry the loop
+    passes to the plotter in-memory are persisted per round, so a finished (or
+    still-running) run can be re-plotted without re-running anything. Missing
+    or unreadable telemetry degrades to an empty context (plots still render,
+    just without the baseline point).
+    """
+    path = Path(run_dir) / "telemetry.json"
+    if not path.exists():
+        return {}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[telemetry] warning: could not read {path}: {exc}", flush=True)
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    baseline_metrics = state.get("baseline_metrics")
+    baseline_telemetry = state.get("baseline_telemetry")
+    return {
+        "baseline_metrics": (
+            dict(baseline_metrics) if isinstance(baseline_metrics, dict) else {}
+        ),
+        "baseline_telemetry": (
+            dict(baseline_telemetry)
+            if isinstance(baseline_telemetry, dict)
+            else {}
+        ),
+    }
+
+
 class RunTelemetry:
     """Track the exact run-level values needed by progress plots."""
 

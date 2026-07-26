@@ -14,6 +14,8 @@ from . import config as config_mod
 from .harness import memory
 from .container.image import ImageBuildError, build_image
 from .container.runtime import RuntimePreflightError
+from .reporting import plot as plot_mod
+from .reporting import telemetry as telemetry_mod
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -63,6 +65,22 @@ def main(argv: list[str] | None = None) -> None:
         help="Explicitly allow Apptainer to overwrite an existing SIF.",
     )
 
+    plot_parser = sub.add_parser(
+        "plot",
+        help="Redraw a run's progress images offline (overview + nine "
+             "detail plots). The loop only maintains the 3x3 overview at "
+             "run time; use this to get the per-panel detail images.",
+    )
+    plot_parser.add_argument(
+        "--config", required=True,
+        help="The task config the run used (source of eval.metrics — the "
+             "objective key/direction is not stored in the run dir).",
+    )
+    plot_parser.add_argument(
+        "--run-dir", required=True,
+        help="The run directory holding history.jsonl / telemetry.json.",
+    )
+
     memory_parser = sub.add_parser(
         "memory", help="Inspect current-run Search Memory."
     )
@@ -89,6 +107,37 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Image build error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         print(f"Built image: {output}")
+        return
+
+    if args.command == "plot":
+        try:
+            cfg = config_mod.load(args.config)
+        except config_mod.ConfigError as exc:
+            print(f"Config error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        history_path = run_dir / "history.jsonl"
+        if not history_path.exists():
+            print(f"Error: no history.jsonl at {run_dir}", file=sys.stderr)
+            raise SystemExit(1)
+        try:
+            history = memory.read_history(history_path)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        plot_context = telemetry_mod.load_plot_context(run_dir)
+        outputs = []
+        overview = plot_mod.write_progress_png(
+            run_dir, history, cfg["metrics"], plot_context)
+        if overview is not None:
+            outputs.append(overview)
+        outputs.extend(plot_mod.write_detail_pngs(
+            run_dir, history, cfg["metrics"], plot_context))
+        if not outputs:
+            print("Error: no image could be written", file=sys.stderr)
+            raise SystemExit(1)
+        for path in outputs:
+            print(f"Wrote {path}")
         return
 
     if args.command == "memory":

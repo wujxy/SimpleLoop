@@ -52,8 +52,15 @@ Each run:
 - preflights one mandatory Apptainer runtime and validates the baseline before
   any optimization role consumes tokens,
 - runs `max_rounds` rounds, each candidate in a fresh worktree,
-- writes `history.jsonl`, `insights.jsonl`, `telemetry.json`, `progress.png`,
-  and nine detail progress images.
+- writes `history.jsonl`, `insights.jsonl`, `telemetry.json`, and the 3×3
+  `progress.png` overview (refreshed after every round).
+
+The nine single-panel detail images are drawn offline, from the persisted run
+artifacts, so a live run never spends time redrawing them:
+
+```bash
+simpleloop plot --config examples/task.yaml --run-dir ./runs/001
+```
 
 Trace any run's commits with `git -C runs/001/repo log --oneline`. Inspect one
 historical candidate by reference with `simpleloop memory show r3c0 --run-dir
@@ -87,10 +94,10 @@ runtime:
   binds:                      # optional; absolute same-path directory mounts
     - /cvmfs
     - /data/juno
-eval:                       # optional; omit -> judger judges on diff alone
-  commands:
+eval:                       # required
+  commands:                 # required non-empty; harness-run after each commit
     - "python -m pytest -q tests/"
-  metrics:                  # optional; declares the key=value lines the
+  metrics:                  # required; declares the key=value lines the
     objective:              # harness parses out of eval output
       key: SPEED_MS
       lower_is_better: true
@@ -109,13 +116,14 @@ unchanged absolute paths. Git clone/worktree/gating/history logic remains on
 the host. There is no host-execution fallback.
 
 `eval.commands` are run by the **harness** (deterministic) after the commit, not
-by the judger agent. With `eval.metrics` declared, the harness also parses the
-objective/gate `KEY=VALUE` lines out of eval output and computes the deltas the
-judger cites — the judger never extracts numbers from prose (a known
-hallucination vector). Best selection is then harness-owned too: among
-gate-pass, risk-not-high candidates, take the best objective; the judger's 0-1
-score demotes to a quality signal. A configured baseline eval must succeed,
-expose its objective, and pass every gate before the first proposer starts.
+by the judger agent. The harness also parses the objective/gate `KEY=VALUE`
+lines (declared in the required `eval.metrics` block) out of eval output and
+computes the deltas the judger cites — the judger never extracts numbers from
+prose (a known hallucination vector). Best selection is harness-owned too:
+among gate-pass, risk-not-high candidates, take the best objective; the
+judger's 0-1 score demotes to a quality signal (there is deliberately no
+score-based selection mode). The baseline eval must succeed, expose its
+objective, and pass every gate before the first proposer starts.
 
 ## Design
 
@@ -128,7 +136,7 @@ boundary, `reporting/` is observability.
 | --- | --- |
 | `loop.py` | main loop: RunContext, generations, winner selection, chaining |
 | `config.py` | read+validate task config |
-| `cli.py` | entry point (`run` / `validate` / `image build` / `memory show`) |
+| `cli.py` | entry point (`run` / `validate` / `plot` / `image build` / `memory show`) |
 | `roles/agent.py` | containerized `claude -p` wrapper (timeout, JSON/no-JSON modes) |
 | `roles/proposer.py` | goal+history+insights → N candidate directions (+ reflection) |
 | `roles/executor.py` | proposal → agent edits → gate → harness commit → SHA |
@@ -142,7 +150,7 @@ boundary, `reporting/` is observability.
 | `container/runtime.py` | mandatory Apptainer argv, environment policy, binds, preflight |
 | `container/image.py` | `apptainer build --fakeroot` shortcut |
 | `reporting/telemetry.py` | baseline, active worktime, and processed-token state |
-| `reporting/plot.py` | 3×3 overview and nine detail progress plots |
+| `reporting/plot.py` | 3×3 overview (loop-refreshed) + nine detail plots (`simpleloop plot`) |
 
 **Commit chain:** rounds link — round 0 forks `baseline_ref`, round n forks the
 last accepted round's SHA (a round with no accepted winner leaves the chain in

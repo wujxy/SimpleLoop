@@ -7,9 +7,29 @@ import pytest
 from simpleloop import loop as loop_mod
 from simpleloop.reporting import plot as plot_mod
 from simpleloop.roles.judger import _parse as parse_judgment
-from simpleloop.reporting.plot import build_series, write_progress_pngs
+from simpleloop.reporting.plot import build_series, write_detail_pngs
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry
+
+
+def _single_candidate_record(round_id: int, *, score, metrics,
+                             accepted: bool = True,
+                             telemetry: dict | None = None) -> dict:
+    """A one-candidate generation record (the only shape the loop writes)."""
+    record = {
+        "round": round_id,
+        "selected_candidate": 0 if accepted else None,
+        "selected_sha": f"sha-{round_id}" if accepted else None,
+        "candidates": [{
+            "candidate": 0,
+            "score": score,
+            "metrics": metrics,
+        }],
+    }
+    if telemetry is not None:
+        record["telemetry"] = telemetry
+        record["candidates"][0]["telemetry"] = telemetry
+    return record
 
 
 SCHEMA = {
@@ -63,26 +83,12 @@ def test_build_series_tracks_parallel_candidates_selected_and_incumbent():
     assert series.lower_is_better is True
 
 
-def test_build_series_supports_serial_history_and_missing_values():
+def test_build_series_supports_single_candidate_history_and_missing_values():
     history = [
-        {
-            "round": 0,
-            "accepted": True,
-            "score": 0.7,
-            "metrics": {"QUALITY": 10.0},
-        },
-        {
-            "round": 1,
-            "accepted": False,
-            "score": None,
-            "metrics": {"QUALITY": "unknown"},
-        },
-        {
-            "round": 2,
-            "accepted": True,
-            "score": True,
-            "metrics": {"QUALITY": 12},
-        },
+        _single_candidate_record(0, score=0.7, metrics={"QUALITY": 10.0}),
+        _single_candidate_record(
+            1, score=None, metrics={"QUALITY": "unknown"}, accepted=False),
+        _single_candidate_record(2, score=True, metrics={"QUALITY": 12}),
     ]
     schema = {
         "objective": {"key": "QUALITY", "lower_is_better": False},
@@ -103,12 +109,7 @@ def test_build_series_supports_serial_history_and_missing_values():
 
 def test_build_series_without_objective_schema_still_tracks_scores():
     history = [
-        {
-            "round": 0,
-            "accepted": True,
-            "score": 0.6,
-            "metrics": {"SPEED_MS": 100.0},
-        },
+        _single_candidate_record(0, score=0.6, metrics={"SPEED_MS": 100.0}),
     ]
 
     series = build_series(history, None)
@@ -146,12 +147,8 @@ def test_build_series_requires_selected_sha_to_advance_parallel_incumbent():
 
 def test_build_series_skips_non_finite_values():
     history = [
-        {
-            "round": 0,
-            "accepted": True,
-            "score": math.nan,
-            "metrics": {"SPEED_MS": math.inf},
-        },
+        _single_candidate_record(
+            0, score=math.nan, metrics={"SPEED_MS": math.inf}),
     ]
 
     series = build_series(history, SCHEMA)
@@ -223,23 +220,20 @@ def test_atomic_replace_failure_preserves_previous_png(monkeypatch, tmp_path):
 
 def test_refresh_progress_plot_uses_persisted_history(monkeypatch, tmp_path):
     store = Store(tmp_path, metrics_schema=SCHEMA)
-    store.append(
-        0,
-        "proposal",
-        "sha",
-        0.8,
-        "feedback",
-        eval_metrics={"SPEED_MS": 90.0, "CORRECTNESS": True},
-        risk="low",
-        accepted=True,
-        base_sha="sha",
-    )
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
+        candidates=[{
+            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
+            "risk": "low", "accepted": True, "feedback": "feedback",
+            "metrics": {"SPEED_MS": 90.0, "CORRECTNESS": True},
+        }])
     captured = {}
 
-    def capture(run_dir, history, metrics_schema):
+    def capture(run_dir, history, metrics_schema, plot_context):
         captured["run_dir"] = run_dir
         captured["history"] = history
         captured["metrics_schema"] = metrics_schema
+        captured["plot_context"] = plot_context
         return tmp_path / "progress.png"
 
     monkeypatch.setattr(loop_mod.plot_mod, "write_progress_png", capture)
@@ -250,6 +244,7 @@ def test_refresh_progress_plot_uses_persisted_history(monkeypatch, tmp_path):
         "run_dir": tmp_path,
         "history": store.history(),
         "metrics_schema": SCHEMA,
+        "plot_context": None,
     }
 
 
@@ -269,17 +264,13 @@ def test_refresh_progress_plot_swallows_history_read_failure(monkeypatch, tmp_pa
 def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     run_dir = tmp_path / "run"
     store = Store(run_dir, metrics_schema=SCHEMA)
-    store.append(
-        0,
-        "proposal",
-        "sha",
-        0.8,
-        "feedback",
-        eval_metrics={"SPEED_MS": 90.0, "CORRECTNESS": True},
-        risk="low",
-        accepted=True,
-        base_sha="sha",
-    )
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
+        candidates=[{
+            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
+            "risk": "low", "accepted": True, "feedback": "feedback",
+            "metrics": {"SPEED_MS": 90.0, "CORRECTNESS": True},
+        }])
     config = {
         "goal": "make it faster",
         "max_rounds": 1,
@@ -324,6 +315,8 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
 
     assert summary["rounds"] == 1
     assert (run_dir / "progress.png").exists()
+    # detail images are offline-only (`simpleloop plot`), never loop-written
+    assert not (run_dir / "progress-score-vs-round.png").exists()
     assert not (run_dir / "final_report.md").exists()
 
 
@@ -478,13 +471,10 @@ def test_invalid_baseline_omits_ratio_but_keeps_objective(baseline):
     assert series.baseline is None
 
 
-def test_legacy_history_keeps_round_data_without_resource_coordinates():
-    series = build_series([{
-        "round": 0,
-        "accepted": True,
-        "score": 0.7,
-        "metrics": {"SPEED_MS": 90.0},
-    }], SCHEMA)
+def test_history_without_telemetry_keeps_round_data():
+    series = build_series([
+        _single_candidate_record(0, score=0.7, metrics={"SPEED_MS": 90.0}),
+    ], SCHEMA)
 
     point = series.candidates[0]
     assert point.round == 1
@@ -495,13 +485,15 @@ def test_legacy_history_keeps_round_data_without_resource_coordinates():
     assert point.ratio is None
 
 
-def test_write_progress_pngs_creates_overview_and_nine_details(tmp_path):
-    outputs = write_progress_pngs(tmp_path, HISTORY, SCHEMA, CONTEXT)
+def test_write_detail_pngs_creates_nine_details(tmp_path):
+    outputs = write_detail_pngs(tmp_path, HISTORY, SCHEMA, CONTEXT)
 
-    assert {path.name for path in outputs} == {"progress.png"} | DETAIL_OUTPUTS
+    assert {path.name for path in outputs} == DETAIL_OUTPUTS
     for path in outputs:
         assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert path.stat().st_size > 5_000
+    # the offline detail writer never touches the loop-owned overview
+    assert not (tmp_path / "progress.png").exists()
 
 
 def test_objective_panel_title_retains_configured_direction():
@@ -578,12 +570,12 @@ def test_one_detail_failure_preserves_old_file_and_other_outputs(
 
     monkeypatch.setattr(plot_mod, "_render_detail", fail_one)
 
-    outputs = write_progress_pngs(tmp_path, HISTORY, SCHEMA, CONTEXT)
+    outputs = write_detail_pngs(tmp_path, HISTORY, SCHEMA, CONTEXT)
 
     assert failed.read_bytes() == b"previous"
     assert failed not in outputs
-    assert (tmp_path / "progress.png") in outputs
     assert (tmp_path / "progress-objective-vs-tokens.png") in outputs
+    assert len(outputs) == len(DETAIL_OUTPUTS) - 1
 
 
 # ---- persisted plot context / continue-mode plots (merged from test_plot_context.py) ----
@@ -598,15 +590,13 @@ def test_refresh_progress_plot_passes_persisted_context(
     monkeypatch, tmp_path,
 ):
     store = Store(tmp_path, metrics_schema=SCHEMA_NO_GATES)
-    store.append(
-        0,
-        "proposal",
-        "sha",
-        0.8,
-        "feedback",
-        eval_metrics={"SPEED_MS": 90.0},
-        accepted=True,
-    )
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
+        candidates=[{
+            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
+            "risk": "low", "accepted": True, "feedback": "feedback",
+            "metrics": {"SPEED_MS": 90.0},
+        }])
     context = {
         "baseline_metrics": {"SPEED_MS": 100.0},
         "baseline_telemetry": {
@@ -623,9 +613,9 @@ def test_refresh_progress_plot_passes_persisted_context(
             "metrics_schema": metrics_schema,
             "plot_context": plot_context,
         })
-        return []
+        return run_dir / "progress.png"
 
-    monkeypatch.setattr(loop_mod.plot_mod, "write_progress_pngs", capture)
+    monkeypatch.setattr(loop_mod.plot_mod, "write_progress_png", capture)
 
     loop_mod._refresh_progress_plot(store, context)
 
@@ -642,15 +632,13 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
 ):
     run_dir = tmp_path / "run"
     store = Store(run_dir, metrics_schema=SCHEMA_NO_GATES)
-    store.append(
-        0,
-        "proposal",
-        "sha",
-        0.8,
-        "feedback",
-        eval_metrics={"SPEED_MS": 90.0},
-        accepted=True,
-    )
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
+        candidates=[{
+            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
+            "risk": "low", "accepted": True, "feedback": "feedback",
+            "metrics": {"SPEED_MS": 90.0},
+        }])
     telemetry = RunTelemetry(run_dir)
     telemetry.set_baseline({"SPEED_MS": 100.0})
     expected = telemetry.plot_context()
@@ -703,3 +691,95 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
     loop_mod.run("config.yaml", run_dir, continue_run=True)
 
     assert contexts == [expected]
+
+
+# ---- offline plotting entry: simpleloop plot ----
+
+def test_plot_command_redraws_overview_and_details_offline(tmp_path, capsys):
+    import json
+    import yaml
+
+    from simpleloop import cli as cli_mod
+    from simpleloop.reporting import telemetry as telemetry_mod
+
+    # a real minimal config (the plot command loads it for eval.metrics)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    image = tmp_path / "runtime.sif"
+    image.write_bytes(b"SIF-test-double")
+    config_path = tmp_path / "task.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "kind": "task",
+        "task": {"goal": "go faster"},
+        "safety": {"editable_paths": ["src/**"]},
+        "loop": {"max_rounds": 1},
+        "runtime": {"image": "runtime.sif"},
+        "source": {"path": str(repo)},
+        "eval": {
+            "commands": ["run-eval"],
+            "metrics": {
+                "objective": {"key": "SPEED_MS", "lower_is_better": True},
+                "gates": [{"key": "CORRECTNESS"}],
+            },
+        },
+    }), encoding="utf-8")
+
+    # a run dir as the loop leaves it: history.jsonl + telemetry.json
+    run_dir = tmp_path / "run"
+    store = Store(run_dir, metrics_schema=SCHEMA)
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=1, selected_sha="winner",
+        candidates=HISTORY[0]["candidates"],
+        telemetry=HISTORY[0]["telemetry"],
+    )
+    (run_dir / "telemetry.json").write_text(json.dumps({
+        "worktime_seconds": 30.0,
+        "processed_tokens": 300,
+        "baseline_metrics": CONTEXT["baseline_metrics"],
+        "baseline_telemetry": CONTEXT["baseline_telemetry"],
+    }), encoding="utf-8")
+
+    assert telemetry_mod.load_plot_context(run_dir) == CONTEXT
+
+    cli_mod.main([
+        "plot", "--config", str(config_path), "--run-dir", str(run_dir),
+    ])
+
+    written = {p.name for p in run_dir.glob("progress*.png")}
+    assert written == {"progress.png"} | DETAIL_OUTPUTS
+    out = capsys.readouterr().out
+    assert out.count("Wrote ") == 10
+
+
+def test_plot_command_requires_existing_history(tmp_path):
+    import yaml
+
+    from simpleloop import cli as cli_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (tmp_path / "runtime.sif").write_bytes(b"SIF-test-double")
+    config_path = tmp_path / "task.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "kind": "task",
+        "task": {"goal": "go faster"},
+        "safety": {"editable_paths": ["src/**"]},
+        "loop": {"max_rounds": 1},
+        "runtime": {"image": "runtime.sif"},
+        "source": {"path": str(repo)},
+        "eval": {
+            "commands": ["run-eval"],
+            "metrics": {
+                "objective": {"key": "SPEED_MS", "lower_is_better": True},
+                "gates": [],
+            },
+        },
+    }), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        cli_mod.main([
+            "plot", "--config", str(config_path),
+            "--run-dir", str(tmp_path / "no-such-run"),
+        ])
