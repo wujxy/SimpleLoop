@@ -36,14 +36,15 @@ Apptainer's normal home mount.
 ## Run
 
 ```bash
-simpleloop image build examples/apptainer.def
-simpleloop validate --config examples/task.yaml
+simpleloop init --config examples/task.yaml
 simpleloop run --config examples/task.yaml --run-dir ./runs/001
 ```
 
-The generic `examples/task.yaml` still needs a real `source.path`; its build
-command creates the adjacent `examples/apptainer.sif`. Generated `*.sif` files
-are ignored by Git. To reuse one shared image, set `runtime.image` to that SIF.
+First replace the placeholder `source.path` in the generic
+`examples/task.yaml`. `simpleloop init` creates a Git baseline when the source
+directory is not already a repository, builds a missing Apptainer image, and
+reuses an existing image after preflight. Generated `*.sif` files are ignored
+by Git. `simpleloop image build` remains available for manual image management.
 
 Each run:
 
@@ -93,6 +94,7 @@ loop:
   proposer_recent_rounds: 6   # optional; rounds of history fed to the proposer
 runtime:
   image: /path/to/simpleloop-runtime.sif
+  definition: /path/to/simpleloop-runtime.def  # optional; inferred from image
   binds:                      # optional; absolute same-path directory mounts
     - /cvmfs
     - /data/juno
@@ -116,6 +118,9 @@ All three Claude roles and `eval.commands` run inside the same SIF with
 automatically; large external resources are mounted from `runtime.binds` at
 unchanged absolute paths. Git clone/worktree/gating/history logic remains on
 the host. There is no host-execution fallback.
+
+`simpleloop init` stages all files when it creates the baseline commit, so set
+the source repository's `.gitignore` before initializing it.
 
 `eval.commands` are run by the **harness** (deterministic) after the commit, not
 by the judger agent. The harness also parses the objective/gate `KEY=VALUE`

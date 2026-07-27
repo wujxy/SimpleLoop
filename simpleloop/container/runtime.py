@@ -37,7 +37,7 @@ _BLOCKED_PREFIXES = (
 )
 _BLOCKED_EXACT = frozenset({"which_declare"})
 _PREFLIGHT_SCRIPT = """
-for tool in bash git gcc g++ make cmake node claude; do
+for tool in bash git node claude; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'missing tool: %s\\n' "$tool" >&2
         exit 127

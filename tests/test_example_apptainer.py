@@ -17,18 +17,21 @@ OMILREC_DIRS = [
     EXAMPLES / "omilrec-opt",
     EXAMPLES / "omilrec-post-v107-opt",
 ]
-TASK_CONFIGS = [
+LEAN_CONFIGS = [
     EXAMPLES / "task.yaml",
     EXAMPLES / "tiny_algo_opt" / "task.yaml",
+]
+JUNOSW_CONFIGS = [
+    EXAMPLES / "omilrec-v100-opt" / "task.yaml",
+    EXAMPLES / "omilrec-v100-opt" / "task_hints.yaml",
+    EXAMPLES / "omilrec-v100-opt" / "task_nohints.yaml",
     EXAMPLES / "omilrec-opt" / "task.yaml",
     EXAMPLES / "omilrec-opt" / "omilrec-v1.11.0.yaml",
     EXAMPLES / "omilrec-post-v107-opt" / "task.yaml",
+    EXAMPLES / "omilrec-post-v107-opt" / "task_hints.yaml",
+    EXAMPLES / "omilrec-post-v107-opt" / "task_nohints.yaml",
 ]
-BUILD_COMMANDS = {
-    EXAMPLES: "simpleloop image build examples/apptainer.def",
-    EXAMPLES / "tiny_algo_opt":
-        "simpleloop image build examples/tiny_algo_opt/apptainer.def",
-}
+TASK_CONFIGS = [*LEAN_CONFIGS, *JUNOSW_CONFIGS]
 
 
 def test_def_examples_have_independent_regular_definitions():
@@ -49,9 +52,8 @@ def test_definitions_contain_pinned_runtime_tools():
         assert "From: almalinux:9" in text
         assert "node-v22.19.0-linux-x64.tar.xz" in text
         assert "@anthropic-ai/claude-code@2.1.216" in text
-        # The defs' %test self-checks the interpreter/agent layer; the build
-        # toolchain (gcc/g++/make/cmake) is verified at run time by the
-        # runtime preflight inside the image instead.
+        # Lean definitions self-check their interpreter and agent layer.
+        # Task-specific toolchains belong in their own definition/eval.
         for command in (
             "bash",
             "git",
@@ -89,11 +91,18 @@ def test_python_examples_provide_the_unversioned_python_command():
         assert "command -v python" in text
 
 
-def test_all_example_configs_reference_adjacent_image():
-    for path in TASK_CONFIGS:
+def test_lean_configs_infer_same_name_definition():
+    for path in LEAN_CONFIGS:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert raw["runtime"]["image"] == "apptainer.sif"
-        assert isinstance(raw["runtime"].get("binds", []), list)
+        assert "definition" not in raw["runtime"]
+
+
+def test_junosw_configs_name_shared_image_and_definition():
+    for path in JUNOSW_CONFIGS:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert raw["runtime"]["image"] == "../junosw-apptainer.sif"
+        assert raw["runtime"]["definition"] == "../junosw-apptainer.def"
 
 
 def test_omilrec_configs_bind_large_external_roots():
@@ -112,12 +121,10 @@ def test_generated_sifs_are_ignored():
     ).read_text(encoding="utf-8").splitlines()
 
 
-def test_each_example_readme_shows_its_local_build_command():
-    for directory, command in BUILD_COMMANDS.items():
+def test_primary_readmes_show_init_command():
+    for directory in [ROOT, EXAMPLES, EXAMPLES / "tiny_algo_opt"]:
         text = (directory / "README.md").read_text(encoding="utf-8")
-        assert command in text
-        assert "apptainer.sif" in text
-        assert "runtime.image" in text
+        assert "simpleloop init --config" in text
 
 
 def test_omilrec_readmes_name_required_external_binds():

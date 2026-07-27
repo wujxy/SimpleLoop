@@ -12,6 +12,7 @@ Minimal schema:
   loop.max_workers: int              (optional, default 1; candidate concurrency)
   loop.proposer_recent_rounds: int   (optional, default 6; rounds of history fed to proposer)
   runtime.image: path                (required; readable SIF image)
+  runtime.definition: path           (optional; defaults beside image with .def suffix)
   runtime.binds: [absolute dir]      (optional, default [])
   eval.commands: [str]                (required non-empty; harness-run after each commit)
   eval.metrics: {objective, gates}    (required; the key=value lines the harness parses)
@@ -64,8 +65,16 @@ def load_resolved(run_dir: str | Path) -> dict[str, Any]:
     return resolved
 
 
-def load(config_path: str | Path) -> dict[str, Any]:
-    """Load and validate a task config. Returns the resolved config dict."""
+def load(
+    config_path: str | Path,
+    *,
+    require_ready: bool = True,
+) -> dict[str, Any]:
+    """Load and validate a task config.
+
+    ``require_ready=False`` still validates the complete schema, but permits
+    ``simpleloop init`` to create missing Git metadata and the runtime image.
+    """
     path = Path(config_path).expanduser().resolve()
     text = path.read_text(encoding="utf-8")
     if path.suffix.lower() == ".json":
@@ -76,10 +85,15 @@ def load(config_path: str | Path) -> dict[str, Any]:
         raise ConfigError(f"config: unsupported extension {path.suffix!r}; use .json/.yaml/.yml")
     if not isinstance(raw, dict):
         raise ConfigError("config: top-level value must be an object")
-    return _resolve(raw, path)
+    return _resolve(raw, path, require_ready=require_ready)
 
 
-def _resolve(raw: dict, path: Path) -> dict:
+def _resolve(
+    raw: dict,
+    path: Path,
+    *,
+    require_ready: bool,
+) -> dict:
     unknown = set(raw) - TASK_TOP_KEYS
     if unknown:
         raise ConfigError(f"config: unknown top-level key(s): {sorted(unknown)}")
@@ -90,7 +104,11 @@ def _resolve(raw: dict, path: Path) -> dict:
     safety = _need(raw, "safety", dict)
     loop = _need(raw, "loop", dict)
     source = _need(raw, "source", dict)
-    runtime_image, runtime_binds = _resolve_runtime(raw.get("runtime"), path)
+    runtime_image, runtime_definition, runtime_binds = _resolve_runtime(
+        raw.get("runtime"),
+        path,
+        require_ready=require_ready,
+    )
     goal = task.get("goal")
     if not goal:
         raise ConfigError("task.goal: required and must be non-empty")
@@ -126,7 +144,11 @@ def _resolve(raw: dict, path: Path) -> dict:
     if not src_path:
         raise ConfigError("source.path: required")
     repo = Path(_rel(src_path, path)).resolve()
-    if not (repo / ".git").exists():
+    if not repo.is_dir():
+        raise ConfigError(
+            f"source.path: does not exist or is not a directory: {repo}"
+        )
+    if require_ready and not (repo / ".git").exists():
         raise ConfigError(f"source.path: not a git repo: {repo}")
     baseline_ref = str(source.get("baseline_ref") or "HEAD")
 
@@ -167,6 +189,7 @@ def _resolve(raw: dict, path: Path) -> dict:
         "max_workers": int(max_workers),
         "proposer_recent_rounds": int(proposer_recent_rounds),
         "runtime_image": runtime_image,
+        "runtime_definition": runtime_definition,
         "runtime_binds": runtime_binds,
         "eval_commands": eval_commands,
         "eval_timeout_seconds": int(eval_timeout),
@@ -179,11 +202,16 @@ def _resolve(raw: dict, path: Path) -> dict:
     }
 
 
-def _resolve_runtime(raw: object, config_path: Path) -> tuple[str, list[str]]:
+def _resolve_runtime(
+    raw: object,
+    config_path: Path,
+    *,
+    require_ready: bool,
+) -> tuple[str, str, list[str]]:
     """Validate and resolve the mandatory Apptainer runtime block."""
     if not isinstance(raw, dict):
         raise ConfigError("runtime: required and must be an object")
-    unknown = set(raw) - {"image", "binds"}
+    unknown = set(raw) - {"image", "definition", "binds"}
     if unknown:
         raise ConfigError(f"runtime: unknown key(s): {sorted(unknown)}")
 
@@ -191,12 +219,22 @@ def _resolve_runtime(raw: object, config_path: Path) -> tuple[str, list[str]]:
     if not isinstance(image_value, str) or not image_value.strip():
         raise ConfigError("runtime.image: required non-empty path")
     image = Path(_rel(image_value, config_path)).expanduser().resolve()
-    if not image.is_file():
-        raise ConfigError(
-            f"runtime.image: does not exist or is not a file: {image}"
-        )
-    if not os.access(image, os.R_OK):
-        raise ConfigError(f"runtime.image: not readable: {image}")
+    definition_value = raw.get("definition")
+    if definition_value is None:
+        definition = image.with_suffix(".def")
+    elif not isinstance(definition_value, str) or not definition_value.strip():
+        raise ConfigError("runtime.definition: must be a non-empty path")
+    else:
+        definition = Path(
+            _rel(definition_value, config_path)
+        ).expanduser().resolve()
+    if require_ready:
+        if not image.is_file():
+            raise ConfigError(
+                f"runtime.image: does not exist or is not a file: {image}"
+            )
+        if not os.access(image, os.R_OK):
+            raise ConfigError(f"runtime.image: not readable: {image}")
 
     raw_binds = raw.get("binds", [])
     if not isinstance(raw_binds, list):
@@ -225,7 +263,7 @@ def _resolve_runtime(raw: object, config_path: Path) -> tuple[str, list[str]]:
                 f"separator (':' or ','): {bind}"
             )
         binds.append(str(bind))
-    return str(image), binds
+    return str(image), str(definition), binds
 
 
 def _resolve_metrics(raw: object) -> dict:

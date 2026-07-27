@@ -21,13 +21,13 @@ batches, all targeting the OMILRECV2 FCN / likelihood hot path:
 
 ```
 omilrec-opt/
-  apptainer.sif                  # symlink -> ../junosw-apptainer.sif (shared; see below)
   task.yaml                       # the v1.0.0 paper-reproduction task config
   omilrec-v1.11.0.yaml            # sibling task config targeting v1.11.0
   omilrec-paper-proposals-test.yaml    # static proposals 1-4   (smoke)
   omilrec-paper-proposals-main.yaml    # static proposals 1-12  (primary)
   omilrec-paper-proposals-total.yaml  # static proposals 1-18  (full set)
   omilrec-paper-proposals-summary.md   # index + recommended order
+../junosw-apptainer.sif          # shared runtime built by simpleloop init
 ../../../omilrec-v100/            # v1.0.0 source repo (task.yaml target)
   OMILRECV2/src/                  # the algorithm — the only editable surface
   reference/ref_10evt.root        # FROZEN bit-identical baseline (10 events, tol 0)
@@ -90,11 +90,9 @@ start gated by the post-v1.0.7 FCN replay + relaxed reconstruction tolerances).
 ## Run
 
 ```bash
-# from the SimpleLoop checkout — build the SHARED junosw image once
-simpleloop image build examples/junosw-apptainer.def \
-            --output   examples/junosw-apptainer.sif
-simpleloop validate --config examples/omilrec-opt/task.yaml
-simpleloop run      --config examples/omilrec-opt/task.yaml --run-dir ./runs/omilrec-opt-001
+# from the SimpleLoop checkout — initialize the source and shared image
+simpleloop init --config examples/omilrec-opt/task.yaml
+simpleloop run --config examples/omilrec-opt/task.yaml --run-dir ./runs/omilrec-opt-001
 
 # replay the paper's optimization sequence instead of the live proposer:
 simpleloop run --config examples/omilrec-opt/task.yaml \
@@ -105,10 +103,10 @@ simpleloop run --config examples/omilrec-opt/task.yaml \
 simpleloop run --config examples/omilrec-opt/omilrec-v1.11.0.yaml --run-dir ./runs/omilrec-v1110-001
 ```
 
-`runtime.image: apptainer.sif` resolves relative to this task config, and
-`apptainer.sif` here is a symlink to the shared `../junosw-apptainer.sif`.
-Both omilrec tasks (omilrec-opt and omilrec-post-v107-opt) reuse that one
-image; build it once and both are ready.
+`runtime.image: ../junosw-apptainer.sif` and
+`runtime.definition: ../junosw-apptainer.def` resolve relative to this task
+config. Both omilrec tasks reuse that one image; initialize either task once
+and both can reuse it.
 
 The v1.0.0 task defaults to `candidates_per_round: 3` and `max_workers: 3`. With
 `max_rounds: 40`, one run can execute up to 120 candidates and three concurrent

@@ -142,6 +142,14 @@ repeating them. Pay particular attention to the objective change relative to
 the direct accepted parent. Passing a gate means an experiment was valid; it
 does not by itself mean the idea was beneficial.
 
+Before proposing, compare each candidate by code region and optimization mechanism
+against prior outcomes. Renaming, narrowing, or slightly restructuring a neutral
+or regressed idea still counts as the same direction. Do not retry that direction
+unless the proposal identifies materially new evidence, a genuinely different
+mechanism, or a changed measurement protocol. Treat older insights as stale when
+newer measured outcomes contradict them. Keep candidates in the same batch
+meaningfully distinct in mechanism or code region.
+
 Use the current accepted source to keep proposals connected to real code.
 Source reading supports proposal generation; it is not a separate code-review
 or verification task. You do not need to trace every call, inspect every helper,

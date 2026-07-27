@@ -41,7 +41,8 @@ loop:
   proposer_recent_rounds: 4     # rounds of prior history fed to the proposer (down from 6)
 
 runtime:
-  image: apptainer.sif
+  image: ../junosw-apptainer.sif
+  definition: ../junosw-apptainer.def
   binds:
     - /cvmfs
     - /data/juno

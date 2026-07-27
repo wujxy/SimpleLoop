@@ -55,7 +55,8 @@ loop:
   proposer_recent_rounds: 4
 
 runtime:
-  image: apptainer.sif
+  image: ../junosw-apptainer.sif
+  definition: ../junosw-apptainer.def
   binds:
     - /cvmfs
     - /data/juno

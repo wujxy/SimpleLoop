@@ -22,36 +22,33 @@ examples/
   libs.
 - `junosw-apptainer.def` — the fat image. Adds gcc/cmake plus the
   freetype/X11/GL/ICU/nsl2 system-library chain that junosw's shared libs
-  link (libBufferMemMgr.so, libDetSimMT.so, …). Build this once and both
-  omilrec tasks reuse it via their `apptainer.sif` symlink →
-  `../junosw-apptainer.sif`.
+  link (libBufferMemMgr.so, libDetSimMT.so, …). Both omilrec tasks point
+  directly at the shared `junosw-apptainer.sif`.
 
 ## `task.yaml` — reference template
 
 A heavily-commented config covering the full schema (`task` / `safety` /
 `loop` / `runtime` / `eval` / `source`, including the optional `eval.metrics`
 objective + gates block). Not runnable as-is — its `source.path` is a
-placeholder. Build the adjacent image, copy the YAML, point `source.path` at a
-real git repo, and validate it. Schema + validation live in
+placeholder. Copy the YAML, point `source.path` at an existing source
+directory, and initialize it. Schema + validation live in
 `../simpleloop/config.py` (strict: unknown keys error at validate).
 
 ```bash
-simpleloop image build examples/apptainer.def
+simpleloop init --config examples/task.yaml
 ```
 
-The default output is `examples/apptainer.sif`, matching `runtime.image` in the
-template. You may instead use `--output` for one shared prebuilt SIF and update
-`runtime.image`. Generated SIF files are not committed.
+The default inferred definition is `examples/apptainer.def`, beside the
+configured `examples/apptainer.sif`. Generated SIF files are not committed.
 
 ## `tiny_algo_opt/` — the toy target
 
 A deliberately-slow-but-correct 2-D Manhattan pair-counting function. The whole
 target ships in-repo (`repo/tinyalgo/__init__.py`) — initialize it once with
-`setup.sh` (it has no `.git`, so SimpleLoop's `git clone --local` needs it
-initialized), then run. Good for exercising SimpleLoop end-to-end without the
-JUNO environment: correctness (`pytest`) + drift (`check_drift.py`) are hard
-gates, `bench.py`'s `ms_per_call` is the objective. See
-`tiny_algo_opt/README.md`.
+`simpleloop init` (it has no committed `.git`, so the command creates its
+baseline), then run. Good for exercising SimpleLoop end-to-end without the JUNO
+environment: correctness (`pytest`) + drift (`check_drift.py`) are hard gates,
+`bench.py`'s `ms_per_call` is the objective. See `tiny_algo_opt/README.md`.
 
 ## `omilrec-opt/` — OMILRECV2, paper reproduction + v1.11.0
 
@@ -87,13 +84,15 @@ correctness contract. See `omilrec-post-v107-opt/README.md`.
 
 ```bash
 # from the SimpleLoop checkout (cwd = SimpleLoop/)
-# build the right image for the task:
-#   tiny_algo_opt  -> examples/apptainer.def      (lean)
-#   omilrec-*      -> examples/junosw-apptainer.def (fat; shared by both)
-simpleloop image build examples/junosw-apptainer.def --output examples/junosw-apptainer.sif
-simpleloop validate --config examples/<folder>/task.yaml
-simpleloop run      --config examples/<folder>/task.yaml --run-dir ./runs/<name>-001
+simpleloop init --config examples/<folder>/task.yaml
+simpleloop run --config examples/<folder>/task.yaml --run-dir ./runs/<name>-001
 ```
+
+The source directory must exist. `init` creates missing Git metadata and a
+baseline commit, builds a missing image from `runtime.definition` (or the
+same-name `.def` inferred from `runtime.image`), and skips a usable existing
+image. Pass `--force` to rebuild the configured image. `runtime.binds` remains
+optional and is needed only for external directories.
 
 SimpleLoop always launches Claude and evaluation inside the configured SIF.
 The OMILRECV2 YAMLs bind `/cvmfs`, `/data/juno`, and project storage at their

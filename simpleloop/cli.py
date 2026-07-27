@@ -14,6 +14,7 @@ from . import config as config_mod
 from .harness import memory
 from .container.image import ImageBuildError, build_image
 from .container.runtime import RuntimePreflightError
+from .initialize import InitError, initialize
 from .reporting import plot as plot_mod
 from .reporting import telemetry as telemetry_mod
 
@@ -44,6 +45,21 @@ def main(argv: list[str] | None = None) -> None:
 
     validate = sub.add_parser("validate", help="Validate a config without running.")
     validate.add_argument("--config", required=True, help="Task config (YAML/JSON).")
+
+    init_parser = sub.add_parser(
+        "init",
+        help="Prepare a task's Git repository and Apptainer image.",
+    )
+    init_parser.add_argument(
+        "--config",
+        required=True,
+        help="Task config (YAML/JSON).",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild the configured Apptainer image even when it exists.",
+    )
 
     image_parser = sub.add_parser(
         "image",
@@ -115,6 +131,22 @@ def main(argv: list[str] | None = None) -> None:
     memory_show.add_argument("--run-dir")
 
     args = parser.parse_args(argv)
+
+    if args.command == "init":
+        try:
+            result = initialize(args.config, force=args.force)
+        except (config_mod.ConfigError, InitError) as exc:
+            print(f"Init error: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Initializing: {args.config}")
+        print(f"  Git source: {result.repo_status} ({result.repo_path})")
+        print(
+            f"  Apptainer image: {result.image_status} "
+            f"({result.image_path})"
+        )
+        print("  Configuration: valid")
+        print("Ready to run.")
+        return
 
     if args.command == "image":
         try:

@@ -59,7 +59,74 @@ def test_relative_image_resolves_and_binds_default_empty(tmp_path: Path):
     )
 
     assert cfg["runtime_image"] == str(image.resolve())
+    assert cfg["runtime_definition"] == str(
+        (tmp_path / "runtime.def").resolve()
+    )
     assert cfg["runtime_binds"] == []
+
+
+def test_runtime_accepts_explicit_relative_definition(tmp_path: Path):
+    image = tmp_path / "runtime.sif"
+    image.write_bytes(b"test")
+
+    cfg = config_mod.load(
+        _write_task(
+            tmp_path,
+            {
+                "image": "runtime.sif",
+                "definition": "containers/base.def",
+            },
+        )
+    )
+
+    assert cfg["runtime_definition"] == str(
+        (tmp_path / "containers/base.def").resolve()
+    )
+
+
+def test_prepare_load_allows_missing_git_metadata_and_image(tmp_path: Path):
+    task = _write_task(
+        tmp_path,
+        {"image": "missing.sif", "definition": "runtime.def"},
+    )
+    repo = tmp_path / "repo"
+    (repo / ".git").rmdir()
+
+    cfg = config_mod.load(task, require_ready=False)
+
+    assert cfg["repo_path"] == str(repo.resolve())
+    assert cfg["runtime_image"] == str((tmp_path / "missing.sif").resolve())
+
+
+def test_prepare_load_still_requires_existing_source_directory(
+    tmp_path: Path,
+):
+    task = _write_task(
+        tmp_path,
+        {"image": "missing.sif", "definition": "runtime.def"},
+    )
+    repo = tmp_path / "repo"
+    (repo / ".git").rmdir()
+    repo.rmdir()
+
+    with pytest.raises(
+        config_mod.ConfigError,
+        match="source.path.*directory",
+    ):
+        config_mod.load(task, require_ready=False)
+
+
+def test_prepare_load_still_validates_unrelated_schema(tmp_path: Path):
+    task = _write_task(
+        tmp_path,
+        {"image": "missing.sif", "definition": "runtime.def"},
+    )
+    raw = yaml.safe_load(task.read_text(encoding="utf-8"))
+    raw["loop"]["max_rounds"] = 0
+    task.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match="loop.max_rounds"):
+        config_mod.load(task, require_ready=False)
 
 
 def test_runtime_accepts_absolute_existing_bind_directories(tmp_path: Path):
@@ -413,7 +480,12 @@ def test_preflight_uses_one_container_probe(monkeypatch, tmp_path: Path):
     assert runtime.executable == "/usr/bin/apptainer"
     assert seen["argv"][-5] == "bash"
     assert seen["argv"][-4] == "-c"
-    assert "command -v" in seen["argv"][-3]
+    probe = seen["argv"][-3]
+    assert "command -v" in probe
+    for tool in ("bash", "git", "node", "claude"):
+        assert tool in probe
+    for task_specific_tool in ("gcc", "g++", "make", "cmake"):
+        assert task_specific_tool not in probe
     assert seen["argv"][-1] == str(runtime.run_dir)
     assert seen["kwargs"]["shell"] is False
     assert seen["kwargs"]["cwd"] == str(runtime.run_dir)
