@@ -206,6 +206,10 @@ repeating them. Pay particular attention to the objective change relative to
 the direct accepted parent. Passing a gate means an experiment was valid; it
 does not by itself mean the idea was beneficial.
 
+Use history as evidence for eliminating exhausted hypotheses, not as a menu of
+directions to extend. Generate candidates from the current accepted source, then
+use prior outcomes to reject reformulations of earlier attempts.
+
 Use the current accepted source to keep proposals connected to real code.
 Source reading supports proposal generation; it is not a separate code-review
 or verification task. You do not need to trace every call, inspect every helper,

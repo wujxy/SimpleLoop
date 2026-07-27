@@ -381,6 +381,10 @@ def test_judge_passes_schema_and_custom_label(tmp_path: Path, capsys):
     assert agent.schema == _judger_schema()
     assert '"feedback": "<300-500 chars, four-part>"' in agent.prompt
     assert '"feedback_for_proposer"' in agent.prompt
+    prompt = " ".join(agent.prompt.split())
+    assert "records what the experiment established" in prompt
+    assert "Keep it evidence-centered and diagnostic" in prompt
+    assert "do not prescribe future experiments" in prompt
     assert agent.label == "judger r1-c0"
     assert capsys.readouterr().out == (
         "[judger r1-c0] warning: feedback length 1001 exceeds 1000; "

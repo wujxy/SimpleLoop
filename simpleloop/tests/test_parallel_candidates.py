@@ -389,6 +389,10 @@ def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     assert "not a single continue/switch verdict for the whole batch" in prompt
     assert "Once the EXECUTOR has enough to take over" in prompt
     assert "objective change relative to the direct accepted parent" in prompt
+    assert "Use history as evidence for eliminating exhausted hypotheses" in prompt
+    assert "not as a menu of directions to extend" in prompt
+    assert "Generate candidates from the current accepted source" in prompt
+    assert "use prior outcomes to reject reformulations of earlier attempts" in prompt
     assert "git show base-sha:<path>" in prompt
     assert "Propose exactly 3 experiments" in prompt
     assert "At most 600 characters" in prompt

@@ -224,7 +224,7 @@ Change (git diff vs the previous round's result):
 Judging guidance:
 - Judge whether the change moves toward the goal, achieves real improvement, introduces risk, and is good-quality code.
 {eval_guidance}{facts_guidance}- Penalize unsupported claims, regressions vs the prior round, and changes that break a gate.
-- Give objective facts about what landed, how it measured, and why it behaved that way. Do not choose the next direction.
+- Give objective facts about what landed, how it measured, and why it behaved that way. Do not choose the next direction and do not give any suggestions, only forces on objective facts and judgement.
 - `risk` is your read of the refactor's LATENT correctness risk (not the measured speed - the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-faithful move with the same operators/evaluation order/types. Be concrete in feedback about WHY the risk level.
 
 Final delivery contract (mandatory):
@@ -237,13 +237,9 @@ Final delivery contract (mandatory):
   Result: <one sentence - the key metric + vs-prior delta + gate pass/fail>
   Analysis: <two sentences - why it succeeded/regressed/failed, and the key heuristic; do not pick the next direction>
 - LANDING_STATE: `not-implemented` (a real diff/commit this round), `already-implemented` (executor made no change, reason="executor made no changes"), `gate-rejected` (changes made but frozen_paths gate rejected them).
-- `feedback_for_proposer` is a short search-context note for later proposal
-  generation. In one or two concise sentences, capture the smallest reusable
-  lesson about the attempted mechanism. When the evidence permits, distinguish
-  what the result says about the mechanism from what may be specific to this
-  implementation. Keep implementation diagnosis in `feedback`; this note does
-  not need to repeat metrics already provided by the harness.
-- Do not suggest the next direction; give current-state diagnostics only.
+- `feedback_for_proposer` records what the experiment established and the smallest
+  reusable lesson. Keep it evidence-centered and diagnostic; do not prescribe
+  future experiments.
 - If evidence is incomplete or contradictory, still return the JSON object with a low score and explain the uncertainty in `feedback`.
 """
 
