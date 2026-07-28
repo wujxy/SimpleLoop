@@ -22,10 +22,12 @@ from pathlib import Path
 import yaml
 
 from .roles.agent import Agent, AgentError
+from . import candidate_worker
 from . import config as config_mod
-from .roles import executor as executor_mod
+from .execution import build_backend
+from .execution.hepjob import INFLIGHT_NAME
+from .execution.hepjob import InfraRoundError as _hepjob_InfraRoundError
 from .harness import evals
-from .roles import judger as judger_mod
 from .harness import memory as memory_mod
 from .reporting import plot as plot_mod
 from .roles import proposer as proposer_mod
@@ -59,6 +61,7 @@ class RunContext:
     judger_agent: Agent | None = None
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
+    execution_backend: object | None = None
 
     @property
     def metrics_schema(self) -> dict | None:
@@ -182,11 +185,44 @@ def _run_locked(cfg: dict, run_dir_path: Path,
     for round_id in range(start_round, n_rounds):
         print(f"\n[{stamp()}] === round {round_id + 1}/{n_rounds} ===", flush=True)
 
-        proposals_batch, reflection, pending_insight = _next_proposals(
-            ctx, static_proposals, round_id, parent_sha)
-
-        candidates = _run_candidates(
-            ctx, proposals_batch, round_id, parent_sha, prior_metrics)
+        inflight = _load_inflight(ctx.run_dir)
+        if inflight is not None:
+            if inflight.get("round_id") != round_id:
+                raise ValueError(
+                    f"--continue: inflight_round.json is for round "
+                    f"{inflight.get('round_id')} but the loop is at round "
+                    f"{round_id}; delete {ctx.run_dir / INFLIGHT_NAME} to "
+                    "re-propose this round, or fix loop.max_rounds.")
+            print(f"[{stamp()}] resuming in-flight round {round_id + 1} "
+                  "from inflight_round.json (proposer skipped)", flush=True)
+            try:
+                candidates = ctx.execution_backend.resume_round(inflight)
+            except _hepjob_InfraRoundError as exc:
+                print(f"[{stamp()}] {exc}", flush=True)
+                print(f"[{stamp()}] round {round_id + 1} still not complete; "
+                      "fix the infrastructure issue and re-run with "
+                      "--continue again.", flush=True)
+                return _summary(ctx, run_dir_path)
+            reflection = inflight.get("reflection", "")
+            pending_insight = (
+                tuple(inflight["insight"]) if inflight.get("insight") else None)
+        else:
+            proposals_batch, reflection, pending_insight = _next_proposals(
+                ctx, static_proposals, round_id, parent_sha)
+            try:
+                candidates = ctx.execution_backend.run_candidates(
+                    proposals=proposals_batch, round_id=round_id,
+                    parent_sha=parent_sha, prior_metrics=prior_metrics,
+                    reflection=reflection, insight=pending_insight)
+            except _hepjob_InfraRoundError as exc:
+                # The round is not consumed: inflight_round.json stays on
+                # disk so --continue can resume; exit for human recovery.
+                print(f"[{stamp()}] {exc}", flush=True)
+                print(f"[{stamp()}] round {round_id + 1} not recorded; "
+                      "fix the infrastructure issue and re-run with "
+                      "--continue (or delete inflight_round.json to "
+                      "re-propose).", flush=True)
+                return _summary(ctx, run_dir_path)
         if static_proposals is not None:
             # Controlled-experiment rule: hard gates alone decide, so a
             # regressing-but-valid experiment still advances the chain.
@@ -276,12 +312,14 @@ def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext
                   history_eval_cap=cfg.get("eval_history_cap_chars", 6000))
     # Same gate bullet lines go into both the proposer's and executor's prompt.
     gate_lines = views.gate_block(cfg.get("metrics"))
-    return RunContext(
+    ctx = RunContext(
         cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
         store=store, telemetry=telemetry, proposer_agent=proposer_agent,
         executor_agent=executor_agent, judger_agent=judger_agent,
         gate_lines=gate_lines,
     )
+    ctx.execution_backend = build_backend(ctx)
+    return ctx
 
 
 def _starting_state(ctx: RunContext, continue_run: bool,
@@ -462,92 +500,35 @@ def _run_candidates(ctx: RunContext, proposals: list[proposer_mod.Proposal],
     return [r for r in results if r is not None]
 
 
+def _deps_from_ctx(ctx: RunContext) -> candidate_worker.CandidateDeps:
+    """Map the frontend's shared fixtures onto the worker dependency bundle;
+    the local backend runs the exact same business code as a remote worker."""
+    return candidate_worker.CandidateDeps(
+        cfg=ctx.cfg, run_dir=ctx.run_dir, runtime=ctx.runtime,
+        workspace=ctx.workspace, executor_agent=ctx.executor_agent,
+        judger_agent=ctx.judger_agent, gate_lines=ctx.gate_lines,
+        baseline_metrics=ctx.baseline_metrics,
+    )
+
+
 def _run_one_candidate(ctx: RunContext, candidate_id: int,
                        proposal: proposer_mod.Proposal,
                        round_id: int, parent_sha: str,
                        prior_metrics: dict) -> dict:
-    """Executor + eval + judger for one candidate."""
-    cfg = ctx.cfg
-    metrics_schema = ctx.metrics_schema
+    """LocalBackend's per-candidate path: the backend owns the worktree
+    lifecycle; the business logic lives in candidate_worker.run_candidate."""
     worktree_id = f"{round_id}-c{candidate_id}"
     worktree = None
-    result = None
-    eval_block = ""
-    eval_metrics: dict = {}
-    accepted = False
     try:
-        print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
-              f"(family={proposal.family}, decision={proposal.decision}): "
-              f"{proposal.proposal[:120]}", flush=True)
         worktree = ctx.workspace.add_worktree(worktree_id, parent_sha)
-        result = executor_mod.execute(
-            ctx.executor_agent, proposal=proposal.proposal, goal=cfg["goal"],
-            editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
-            workspace=ctx.workspace, worktree=worktree, round_id=worktree_id,
-            gate_block=ctx.gate_lines,
+        spec = candidate_worker.CandidateSpec(
+            round_id=round_id, candidate_id=candidate_id,
+            parent_sha=parent_sha, family=proposal.family,
+            decision=proposal.decision, proposal=proposal.proposal,
+            run_dir=str(ctx.run_dir), prior_metrics=prior_metrics,
+            worktree_path=str(worktree),
         )
-        if result.sha:
-            print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} committed: "
-                  f"{result.sha} ({len(result.changed_paths)} files)", flush=True)
-        else:
-            print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} no commit: "
-                  f"{result.reason}", flush=True)
-        if result.sha:
-            try:
-                eval_result = evals.run_eval(
-                    cfg["eval_commands"],
-                    cwd=worktree,
-                    runtime=ctx.runtime,
-                    metrics_schema=metrics_schema,
-                    timeout_seconds=cfg.get("eval_timeout_seconds", 600),
-                    output_cap=cfg.get("eval_output_cap_chars", 16000),
-                )
-                eval_block = eval_result.text
-                eval_metrics = eval_result.metrics
-            except Exception as exc:
-                eval_block = f"(eval failed to run: {exc})"
-                print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
-                      f"eval error: {exc}", flush=True)
-        accepted = _candidate_accepted(result.sha, eval_metrics, metrics_schema)
-        judgment = judger_mod.judge(
-            ctx.judger_agent, goal=cfg["goal"], proposal=proposal.proposal,
-            sha=result.sha, reason=result.reason, parent_sha=parent_sha,
-            workspace=ctx.workspace, eval_block=eval_block, cwd=worktree,
-            metrics=eval_metrics, prior_metrics=prior_metrics,
-            baseline_metrics=ctx.baseline_metrics, metrics_schema=metrics_schema,
-            label=f"judger r{round_id}-c{candidate_id}",
-        )
-        print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
-              f"score={judgment.score:.2f} risk={judgment.risk} "
-              f"feedback: {judgment.feedback[:120]}", flush=True)
-        _print_objective(eval_metrics, prior_metrics, ctx.baseline_metrics,
-                         metrics_schema)
-        return {
-            "candidate": candidate_id,
-            "family": proposal.family,
-            "decision": proposal.decision,
-            "proposal": proposal.proposal,
-            "sha": result.sha,
-            "score": judgment.score,
-            "risk": judgment.risk,
-            "feedback": judgment.feedback,
-            "feedback_for_proposer": judgment.feedback_for_proposer,
-            "eval_block": eval_block,
-            "metrics": eval_metrics,
-            "changed_paths": result.changed_paths,
-            "accepted": accepted,
-            "selected": False,
-        }
-    except (AgentError, ValueError) as exc:
-        print(f"[{stamp()}] candidate r{round_id}-c{candidate_id} failed: {exc}",
-              flush=True)
-        changed_paths = result.changed_paths if result else []
-        sha = result.sha if result else None
-        return _candidate_failure(candidate_id, proposal, str(exc), parent_sha,
-                                  sha=sha, eval_block=eval_block,
-                                  eval_metrics=eval_metrics,
-                                  changed_paths=changed_paths,
-                                  accepted=accepted)
+        return candidate_worker.run_candidate(_deps_from_ctx(ctx), spec)
     finally:
         if worktree is not None:
             ctx.workspace.remove_worktree(worktree_id)
@@ -558,27 +539,15 @@ def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
                        eval_block: str = "", eval_metrics: dict | None = None,
                        changed_paths: list[str] | None = None,
                        accepted: bool = False) -> dict:
-    failure_feedback = f"[loop failure] {reason[:200]}"
-    proposer_failure = (
-        "[loop failure] candidate failed before a usable result was produced"
-    )
-    return {
-        "candidate": candidate_id,
-        "family": proposal.family,
-        "decision": proposal.decision,
-        "proposal": proposal.proposal,
-        "sha": sha,
-        "score": 0.0,
-        "risk": "high",
-        "feedback": failure_feedback,
-        "feedback_for_proposer": proposer_failure,
-        "eval_block": eval_block,
-        "metrics": eval_metrics or {},
-        "changed_paths": changed_paths or [],
-        "accepted": accepted,
-        "selected": False,
-        "base_sha": parent_sha,
-    }
+    # `proposal` duck-types as the spec (same family/decision/proposal attrs).
+    return candidate_worker.candidate_failure(
+        candidate_id, proposal, reason, parent_sha, sha=sha,
+        eval_block=eval_block, eval_metrics=eval_metrics,
+        changed_paths=changed_paths, accepted=accepted)
+
+
+_candidate_accepted = candidate_worker.candidate_accepted
+_print_objective = candidate_worker.print_objective
 
 
 def _select_winner(candidates: list[dict],
@@ -605,19 +574,6 @@ def _select_winner(candidates: list[dict],
         if not improved:
             return None
     return winner
-
-
-def _candidate_accepted(candidate_sha: str | None, metrics: dict | None,
-                        metrics_schema: dict | None) -> bool:
-    """Whether a candidate becomes the next cumulative base: every declared
-    gate must be explicitly True (missing/unknown is rejection)."""
-    if not candidate_sha:
-        return False
-    gates = (metrics_schema or {}).get("gates", [])
-    if not gates:
-        return True
-    values = metrics or {}
-    return all(values.get(g["key"]) is True for g in gates)
 
 
 def _resume_chain(history: list[dict],
@@ -722,34 +678,21 @@ def stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _print_objective(metrics: dict | None, prior: dict | None, baseline: dict | None,
-                     schema: dict | None) -> None:
-    """Print the round's harness-parsed objective value with vs-prior and
-    vs-baseline deltas; silent when there is no measurement this round."""
-    if not schema or not metrics:
-        return
-    obj = schema.get("objective", {})
-    key = obj.get("key")
-    if not key:
-        return
-    val = metrics.get(key)
-    if val is None:
-        return
-    lower_is_better = obj.get("lower_is_better", True)
-    def _fmt_delta(this, other, label):
-        delta = evals.objective_delta(this, other, lower_is_better)
-        if delta is None:
-            return None
-        pct, improved = delta
-        arrow = "↓ better" if improved else ("↑ worse" if pct != 0 else "= same")
-        return f"{label} {other:g} ({pct:+.1f}%, {arrow})"
-    parts = [f"{key}={val:g}"]
-    for other, label in ((prior, "vs prior"), (baseline, "vs baseline")):
-        if other:
-            d = _fmt_delta(val, other.get(key), label)
-            if d:
-                parts.append(d)
-    print(f"[{stamp()}] objective: " + "  |  ".join(parts), flush=True)
+def _load_inflight(run_dir: Path) -> dict | None:
+    """Read run_dir/inflight_round.json, or None when no in-flight round is
+    persisted. A corrupt/empty file is treated as absent so a half-written
+    atomic file never blocks a resume."""
+    path = run_dir / INFLIGHT_NAME
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and "round_id" in data:
+            return data
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[{stamp()}] warning: inflight_round.json unreadable ({exc}); "
+              "ignoring", flush=True)
+    return None
 
 
 def _load_proposals(proposals: str | Path | list[str] | None) -> list[str] | None:

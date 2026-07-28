@@ -1,0 +1,7 @@
+proposals:
+  - >
+    In tinyalgo/__init__.py, cache the len(pairs) computation result of the
+    count_pairs function: hoist the inner loop's repeated len(pairs) call to
+    a local variable computed once at function entry, so it is not re-evaluated
+    each iteration. This is a small, bit-faithful refactor that should reduce
+    per-call overhead without changing any computed pair count.

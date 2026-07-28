@@ -1,0 +1,60 @@
+kind: task
+
+task:
+  goal: >
+    Optimize the tinyalgo pair-counting implementation in tinyalgo/__init__.py for
+    speed (lower ms_per_call) while keeping results exactly correct: the pytest
+    suite and scripts/check_drift.py must still pass. Edit only tinyalgo source.
+
+safety:
+  editable_paths:
+    - "tinyalgo/**/*.py"
+  frozen_paths:
+    - "tests/**"
+    - "scripts/**"
+    - "benchmarks/**"
+    - "README.md"
+    - "pyproject.toml"
+
+loop:
+  max_rounds: 1
+  candidates_per_round: 1
+  max_workers: 1
+
+runtime:
+  image: apptainer.sif
+  binds: []
+
+eval:
+  commands:
+    - "PYTHONPATH=. python -m pytest tests/ -q && echo CORRECTNESS=PASS || echo CORRECTNESS=FAIL"
+    - "PYTHONPATH=. python scripts/check_drift.py && echo DRIFT=PASS || echo DRIFT=FAIL"
+    - "PYTHONPATH=. python scripts/bench.py"
+  metrics:
+    objective:
+      key: ms_per_call
+      lower_is_better: true
+    gates:
+      - key: CORRECTNESS
+        description: >
+          The pytest suite passes. Pair counts must be exactly correct — a change
+          that alters any computed count fails.
+      - key: DRIFT
+        description: >
+          Per-call output bit-identical to a frozen reference (scripts/check_drift.py).
+          Any change to op order, accumulation, or control flow that shifts the
+          result fails.
+
+source:
+  path: repo
+  baseline_ref: HEAD
+
+execution:
+  backend: hepjob
+  hepjob:
+    schedd_name: scheduler@pvm069.ihep.ac.cn
+    accounting_group: JUNO.juno.default
+    memory_mb: 6000
+    poll_seconds: 15
+    max_attempts: 2
+    run_timeout_seconds: 1800

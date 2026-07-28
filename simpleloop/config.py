@@ -19,6 +19,21 @@ Minimal schema:
   eval.timeout_seconds: int           (optional, default 600; per eval command budget)
   eval.output_cap_chars: int          (optional, default 16000; per-command output kept for the judger)
   eval.history_cap_chars: int         (optional, default 6000; eval text kept per round in history.jsonl)
+  execution.backend: local|hepjob     (optional, default local; candidate execution backend)
+  execution.hepjob.schedd_name: str   (required for hepjob; condor schedd, e.g. scheduler@host)
+  execution.hepjob.accounting_group: str   (required for hepjob; e.g. JUNO.juno.default)
+  execution.hepjob.accounting_group_user: str  (optional, default current user)
+  execution.hepjob.ihep_group: str    (optional; +IHEP_RealGroup job attribute)
+  execution.hepjob.request_os: str    (optional, default AlmaLinux9)
+  execution.hepjob.memory_mb: int     (optional, default 6000)
+  execution.hepjob.cpus: int          (optional, default 1)
+  execution.hepjob.poll_seconds: int  (optional, default 30)
+  execution.hepjob.max_attempts: int  (optional, default 2; job-level retries for Held/Lost)
+  execution.hepjob.idle_warn_seconds: int   (optional, default 7200; warn only, never kills)
+  execution.hepjob.run_timeout_seconds: int (optional, default 21600; running job is removed)
+  execution.hepjob.disappearance_grace_seconds: int (optional, default 120)
+  execution.hepjob.python_executable: str  (optional, default the frontend's sys.executable)
+  execution.hepjob.submit_cmd/query_cmd/remove_cmd: str  (optional condor_* overrides)
   source.path: path                   (required; the repo to optimize)
   source.baseline_ref: str            (optional, default HEAD)
 
@@ -26,15 +41,17 @@ Paths are relative to the config file; unknown keys are errors (strict).
 """
 from __future__ import annotations
 
+import getpass
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 TASK_TOP_KEYS = {
-    "kind", "task", "safety", "loop", "runtime", "eval", "source",
+    "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution",
 }
 
 
@@ -178,6 +195,8 @@ def _resolve(
             "without metrics is no longer supported")
     metrics = _resolve_metrics(eval_block["metrics"])
 
+    execution_backend, hepjob = _resolve_execution(raw.get("execution"))
+
     return {
         "goal": str(goal),
         "editable_paths": [str(g) for g in editable],
@@ -196,6 +215,8 @@ def _resolve(
         "eval_output_cap_chars": int(eval_output_cap),
         "eval_history_cap_chars": int(eval_history_cap),
         "metrics": metrics,
+        "execution_backend": execution_backend,
+        "hepjob": hepjob,
         "repo_path": str(repo),
         "baseline_ref": baseline_ref,
         "config_dir": str(path.parent),
@@ -315,6 +336,85 @@ def _resolve_metrics(raw: object) -> dict:
 
     return {"objective": {"key": obj_key, "lower_is_better": lower_is_better},
             "gates": gates}
+
+
+_HEPJOB_DEFAULTS = {
+    "accounting_group_user": None,   # filled with the current OS user
+    "ihep_group": None,
+    "request_os": "AlmaLinux9",
+    "memory_mb": 6000,
+    "cpus": 1,
+    "poll_seconds": 30,
+    "max_attempts": 2,
+    "idle_warn_seconds": 7200,
+    "run_timeout_seconds": 21600,
+    "disappearance_grace_seconds": 120,
+    "python_executable": None,       # filled with sys.executable
+    "submit_cmd": "condor_submit",
+    "query_cmd": "condor_q",
+    "remove_cmd": "condor_rm",
+}
+
+_HEPJOB_INT_RANGES = {
+    "memory_mb": (1, None),
+    "cpus": (1, None),
+    "poll_seconds": (5, None),
+    "max_attempts": (1, None),
+    "idle_warn_seconds": (60, None),
+    "run_timeout_seconds": (300, None),
+    "disappearance_grace_seconds": (0, None),
+}
+
+
+def _resolve_execution(raw: object) -> tuple[str, dict]:
+    """Validate the optional execution block. Returns (backend, hepjob_cfg);
+    hepjob_cfg carries defaults even for the local backend so a resolved
+    snapshot stays self-describing."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("execution: must be an object")
+    unknown = set(raw) - {"backend", "hepjob"}
+    if unknown:
+        raise ConfigError(f"execution: unknown key(s): {sorted(unknown)}")
+    backend = raw.get("backend", "local")
+    if backend not in ("local", "hepjob"):
+        raise ConfigError(
+            f"execution.backend: expected 'local' or 'hepjob', got {backend!r}")
+
+    hepjob_raw = raw.get("hepjob", {})
+    if not isinstance(hepjob_raw, dict):
+        raise ConfigError("execution.hepjob: must be an object")
+    allowed = {"schedd_name", "accounting_group"} | set(_HEPJOB_DEFAULTS)
+    unknown = set(hepjob_raw) - allowed
+    if unknown:
+        raise ConfigError(
+            f"execution.hepjob: unknown key(s): {sorted(unknown)}")
+
+    hepjob = dict(_HEPJOB_DEFAULTS)
+    hepjob["accounting_group_user"] = getpass.getuser()
+    hepjob["python_executable"] = sys.executable
+    for key, value in hepjob_raw.items():
+        hepjob[key] = value
+
+    for key in ("schedd_name", "accounting_group"):
+        value = hepjob.get(key)
+        if backend == "hepjob" and (not isinstance(value, str)
+                                    or not value.strip()):
+            raise ConfigError(
+                f"execution.hepjob.{key}: required when backend is hepjob")
+    for key in ("schedd_name", "accounting_group", "accounting_group_user",
+                "ihep_group", "request_os", "python_executable",
+                "submit_cmd", "query_cmd", "remove_cmd"):
+        value = hepjob.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"execution.hepjob.{key}: must be a string")
+    for key, (low, _high) in _HEPJOB_INT_RANGES.items():
+        value = hepjob[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < low:
+            raise ConfigError(
+                f"execution.hepjob.{key}: must be an integer >= {low}")
+    return backend, hepjob
 
 
 def _need(raw: dict, key: str, kind: type) -> dict:

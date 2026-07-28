@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from simpleloop import candidate_worker as worker_mod
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop.harness import memory as memory_mod
@@ -689,9 +690,9 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
                         feedback="LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z.",
                         feedback_for_proposer="The mechanism remains plausible.")
 
-    monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(loop_mod.evals, "run_eval", fake_run_eval)
-    monkeypatch.setattr(loop_mod.judger_mod, "judge", fake_judge)
+    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
+    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_run_eval)
+    monkeypatch.setattr(worker_mod.judger_mod, "judge", fake_judge)
 
     workspace = FakeWorkspace()
     proposals = [
@@ -739,8 +740,8 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
             "feedback_for_proposer": "",
         })
 
-    monkeypatch.setattr(loop_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(loop_mod.judger_mod, "judge", fake_judge)
+    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
+    monkeypatch.setattr(worker_mod.judger_mod, "judge", fake_judge)
 
     ctx = RunContext(
         cfg={

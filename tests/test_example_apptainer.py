@@ -49,7 +49,7 @@ def test_definitions_contain_pinned_runtime_tools():
         text = (directory / "apptainer.def").read_text(
             encoding="utf-8"
         )
-        assert "From: almalinux:9" in text
+        assert "almalinux:9" in text
         assert "node-v22.19.0-linux-x64.tar.xz" in text
         assert "@anthropic-ai/claude-code@2.1.216" in text
         # Lean definitions self-check their interpreter and agent layer.

@@ -12,6 +12,15 @@ class RuntimePreflightError(RuntimeError):
     """Raised when the configured Apptainer runtime cannot safely start."""
 
 
+def forwarded_payload_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The whitelisted env vars a payload (claude/eval) receives inside the
+    container. Also materialized into job_env.sh for batch jobs so the
+    worker's environment is run-scoped instead of depending on home-dir
+    state (and tokens stay out of the condor job ad)."""
+    env = os.environ if environ is None else environ
+    return {key: env[key] for key in _FORWARDED_ENV if key in env}
+
+
 _FORWARDED_ENV = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -106,11 +115,7 @@ class ApptainerRuntime:
             if not key.startswith(_BLOCKED_PREFIXES)
             and key not in _BLOCKED_EXACT
         }
-        payload_env = {
-            key: os.environ[key]
-            for key in _FORWARDED_ENV
-            if key in os.environ
-        }
+        payload_env = forwarded_payload_env()
         for key, value in (overrides or {}).items():
             if key in _OVERRIDE_ENV or key in _FORWARDED_ENV:
                 payload_env[key] = str(value)

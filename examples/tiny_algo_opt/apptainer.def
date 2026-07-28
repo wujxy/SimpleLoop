@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: almalinux:9
+From: docker.m.daocloud.io/library/almalinux:9
 
 # Runtime for tiny_algo_opt — the minimal/lean image. The toy repository is
 # pure Python (pytest + drift + bench scripts, no C++ build), so this carries
