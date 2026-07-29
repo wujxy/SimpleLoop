@@ -19,29 +19,17 @@ tiny_algo_opt/
 
 ## Run
 
-The target `repo/` must be a real git repo (SimpleLoop clones it with
-`git clone --local`). Initialize it once:
-
-```bash
-bash examples/tiny_algo_opt/setup.sh
-# or, by hand:
-cd examples/tiny_algo_opt/repo && git init -q && git add -A && git commit -qm init
-```
-
-Then:
-
 ```bash
 # from the SimpleLoop checkout
-simpleloop image build examples/tiny_algo_opt/apptainer.def
-simpleloop validate --config examples/tiny_algo_opt/task.yaml
-simpleloop run      --config examples/tiny_algo_opt/task.yaml \
-                    --run-dir   examples/tiny_algo_opt/runs/run-001
+simpleloop init --config examples/tiny_algo_opt/task.yaml
+simpleloop run --config examples/tiny_algo_opt/task.yaml \
+  --run-dir examples/tiny_algo_opt/runs/run-001
 ```
 
-The build defaults to `examples/tiny_algo_opt/apptainer.sif`, which matches
-`runtime.image`. To reuse a shared prebuilt SIF, pass `--output` when building
-and update `runtime.image`. The repository itself is mounted from the run
-directory and is not copied into the image.
+`init` creates the target repository's Git baseline and builds the missing
+`examples/tiny_algo_opt/apptainer.sif` from the inferred same-name
+`apptainer.def`. Re-running it reuses both. The repository itself is mounted
+from the run directory and is not copied into the image.
 
 The example defaults to `candidates_per_round: 3` and `max_workers: 3`. Set
 both values to `1` for serial-compatible execution.

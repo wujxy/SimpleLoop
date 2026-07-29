@@ -49,7 +49,8 @@ loop:
   max_rounds: 4
 
 runtime:
-  image: apptainer.sif
+  image: ../junosw-apptainer.sif
+  definition: ../junosw-apptainer.def
   binds:
     - /cvmfs
     - /data/juno
@@ -60,6 +61,16 @@ eval:
     # One self-contained command: env + build + FCN gate + speed bench.
     # Prints FCN=, SPEED_MS=, EVAL_RESULT= for the judger.
     - "bash scripts/sl_eval.sh --evtmax 10"
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    gates:
+      - key: FCN
+        description: >
+          FCN numerical drift gate: test_fcn replays the golden FCN values and
+          must stay 16/16 PASS (relative drift <= 1e-13). A FAIL vetoes the
+          round regardless of measured speed.
 
 source:
   path: ../../../omilrec       # relative to this task.yaml; real git repo at v1.11.0

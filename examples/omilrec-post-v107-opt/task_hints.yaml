@@ -24,13 +24,10 @@ task:
       (4mm/7keV/10ps/0.1PE): float-op changes there are fine as long as the
       reconstructed physics output stays within range.
 
-    Reference directions include loop-invariant hoisting, repeated-value caching,
-    SoA data layout, precomputation, index partitioning, removal of demonstrably
-    unused work, and other structural rather than arithmetic optimizations. These
-    examples are references only, not preferred directions or a checklist, and do
-    not exhaust the search space. If measured outcomes show that a direction is
-    ineffective, or the accepted source already implements or exhausts most of it,
-    stop refining minor variants and switch to a different code-grounded direction.
+    Reference directions include loop-invariant hoisting, repeated-value caching, SoA data 
+    layout, precomputation, index partitioning, removal of demonstrably unused work, and other 
+    structural rather than arithmetic optimizations. These examples are not an exhaustive search space; 
+    new code-grounded directions may also be proposed.
     Edit only the admitted source files.
 
 safety:
@@ -55,10 +52,11 @@ loop:
   candidates_per_round: 3
   max_workers: 3
   agent_timeout_seconds: 4500
-  proposer_recent_rounds: 6
+  proposer_recent_rounds: 4
 
 runtime:
-  image: apptainer.sif
+  image: ../junosw-apptainer.sif
+  definition: ../junosw-apptainer.def
   binds:
     - /cvmfs
     - /data/juno

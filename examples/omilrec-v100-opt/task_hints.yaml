@@ -45,10 +45,11 @@ loop:
   candidates_per_round: 3
   max_workers: 3
   agent_timeout_seconds: 4500
-  proposer_recent_rounds: 6
+  proposer_recent_rounds: 4
 
 runtime:
-  image: apptainer.sif
+  image: ../junosw-apptainer.sif
+  definition: ../junosw-apptainer.def
   binds:
     - /cvmfs
     - /data/juno

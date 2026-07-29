@@ -34,8 +34,8 @@ honesty" for the 100-evt × 3-reps methodology.
 
 ```
 omilrec-post-v107-opt/
-  apptainer.sif          # symlink -> ../junosw-apptainer.sif (shared; see below)
   task.yaml               # this task config (goal, safety, eval, source)
+../junosw-apptainer.sif  # shared runtime built by simpleloop init
 ../../../omilrec-v100-postv107-gated/   # the source repo to optimize
   OMILRECV2/src/          # the algorithm — the only editable surface
     omilrec_fcn.cc          # calculate_ev_likelihood — the Minuit objective (free function)
@@ -94,19 +94,17 @@ partitioning, SoA layout, reciprocal precompute (verified per-term).
 ## Run
 
 ```bash
-# from the SimpleLoop checkout — build the SHARED junosw image once
-simpleloop image build examples/junosw-apptainer.def \
-            --output   examples/junosw-apptainer.sif
-simpleloop validate --config examples/omilrec-post-v107-opt/task.yaml
-simpleloop run      --config examples/omilrec-post-v107-opt/task.yaml \
-                    --run-dir   ./runs/omilrec-postv107-001
+# from the SimpleLoop checkout — initialize the source and shared image
+simpleloop init --config examples/omilrec-post-v107-opt/task.yaml
+simpleloop run --config examples/omilrec-post-v107-opt/task.yaml \
+  --run-dir ./runs/omilrec-postv107-001
 ```
 
-`runtime.image: apptainer.sif` resolves relative to this task config, and
-`apptainer.sif` here is a symlink to the shared `../junosw-apptainer.sif`.
-Both omilrec tasks (omilrec-opt and omilrec-post-v107-opt) reuse that one
-image; build it once and both are ready. To point at a different image, set
-`runtime.image` to its absolute path.
+`runtime.image: ../junosw-apptainer.sif` and
+`runtime.definition: ../junosw-apptainer.def` resolve relative to this task
+config. Both omilrec tasks reuse that one image. To point at a different image,
+set `runtime.image` and, when it cannot be inferred by name, its
+`runtime.definition`.
 
 The task defaults to `candidates_per_round: 3` and `max_workers: 3`. With
 `max_rounds: 40`, one run can execute up to 120 candidates and three concurrent

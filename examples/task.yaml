@@ -51,15 +51,16 @@ runtime:
   binds: []
 
 eval:
-  # commands (optional): run after each commit, in the round worktree, before
-  # it is removed. Omit `eval` entirely for a diff-only judger. Each command
-  # should print `KEY=value` lines for the metrics block below to parse.
+  # commands (required non-empty): run by the harness after each commit, in the
+  # round worktree, before it is removed. Each command should print `KEY=value`
+  # lines for the metrics block below to parse.
   commands:
     - "python -m pytest -q tests/"
   metrics:
-    # objective (optional but strongly recommended — without it the judger
-    # reads prose and is known to hallucinate numbers): the key=value line to
-    # optimize, and its direction (not guessable).
+    # metrics (required): the harness owns these numbers — a judger asked to
+    # read numbers out of prose is known to hallucinate them.
+    # objective: the key=value line to optimize, and its direction (not
+    # guessable).
     objective:
       key: SPEED_MS
       lower_is_better: true
