@@ -6,9 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from simpleloop import loop as loop_mod
-from simpleloop.loop import RunContext, _run_candidates
+from simpleloop.loop import RunContext, _finalize_candidates
 from simpleloop.harness.store import Store
-from simpleloop.roles.proposer import Proposal
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
 
 
@@ -212,6 +211,10 @@ class SnapshotTracker:
     def __init__(self):
         self.value = 0
         self.persist_flags = []
+        self.recorded = []
+
+    def record_usage(self, usage):
+        self.recorded.append(usage)
 
     def snapshot(self, *, persist=False):
         self.value += 1
@@ -249,29 +252,26 @@ def test_store_persists_candidate_and_generation_telemetry(tmp_path):
     assert row["candidates"][0]["telemetry"] == candidate_snapshot
 
 
-def test_run_candidates_attaches_persisted_snapshot_after_each_worker(
-    monkeypatch,
-):
-    def fake_candidate(_ctx, candidate_id, proposal, *_args):
-        return {
-            "candidate": candidate_id,
-            "proposal": proposal.proposal,
-            "score": 0.5,
-        }
-
-    monkeypatch.setattr(loop_mod, "_run_one_candidate", fake_candidate)
+def test_finalize_candidates_ingests_usage_and_stamps_snapshots():
+    """The loop (not the backend) owns telemetry: worker-reported usage is
+    popped from the candidate and recorded, then each candidate gets a
+    persisted snapshot for its history row."""
     tracker = SnapshotTracker()
+    ctx = RunContext(cfg={}, telemetry=tracker)
+    candidates = [
+        {"candidate": 0, "score": 0.5,
+         "usage": [{"input_tokens": 3, "output_tokens": 1}]},
+        {"candidate": 1, "score": 0.4,
+         "usage": [{"input_tokens": 5, "output_tokens": 2}]},
+    ]
 
-    ctx = RunContext(cfg={"max_workers": 2}, telemetry=tracker)
-    candidates = _run_candidates(
-        ctx,
-        [Proposal("p0"), Proposal("p1")],
-        0,
-        "base",
-        {},
-    )
+    _finalize_candidates(ctx, candidates)
 
-    assert {c["candidate"] for c in candidates} == {0, 1}
+    assert tracker.recorded == [
+        {"input_tokens": 3, "output_tokens": 1},
+        {"input_tokens": 5, "output_tokens": 2},
+    ]
+    assert all("usage" not in c for c in candidates)
     assert {
         c["telemetry"]["worktime_seconds"] for c in candidates
     } == {1.0, 2.0}

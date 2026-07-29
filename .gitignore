@@ -6,5 +6,6 @@ dist/
 .venv/
 .worktrees/
 runs/
+run/
 *.log
 *.sif

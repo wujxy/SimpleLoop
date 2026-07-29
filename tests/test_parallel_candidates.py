@@ -696,9 +696,9 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
 
     workspace = FakeWorkspace()
     proposals = [
-        Proposal(proposal="p0", family="f0"),
-        Proposal(proposal="p1", family="f1"),
-        Proposal(proposal="p2", family="f2"),
+        {"proposal": "p0", "family": "f0", "decision": ""},
+        {"proposal": "p1", "family": "f1", "decision": ""},
+        {"proposal": "p2", "family": "f2", "decision": ""},
     ]
     schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
               "gates": [{"key": "CORRECTNESS"}]}
@@ -752,7 +752,7 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
         judger_agent=object(), runtime=object(),
     )
     candidates = _run_candidates(
-        ctx, [Proposal(proposal="p0", family="f0")], 2, "parent", {})
+        ctx, [{"proposal": "p0", "family": "f0", "decision": ""}], 2, "parent", {})
 
     assert candidates[0]["score"] == 0.0
     assert candidates[0]["feedback_for_proposer"] == (
@@ -771,8 +771,8 @@ def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
     candidates = _run_candidates(
         RunContext(cfg={"max_workers": 2}),
         [
-            Proposal(proposal="p0", family="f0"),
-            Proposal(proposal="p1", family="f1"),
+            {"proposal": "p0", "family": "f0", "decision": ""},
+            {"proposal": "p1", "family": "f1", "decision": ""},
         ],
         3,
         "parent",

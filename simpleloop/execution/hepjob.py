@@ -8,17 +8,20 @@ The backend is the job LIFECYCLE supervisor, not a business actor:
   -> collect result.json -> return only business-terminal candidates.
 
 Completion contract (shared with candidate_worker): the worker writes
-result.json atomically and touches _FINISHED last; a job that left the
-queue WITHOUT _FINISHED died of infrastructure causes and may be retried.
+result.json (pure business result) plus usage.json (telemetry/audit sidecar)
+atomically and touches _FINISHED last; a job that left the queue WITHOUT
+_FINISHED died of infrastructure causes and may be retried.
 Infrastructure-failed candidates (INFRA_FAILED/TIMEOUT) are excluded from
 the returned list — they must never enter the proposer's history as
 proposal failures. If every candidate of a round dies of infrastructure,
 InfraRoundError is raised and the round is not consumed.
 
-In-flight state is persisted in run_dir/inflight_round.json (atomic
-rewrite on every transition) so a frontend crash can be resumed with
---continue: resume_round() rebuilds the job table and re-enters the same
-poll loop without calling the proposer again.
+In-flight state is persisted through the loop-supplied RoundJournal (save on
+every transition) so a frontend crash can be resumed with --continue:
+resume_round() rebuilds the job table from the journal's jobs payload and
+re-enters the same poll loop without calling the proposer again. The
+journal's round meta (proposer outputs, parent chain) belongs to the loop;
+this backend only ever sees and produces the opaque jobs table.
 """
 from __future__ import annotations
 
@@ -28,14 +31,13 @@ import re
 import shlex
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .. import candidate_worker
 from ..candidate_worker import stamp
 from ..container import runtime as runtime_mod
-from ..roles import proposer as proposer_mod
-from .base import ExecutionBackend
+from .base import ExecutionBackend, InfraRoundError, RoundJournal
 
 # condor JobStatus codes (from a successful `condor_q -af JobStatus` query)
 _JOB_IDLE = 1
@@ -43,12 +45,11 @@ _JOB_RUNNING = 2
 _JOB_HELD = 5
 
 TERMINAL_STATES = ("COMPLETED", "INFRA_FAILED", "TIMEOUT")
-INFLIGHT_NAME = "inflight_round.json"
 
-
-class InfraRoundError(RuntimeError):
-    """Every candidate of a round died of infrastructure causes; the round
-    must not be recorded and the proposer must not see these failures."""
+# Sidecar the worker writes next to result.json: telemetry usage records plus
+# execution audit info (backend, job id, attempt, host). Read by _collect and
+# handed to the loop, which owns telemetry accounting.
+WORKER_META_NAME = "usage.json"
 
 
 @dataclass
@@ -56,7 +57,6 @@ class _Job:
     """One candidate's scheduler-side lifecycle state (distinct from the
     business candidate_status the worker writes into result.json)."""
     candidate_id: int
-    proposal: proposer_mod.Proposal
     worktree_id: str
     result_dir: Path
     job_id: str | None = None
@@ -79,56 +79,42 @@ class HEPJobBackend(ExecutionBackend):
         self.ctx = ctx
         self.cfg = hep_cfg
         self.run_dir = Path(ctx.run_dir)
-        self._round_meta: dict = {
-            "round_id": -1, "parent_sha": "", "reflection": "",
-            "insight": None, "proposals": [],
-        }
+        self._round_id = -1
+        self._parent_sha = ""
+        self._journal: RoundJournal | None = None
 
     # ---- backend interface ----
 
-    def run_candidates(self, *, proposals, round_id: int, parent_sha: str,
-                       prior_metrics: dict, reflection: str = "",
-                       insight: tuple | None = None) -> list[dict]:
-        self._round_meta = {
-            "round_id": round_id,
-            "parent_sha": parent_sha,
-            "reflection": reflection,
-            "insight": list(insight) if insight else None,
-            "proposals": [
-                {"family": p.family, "decision": p.decision,
-                 "proposal": p.proposal}
-                for p in proposals
-            ],
-        }
+    def run_candidates(self, *, proposals: list[dict], round_id: int,
+                       parent_sha: str, prior_metrics: dict,
+                       baseline_metrics: dict,
+                       journal: RoundJournal | None = None) -> list[dict]:
+        self._round_id = round_id
+        self._parent_sha = parent_sha
+        self._journal = journal
         self._ensure_job_env()
         jobs = []
         for i, proposal in enumerate(proposals):
             job = self._prepare(i, proposal, round_id, parent_sha,
-                                prior_metrics)
+                                prior_metrics, baseline_metrics)
             self._submit(job)
             jobs.append(job)
-        self._write_inflight(jobs)
+        self._save(jobs)
         return self._supervise(jobs)
 
-    def resume_round(self, inflight: dict) -> list[dict]:
+    def resume_round(self, jobs_payload: list[dict], *, round_id: int,
+                     parent_sha: str,
+                     journal: RoundJournal | None = None) -> list[dict]:
         """Re-enter the poll loop for an in-flight round after a frontend
-        restart. Job state is rebuilt from inflight_round.json; the proposer
-        is NOT called again."""
-        self._round_meta = {
-            "round_id": inflight["round_id"],
-            "parent_sha": inflight["parent_sha"],
-            "reflection": inflight.get("reflection", ""),
-            "insight": inflight.get("insight"),
-            "proposals": inflight.get("proposals") or [],
-        }
-        proposals = [proposer_mod.Proposal(**p)
-                     for p in self._round_meta["proposals"]]
+        restart. Job state is rebuilt from the journal's jobs table; the
+        proposer is NOT called again."""
+        self._round_id = round_id
+        self._parent_sha = parent_sha
+        self._journal = journal
         jobs = []
-        for jd in inflight.get("jobs") or []:
-            cid = int(jd["candidate_id"])
+        for jd in jobs_payload:
             job = _Job(
-                candidate_id=cid,
-                proposal=proposals[cid],
+                candidate_id=int(jd["candidate_id"]),
                 worktree_id=str(jd["worktree_id"]),
                 result_dir=Path(jd["result_dir"]),
                 job_id=jd.get("job_id"),
@@ -144,28 +130,29 @@ class HEPJobBackend(ExecutionBackend):
 
     # ---- prepare / submit ----
 
-    def _prepare(self, candidate_id: int, proposal: proposer_mod.Proposal,
-                 round_id: int, parent_sha: str,
-                 prior_metrics: dict) -> _Job:
+    def _prepare(self, candidate_id: int, proposal: dict,
+                 round_id: int, parent_sha: str, prior_metrics: dict,
+                 baseline_metrics: dict) -> _Job:
         worktree_id = f"{round_id}-c{candidate_id}"
         result_dir = (self.run_dir / "rounds" / f"r{round_id}"
                       / "candidates" / f"c{candidate_id}")
         result_dir.mkdir(parents=True, exist_ok=True)
         worktree = self.ctx.workspace.add_worktree(worktree_id, parent_sha)
-        job = _Job(candidate_id=candidate_id, proposal=proposal,
+        job = _Job(candidate_id=candidate_id,
                    worktree_id=worktree_id, result_dir=result_dir)
-        self._write_manifest(job, round_id, parent_sha, prior_metrics,
-                             worktree)
+        self._write_manifest(job, proposal, round_id, parent_sha,
+                             prior_metrics, baseline_metrics, worktree)
         return job
 
-    def _write_manifest(self, job: _Job, round_id: int, parent_sha: str,
-                        prior_metrics: dict, worktree: Path) -> None:
+    def _write_manifest(self, job: _Job, proposal: dict, round_id: int,
+                        parent_sha: str, prior_metrics: dict,
+                        baseline_metrics: dict, worktree: Path) -> None:
         spec = candidate_worker.CandidateSpec(
             round_id=round_id, candidate_id=job.candidate_id,
-            parent_sha=parent_sha, family=job.proposal.family,
-            decision=job.proposal.decision, proposal=job.proposal.proposal,
+            parent_sha=parent_sha, family=proposal["family"],
+            decision=proposal["decision"], proposal=proposal["proposal"],
             run_dir=str(self.run_dir), prior_metrics=prior_metrics,
-            baseline_metrics=self.ctx.baseline_metrics,
+            baseline_metrics=baseline_metrics,
             worktree_path=str(worktree), result_dir=str(job.result_dir),
             attempt=job.attempt,
         )
@@ -220,7 +207,7 @@ class HEPJobBackend(ExecutionBackend):
         if completed.returncode != 0:
             raise InfraRoundError(
                 f"condor submit failed for candidate "
-                f"r{self._round_meta['round_id']}-c{job.candidate_id}: "
+                f"r{self._round_id}-c{job.candidate_id}: "
                 f"{completed.stderr.strip() or completed.stdout.strip()}")
         match = re.search(r"submitted to cluster (\d+)", completed.stdout)
         if not match:
@@ -233,7 +220,7 @@ class HEPJobBackend(ExecutionBackend):
         job.running_since = None
         job.gone_since = None
         job.idle_warned = False
-        print(f"[{stamp()}] candidate r{self._round_meta['round_id']}"
+        print(f"[{stamp()}] candidate r{self._round_id}"
               f"-c{job.candidate_id} submitted as job {job.job_id} "
               f"(attempt {job.attempt})", flush=True)
         self._write_job_json(job)
@@ -254,7 +241,7 @@ class HEPJobBackend(ExecutionBackend):
                 # condor_q failure must never look like a disappeared job.
                 for job in active:
                     self._reconcile(job, statuses.get(job.job_id), now)
-                self._write_inflight(jobs)
+                self._save(jobs)
             else:
                 print(f"[{stamp()}] warning: condor_q failed; "
                       "retrying next poll", flush=True)
@@ -264,7 +251,7 @@ class HEPJobBackend(ExecutionBackend):
         return self._collect(jobs)
 
     def _reconcile(self, job: _Job, status: int | None, now: float) -> None:
-        label = f"r{self._round_meta['round_id']}-c{job.candidate_id}"
+        label = f"r{self._round_id}-c{job.candidate_id}"
         if status == _JOB_HELD:
             reason = self._hold_reason(job.job_id)
             print(f"[{stamp()}] candidate {label} job {job.job_id} HELD: "
@@ -318,7 +305,7 @@ class HEPJobBackend(ExecutionBackend):
             job.gone_since = None
 
     def _retry_or_fail(self, job: _Job, note: str) -> None:
-        label = f"r{self._round_meta['round_id']}-c{job.candidate_id}"
+        label = f"r{self._round_id}-c{job.candidate_id}"
         if job.attempt < self.cfg["max_attempts"]:
             job.attempt += 1
             job.note = note
@@ -327,7 +314,7 @@ class HEPJobBackend(ExecutionBackend):
             # Never reuse a possibly-dirty worktree: rebuild from parent_sha.
             self.ctx.workspace.remove_worktree(job.worktree_id)
             worktree = self.ctx.workspace.add_worktree(
-                job.worktree_id, self._round_meta["parent_sha"])
+                job.worktree_id, self._parent_sha)
             spec = candidate_worker.CandidateSpec.from_dict(
                 json.loads((job.result_dir / "manifest.json").read_text(
                     encoding="utf-8")))
@@ -347,7 +334,7 @@ class HEPJobBackend(ExecutionBackend):
     # ---- collect ----
 
     def _collect(self, jobs: list[_Job]) -> list[dict]:
-        round_id = self._round_meta["round_id"]
+        round_id = self._round_id
         candidates = []
         for job in jobs:
             try:
@@ -357,16 +344,16 @@ class HEPJobBackend(ExecutionBackend):
                       f"{job.worktree_id}: {exc}", flush=True)
             if job.state == "COMPLETED" and job.result is not None:
                 result = job.result
-                for usage in result.pop("usage", []) or []:
-                    self.ctx.telemetry.record_usage(usage)
-                result["telemetry"] = (
-                    self.ctx.telemetry.snapshot(persist=True)
-                    if self.ctx.telemetry else {})
+                # The usage/audit sidecar travels up to the loop, which owns
+                # telemetry accounting (record_usage + snapshot).
+                meta = self._read_worker_meta(job)
+                result["usage"] = meta.get("usage") or []
+                execution = meta.get("execution") or {}
                 candidates.append(result)
                 print(f"[{stamp()}] candidate r{round_id}"
                       f"-c{job.candidate_id} collected "
                       f"(status={result.get('candidate_status')}, "
-                      f"host={result.get('execution', {}).get('host')})",
+                      f"host={execution.get('host')})",
                       flush=True)
             else:
                 # Infra failure: excluded from the round's candidates so it
@@ -375,17 +362,18 @@ class HEPJobBackend(ExecutionBackend):
                       f"-c{job.candidate_id} excluded ({job.state}"
                       f"{': ' + job.note if job.note else ''})", flush=True)
         if not candidates:
-            # The round is NOT consumed: inflight_round.json stays on disk
-            # so --continue can re-enter; deleting it re-proposes the round.
-            self._write_inflight(jobs)
+            # The round is NOT consumed: the journal stays on disk so
+            # --continue can re-enter; deleting it re-proposes the round.
+            self._save(jobs)
             raise InfraRoundError(
                 f"round {round_id}: all {len(jobs)} candidate job(s) failed "
                 "on infrastructure (see rounds/r"
                 f"{round_id}/candidates/*/job.{{out,err}}); the round was "
                 "not recorded. Fix the infrastructure issue, then either "
-                "re-run with --continue or delete "
-                f"{self._inflight_path()} to re-propose the round.")
-        self._inflight_path().unlink(missing_ok=True)
+                "re-run with --continue or delete the run's inflight file "
+                "to re-propose the round.")
+        if self._journal is not None:
+            self._journal.clear()
         return candidates
 
     # ---- condor wrappers (the only places that touch condor_*) ----
@@ -465,29 +453,23 @@ class HEPJobBackend(ExecutionBackend):
         path.chmod(0o600)
         return path
 
-    def _inflight_path(self) -> Path:
-        return self.run_dir / INFLIGHT_NAME
-
-    def _write_inflight(self, jobs: list[_Job]) -> None:
-        payload = {
-            **self._round_meta,
-            "jobs": [
-                {
-                    "candidate_id": job.candidate_id,
-                    "job_id": job.job_id,
-                    "attempt": job.attempt,
-                    "state": job.state,
-                    "note": job.note,
-                    "worktree_id": job.worktree_id,
-                    "result_dir": str(job.result_dir),
-                }
-                for job in jobs
-            ],
-        }
-        tmp = self._inflight_path().with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2)
-                       + "\n", encoding="utf-8")
-        os.replace(tmp, self._inflight_path())
+    def _save(self, jobs: list[_Job]) -> None:
+        """Hand the current job table to the loop's journal; the loop decides
+        where and whether it persists (local runs pass no journal)."""
+        if self._journal is None:
+            return
+        self._journal.save([
+            {
+                "candidate_id": job.candidate_id,
+                "job_id": job.job_id,
+                "attempt": job.attempt,
+                "state": job.state,
+                "note": job.note,
+                "worktree_id": job.worktree_id,
+                "result_dir": str(job.result_dir),
+            }
+            for job in jobs
+        ])
 
     def _write_job_json(self, job: _Job) -> None:
         payload = {
@@ -513,3 +495,14 @@ class HEPJobBackend(ExecutionBackend):
         if not isinstance(result, dict) or "candidate_status" not in result:
             raise ValueError("result.json is not a candidate result object")
         return result
+
+    @staticmethod
+    def _read_worker_meta(job: _Job) -> dict:
+        """The worker's usage.json sidecar; missing/unreadable degrades to
+        empty (telemetry is accounting, never worth failing a candidate)."""
+        try:
+            meta = json.loads((job.result_dir / WORKER_META_NAME).read_text(
+                encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return meta if isinstance(meta, dict) else {}

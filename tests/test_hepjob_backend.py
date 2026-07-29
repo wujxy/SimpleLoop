@@ -7,6 +7,9 @@ disappeared-with-result, disappeared-without-result -> retry, malformed
 result -> infra, transient query failure must not kill the job, and the
 collect filtering (infra failures never enter history). The in-flight
 round is also round-tripped through a resume.
+
+The backend never touches the inflight file itself: every test drives it
+through the loop's _InflightJournal, which owns the file and the round meta.
 """
 from __future__ import annotations
 
@@ -17,26 +20,27 @@ from pathlib import Path
 import pytest
 
 from simpleloop.execution import hepjob
-from simpleloop.execution.hepjob import HEPJobBackend, InfraRoundError
-from simpleloop.roles.proposer import Proposal
+from simpleloop.execution.base import InfraRoundError
+from simpleloop.execution.hepjob import HEPJobBackend
+from simpleloop.loop import INFLIGHT_NAME, _InflightJournal
 
 # condor JobStatus codes
 IDLE, RUNNING, HELD = 1, 2, 5
 
-
-def _fake_proposal(text="p") -> Proposal:
-    return Proposal(proposal=text, family="layout", decision="switch")
+_BASELINE = {"SPEED_MS": 200.0}
 
 
-class _FakeTelemetry:
-    def __init__(self):
-        self.recorded: list = []
+def _fake_proposal(text="p") -> dict:
+    return {"proposal": text, "family": "layout", "decision": "switch"}
 
-    def record_usage(self, usage):
-        self.recorded.append(usage)
 
-    def snapshot(self, *, persist=False):
-        return {"worktime_seconds": 0.0, "processed_tokens": 0}
+def _journal(tmp_path, round_id=0, parent_sha="p") -> _InflightJournal:
+    """The loop-side journal the backend under test persists through."""
+    return _InflightJournal(
+        tmp_path / INFLIGHT_NAME,
+        meta={"round_id": round_id, "parent_sha": parent_sha,
+              "reflection": "refl", "insight": None,
+              "proposals": [_fake_proposal()]})
 
 
 class _FakeWorkspace:
@@ -57,8 +61,6 @@ class _Ctx:
         self.cfg = {"execution_backend": "hepjob"}
         self.run_dir = tmp_path
         self.workspace = _FakeWorkspace()
-        self.telemetry = _FakeTelemetry()
-        self.baseline_metrics = {"SPEED_MS": 200.0}
 
 
 def _hep_cfg(tmp_path, **overrides):
@@ -114,17 +116,22 @@ def _install_condor_stubs(bin_dir, *, submit_cluster=100, query_lines=None,
 
 
 def _seed_result(result_dir, *, attempt=1, status="COMPLETED", host="node1"):
+    """What the worker leaves behind: result.json (pure business) plus the
+    usage.json telemetry/audit sidecar, _FINISHED last."""
     result_dir.mkdir(parents=True, exist_ok=True)
     result = {
         "candidate": 0,
         "candidate_status": status,
         "sha": f"sha-a{attempt}",
         "score": 0.7, "risk": "low", "feedback": "f", "metrics": {},
+    }
+    sidecar = {
         "usage": [{"input_tokens": 100, "output_tokens": 10}],
-        "execution": {"backend": "hepjob", "job_id": f"100.0",
+        "execution": {"backend": "hepjob", "job_id": "100.0",
                       "attempt": attempt, "host": host},
     }
     (result_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    (result_dir / "usage.json").write_text(json.dumps(sidecar), encoding="utf-8")
     (result_dir / "_FINISHED").touch()
 
 
@@ -140,10 +147,17 @@ def _drive(tmp_path, monkeypatch, query_lines, *, proposals=None,
     result_dir = tmp_path / "rounds" / "r0" / "candidates" / "c0"
     if seed_fn:
         seed_fn(result_dir)
-    cands = backend.run_candidates(proposals=proposals or [_fake_proposal()],
-                                   round_id=0, parent_sha="p",
-                                   prior_metrics={}, reflection="refl")
+    cands = backend.run_candidates(
+        proposals=proposals or [_fake_proposal()],
+        round_id=0, parent_sha="p", prior_metrics={},
+        baseline_metrics=_BASELINE, journal=_journal(tmp_path))
     return backend, ctx, cands
+
+
+def _job_json(tmp_path, candidate_id=0) -> dict:
+    path = (tmp_path / "rounds" / "r0" / "candidates"
+            / f"c{candidate_id}" / "job.json")
+    return json.loads(path.read_text())
 
 
 def test_completed_after_gone_with_finished(tmp_path, monkeypatch):
@@ -151,9 +165,10 @@ def test_completed_after_gone_with_finished(tmp_path, monkeypatch):
         tmp_path, monkeypatch, ["", ""],  # gone (job not in query output)
         seed_fn=lambda rd: _seed_result(rd))
     assert cands[0]["candidate_status"] == "COMPLETED"
-    assert cands[0]["execution"]["host"] == "node1"
-    assert ctx.telemetry.recorded == [{"input_tokens": 100, "output_tokens": 10}]
-    assert (tmp_path / "inflight_round.json").exists() is False
+    # The usage sidecar is handed to the loop (which owns telemetry); the
+    # backend itself records nothing.
+    assert cands[0]["usage"] == [{"input_tokens": 100, "output_tokens": 10}]
+    assert (tmp_path / INFLIGHT_NAME).exists() is False
 
 
 def test_completed_after_running_then_gone(tmp_path, monkeypatch):
@@ -170,7 +185,7 @@ def test_held_retry_then_success(tmp_path, monkeypatch):
         tmp_path, monkeypatch, [f"100 0 {HELD}", ""],
         seed_fn=lambda rd: _seed_result(rd, attempt=2, host="node2"))
     assert cands[0]["candidate_status"] == "COMPLETED"
-    assert cands[0]["execution"]["attempt"] == 2
+    assert _job_json(tmp_path)["attempt"] == 2
     # Held triggered a worktree rebuild (remove + re-add from parent_sha) before
     # the final collect's own cleanup; the dirty worktree was never reused.
     assert ctx.workspace.removed.count("0-c0") == 2
@@ -179,7 +194,6 @@ def test_held_retry_then_success(tmp_path, monkeypatch):
 
 def test_held_exhausts_attempts(tmp_path, monkeypatch):
     # HELD on poll1 (attempt2), HELD again on poll2 (exhausted)
-    backend, ctx = _drive.__wrapped__ if hasattr(_drive, "__wrapped__") else (None, None)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _install_condor_stubs(bin_dir, query_lines=[f"100 0 {HELD}", f"100 0 {HELD}"])
@@ -187,9 +201,11 @@ def test_held_exhausts_attempts(tmp_path, monkeypatch):
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, max_attempts=1))
     with pytest.raises(InfraRoundError):
-        backend.run_candidates(proposals=[_fake_proposal()], round_id=0,
-                               parent_sha="p", prior_metrics={}, reflection="r")
-    assert (tmp_path / "inflight_round.json").exists()  # retained for --continue
+        backend.run_candidates(
+            proposals=[_fake_proposal()], round_id=0, parent_sha="p",
+            prior_metrics={}, baseline_metrics=_BASELINE,
+            journal=_journal(tmp_path))
+    assert (tmp_path / INFLIGHT_NAME).exists()  # retained for --continue
 
 
 def test_running_timeout(tmp_path, monkeypatch):
@@ -202,18 +218,37 @@ def test_running_timeout(tmp_path, monkeypatch):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path,
                             run_timeout_seconds=-1))
     with pytest.raises(InfraRoundError):
-        backend.run_candidates(proposals=[_fake_proposal()], round_id=0,
-                               parent_sha="p", prior_metrics={}, reflection="r")
+        backend.run_candidates(
+            proposals=[_fake_proposal()], round_id=0, parent_sha="p",
+            prior_metrics={}, baseline_metrics=_BASELINE,
+            journal=_journal(tmp_path))
 
 
 def test_lost_then_retry_then_success(tmp_path, monkeypatch):
-    # poll1: gone, no _FINISHED, grace=0 -> LOST -> retry attempt2
-    # poll2: gone, attempt2 _FINISHED seeded -> COMPLETED
-    backend, ctx, cands = _drive(
-        tmp_path, monkeypatch, ["", ""],
-        seed_fn=lambda rd: _seed_result(rd, attempt=2, host="node2"))
+    # poll1: gone, no _FINISHED -> gone_since armed
+    # poll2: still gone past grace=0 -> LOST -> retry attempt2
+    # poll3: gone, attempt2 _FINISHED (seeded after the retry) -> COMPLETED
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_condor_stubs(bin_dir, query_lines=["", "", ""])
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    result_dir = tmp_path / "rounds" / "r0" / "candidates" / "c0"
+    sleeps = {"n": 0}
+
+    def sleep_then_seed(_s):
+        sleeps["n"] += 1
+        if sleeps["n"] == 2:  # after the retry, before poll3
+            _seed_result(result_dir, attempt=2, host="node2")
+
+    monkeypatch.setattr(hepjob.time, "sleep", sleep_then_seed)
+    ctx = _Ctx(tmp_path)
+    backend = HEPJobBackend(ctx, _hep_cfg(tmp_path))
+    cands = backend.run_candidates(
+        proposals=[_fake_proposal()], round_id=0, parent_sha="p",
+        prior_metrics={}, baseline_metrics=_BASELINE,
+        journal=_journal(tmp_path))
     assert cands[0]["candidate_status"] == "COMPLETED"
-    assert cands[0]["execution"]["attempt"] == 2
+    assert _job_json(tmp_path)["attempt"] == 2
 
 
 def test_malformed_result_is_infra(tmp_path, monkeypatch):
@@ -221,7 +256,6 @@ def test_malformed_result_is_infra(tmp_path, monkeypatch):
         rd.mkdir(parents=True, exist_ok=True)
         (rd / "result.json").write_text("{not json", encoding="utf-8")
         (rd / "_FINISHED").touch()
-    backend, ctx = (None, None)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _install_condor_stubs(bin_dir, query_lines=["", ""])
@@ -231,8 +265,10 @@ def test_malformed_result_is_infra(tmp_path, monkeypatch):
     result_dir = tmp_path / "rounds" / "r0" / "candidates" / "c0"
     seed(result_dir)
     with pytest.raises(InfraRoundError):
-        backend.run_candidates(proposals=[_fake_proposal()], round_id=0,
-                               parent_sha="p", prior_metrics={}, reflection="r")
+        backend.run_candidates(
+            proposals=[_fake_proposal()], round_id=0, parent_sha="p",
+            prior_metrics={}, baseline_metrics=_BASELINE,
+            journal=_journal(tmp_path))
 
 
 def test_query_failure_does_not_kill_job(tmp_path, monkeypatch):
@@ -250,26 +286,34 @@ def test_resume_from_inflight(tmp_path, monkeypatch):
     _install_condor_stubs(bin_dir, query_lines=["100 0 1"])  # idle (unused: no supervise yet)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
+    journal = _journal(tmp_path)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, poll_seconds=0))
-    # Populate round meta so the inflight file carries the proposal back to resume.
-    backend._round_meta = {
-        "round_id": 0, "parent_sha": "p", "reflection": "r", "insight": None,
-        "proposals": [{"family": "layout", "decision": "switch", "proposal": "p"}],
-    }
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {})
+    backend._round_id = 0
+    backend._parent_sha = "p"
+    backend._journal = journal
+    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
     backend._submit(job)
-    backend._write_inflight([job])
-    assert (tmp_path / "inflight_round.json").exists()
+    backend._save([job])
+    assert (tmp_path / INFLIGHT_NAME).exists()
 
     # Finish the job out-of-band (as if the worker completed after a crash).
     _seed_result(job.result_dir)
     # Rewrite query to report gone so resume's poll sees completion.
     _install_condor_stubs(bin_dir, query_lines=[""])
-    inflight = json.loads((tmp_path / "inflight_round.json").read_text())
+    inflight = json.loads((tmp_path / INFLIGHT_NAME).read_text())
+    # The round meta survives in the loop-owned file; the backend only gets
+    # the jobs table back.
+    assert inflight["reflection"] == "refl"
+    assert inflight["proposals"] == [_fake_proposal()]
+    journal2 = _InflightJournal(
+        tmp_path / INFLIGHT_NAME,
+        meta={k: v for k, v in inflight.items() if k != "jobs"})
     backend2 = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, poll_seconds=0))
-    cands = backend2.resume_round(inflight)
+    cands = backend2.resume_round(
+        inflight["jobs"], round_id=inflight["round_id"],
+        parent_sha=inflight["parent_sha"], journal=journal2)
     assert cands[0]["candidate_status"] == "COMPLETED"
-    assert (tmp_path / "inflight_round.json").exists() is False
+    assert (tmp_path / INFLIGHT_NAME).exists() is False
 
 
 def test_job_env_sh_materializes_payload_env(tmp_path, monkeypatch):
@@ -291,7 +335,7 @@ def test_ihep_real_group_derived_from_accounting_group(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {})
+    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     # accounting_group "JUNO.juno.default" -> +IHEP_RealGroup = "juno"
@@ -306,7 +350,7 @@ def test_explicit_ihep_group_overrides_derivation(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, ihep_group="customgrp"))
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {})
+    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert '+IHEP_RealGroup = "customgrp"' in sub
@@ -323,4 +367,5 @@ def test_collect_filters_infra_keeps_business(tmp_path, monkeypatch):
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
             proposals=[_fake_proposal("p0"), _fake_proposal("p1")],
-            round_id=0, parent_sha="p", prior_metrics={}, reflection="r")
+            round_id=0, parent_sha="p", prior_metrics={},
+            baseline_metrics=_BASELINE, journal=_journal(tmp_path))

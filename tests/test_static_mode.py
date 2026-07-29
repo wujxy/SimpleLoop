@@ -94,9 +94,9 @@ def test_static_mode_accepts_by_gates_alone_and_records_generations(
         outcome = outcomes[round_id]
         return {
             "candidate": candidate_id,
-            "family": proposal.family,
-            "decision": proposal.decision,
-            "proposal": proposal.proposal,
+            "family": proposal["family"],
+            "decision": proposal["decision"],
+            "proposal": proposal["proposal"],
             "sha": outcome["sha"],
             "score": 0.5,
             "risk": outcome["risk"],

@@ -25,8 +25,7 @@ from .roles.agent import Agent, AgentError
 from . import candidate_worker
 from . import config as config_mod
 from .execution import build_backend
-from .execution.hepjob import INFLIGHT_NAME
-from .execution.hepjob import InfraRoundError as _hepjob_InfraRoundError
+from .execution.base import InfraRoundError, RoundJournal
 from .harness import evals
 from .harness import memory as memory_mod
 from .reporting import plot as plot_mod
@@ -44,6 +43,34 @@ class BaselineAcceptanceError(RuntimeError):
 
 class RunLockError(RuntimeError):
     """Raised when another simpleloop process already holds the run_dir."""
+
+
+INFLIGHT_NAME = "inflight_round.json"
+
+
+class _InflightJournal(RoundJournal):
+    """The loop-owned in-flight round file: ONE atomic unit carrying
+    everything a --continue needs — the round meta (round_id, parent_sha,
+    proposer outputs reflection/insight, proposals) plus the backend's
+    opaque jobs table. The backend calls save(jobs) on every job-state
+    transition but never sees the meta; clear() happens only when the round
+    produced business-terminal candidates. The file appears at the first
+    save (after job submission), so a crash before that simply re-proposes
+    the round — there is no half-written meta to reconcile."""
+
+    def __init__(self, path: Path, meta: dict):
+        self.path = path
+        self.meta = meta
+
+    def save(self, jobs: list[dict]) -> None:
+        payload = {**self.meta, "jobs": jobs}
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2)
+                       + "\n", encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
 
 
 @dataclass
@@ -195,26 +222,48 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                     "re-propose this round, or fix loop.max_rounds.")
             print(f"[{stamp()}] resuming in-flight round {round_id + 1} "
                   "from inflight_round.json (proposer skipped)", flush=True)
+            # The journal's meta was written by the original session; keep it
+            # whole so subsequent saves preserve the proposer's outputs.
+            journal = _InflightJournal(
+                ctx.run_dir / INFLIGHT_NAME,
+                meta={k: v for k, v in inflight.items() if k != "jobs"})
+            reflection = inflight.get("reflection", "")
+            pending_insight = (
+                tuple(inflight["insight"]) if inflight.get("insight") else None)
             try:
-                candidates = ctx.execution_backend.resume_round(inflight)
-            except _hepjob_InfraRoundError as exc:
+                candidates = ctx.execution_backend.resume_round(
+                    inflight.get("jobs") or [], round_id=round_id,
+                    parent_sha=inflight["parent_sha"], journal=journal)
+            except InfraRoundError as exc:
                 print(f"[{stamp()}] {exc}", flush=True)
                 print(f"[{stamp()}] round {round_id + 1} still not complete; "
                       "fix the infrastructure issue and re-run with "
                       "--continue again.", flush=True)
                 return _summary(ctx, run_dir_path)
-            reflection = inflight.get("reflection", "")
-            pending_insight = (
-                tuple(inflight["insight"]) if inflight.get("insight") else None)
         else:
             proposals_batch, reflection, pending_insight = _next_proposals(
                 ctx, static_proposals, round_id, parent_sha)
+            proposal_dicts = [
+                {"family": p.family, "decision": p.decision,
+                 "proposal": p.proposal}
+                for p in proposals_batch
+            ]
+            journal = _InflightJournal(
+                ctx.run_dir / INFLIGHT_NAME,
+                meta={
+                    "round_id": round_id,
+                    "parent_sha": parent_sha,
+                    "reflection": reflection,
+                    "insight": (list(pending_insight)
+                                if pending_insight else None),
+                    "proposals": proposal_dicts,
+                })
             try:
                 candidates = ctx.execution_backend.run_candidates(
-                    proposals=proposals_batch, round_id=round_id,
+                    proposals=proposal_dicts, round_id=round_id,
                     parent_sha=parent_sha, prior_metrics=prior_metrics,
-                    reflection=reflection, insight=pending_insight)
-            except _hepjob_InfraRoundError as exc:
+                    baseline_metrics=ctx.baseline_metrics, journal=journal)
+            except InfraRoundError as exc:
                 # The round is not consumed: inflight_round.json stays on
                 # disk so --continue can resume; exit for human recovery.
                 print(f"[{stamp()}] {exc}", flush=True)
@@ -223,6 +272,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                       "--continue (or delete inflight_round.json to "
                       "re-propose).", flush=True)
                 return _summary(ctx, run_dir_path)
+        _finalize_candidates(ctx, candidates)
         if static_proposals is not None:
             # Controlled-experiment rule: hard gates alone decide, so a
             # regressing-but-valid experiment still advances the chain.
@@ -461,26 +511,39 @@ def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> No
     )
 
 
-def _run_candidates(ctx: RunContext, proposals: list[proposer_mod.Proposal],
+def _finalize_candidates(ctx: RunContext, candidates: list[dict]) -> None:
+    """Harness bookkeeping applied uniformly to every returned candidate,
+    for both backends: ingest worker-reported usage into telemetry, then
+    stamp each candidate with a persisted telemetry snapshot for its
+    history row. Backends never touch telemetry themselves."""
+    if ctx.telemetry is None:
+        return
+    for candidate in candidates:
+        for usage in candidate.pop("usage", []) or []:
+            ctx.telemetry.record_usage(usage)
+        candidate["telemetry"] = ctx.telemetry.snapshot(persist=True)
+
+
+def _run_candidates(ctx: RunContext, proposals: list[dict],
                     round_id: int, parent_sha: str,
-                    prior_metrics: dict) -> list[dict]:
-    """Run one generation's candidates, possibly concurrently."""
+                    prior_metrics: dict,
+                    baseline_metrics: dict | None = None) -> list[dict]:
+    """Run one generation's candidates, possibly concurrently. Proposals are
+    plain dicts ({"family", "decision", "proposal"}) — the same contract the
+    execution backends accept."""
     max_workers = min(ctx.cfg.get("max_workers", 1), max(1, len(proposals)))
     if max_workers <= 1 or len(proposals) <= 1:
-        serial_results = []
-        for i, proposal in enumerate(proposals):
-            candidate = _run_one_candidate(
-                ctx, i, proposal, round_id, parent_sha, prior_metrics)
-            candidate["telemetry"] = (
-                ctx.telemetry.snapshot(persist=True) if ctx.telemetry else {}
-            )
-            serial_results.append(candidate)
-        return serial_results
+        return [
+            _run_one_candidate(
+                ctx, i, proposal, round_id, parent_sha, prior_metrics,
+                baseline_metrics)
+            for i, proposal in enumerate(proposals)
+        ]
     results: list[dict | None] = [None] * len(proposals)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_run_one_candidate, ctx, i, proposal, round_id,
-                        parent_sha, prior_metrics): i
+                        parent_sha, prior_metrics, baseline_metrics): i
             for i, proposal in enumerate(proposals)
         }
         for future in as_completed(futures):
@@ -489,14 +552,11 @@ def _run_candidates(ctx: RunContext, proposals: list[proposer_mod.Proposal],
                 results[i] = future.result()
             except Exception as exc:
                 # Last-resort guard: candidate failures stay local to the candidate.
-                p = proposals[i]
                 print(f"[{stamp()}] candidate r{round_id}-c{i} worker failed: {exc}",
                       flush=True)
                 results[i] = _candidate_failure(
-                    i, p, f"candidate worker failed: {exc}", parent_sha)
-            results[i]["telemetry"] = (
-                ctx.telemetry.snapshot(persist=True) if ctx.telemetry else {}
-            )
+                    i, proposals[i], f"candidate worker failed: {exc}",
+                    parent_sha, round_id=round_id)
     return [r for r in results if r is not None]
 
 
@@ -507,14 +567,14 @@ def _deps_from_ctx(ctx: RunContext) -> candidate_worker.CandidateDeps:
         cfg=ctx.cfg, run_dir=ctx.run_dir, runtime=ctx.runtime,
         workspace=ctx.workspace, executor_agent=ctx.executor_agent,
         judger_agent=ctx.judger_agent, gate_lines=ctx.gate_lines,
-        baseline_metrics=ctx.baseline_metrics,
     )
 
 
 def _run_one_candidate(ctx: RunContext, candidate_id: int,
-                       proposal: proposer_mod.Proposal,
+                       proposal: dict,
                        round_id: int, parent_sha: str,
-                       prior_metrics: dict) -> dict:
+                       prior_metrics: dict,
+                       baseline_metrics: dict | None = None) -> dict:
     """LocalBackend's per-candidate path: the backend owns the worktree
     lifecycle; the business logic lives in candidate_worker.run_candidate."""
     worktree_id = f"{round_id}-c{candidate_id}"
@@ -523,9 +583,10 @@ def _run_one_candidate(ctx: RunContext, candidate_id: int,
         worktree = ctx.workspace.add_worktree(worktree_id, parent_sha)
         spec = candidate_worker.CandidateSpec(
             round_id=round_id, candidate_id=candidate_id,
-            parent_sha=parent_sha, family=proposal.family,
-            decision=proposal.decision, proposal=proposal.proposal,
+            parent_sha=parent_sha, family=proposal["family"],
+            decision=proposal["decision"], proposal=proposal["proposal"],
             run_dir=str(ctx.run_dir), prior_metrics=prior_metrics,
+            baseline_metrics=baseline_metrics or {},
             worktree_path=str(worktree),
         )
         return candidate_worker.run_candidate(_deps_from_ctx(ctx), spec)
@@ -534,14 +595,18 @@ def _run_one_candidate(ctx: RunContext, candidate_id: int,
             ctx.workspace.remove_worktree(worktree_id)
 
 
-def _candidate_failure(candidate_id: int, proposal: proposer_mod.Proposal,
-                       reason: str, parent_sha: str, sha: str | None = None,
+def _candidate_failure(candidate_id: int, proposal: dict,
+                       reason: str, parent_sha: str, *, round_id: int = 0,
+                       sha: str | None = None,
                        eval_block: str = "", eval_metrics: dict | None = None,
                        changed_paths: list[str] | None = None,
                        accepted: bool = False) -> dict:
-    # `proposal` duck-types as the spec (same family/decision/proposal attrs).
+    spec = candidate_worker.CandidateSpec(
+        round_id=round_id, candidate_id=candidate_id, parent_sha=parent_sha,
+        family=proposal["family"], decision=proposal["decision"],
+        proposal=proposal["proposal"])
     return candidate_worker.candidate_failure(
-        candidate_id, proposal, reason, parent_sha, sha=sha,
+        candidate_id, spec, reason, parent_sha, sha=sha,
         eval_block=eval_block, eval_metrics=eval_metrics,
         changed_paths=changed_paths, accepted=accepted)
 

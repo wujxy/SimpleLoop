@@ -17,9 +17,9 @@ safety:
     - "pyproject.toml"
 
 loop:
-  max_rounds: 1
-  candidates_per_round: 1
-  max_workers: 1
+  max_rounds: 3
+  candidates_per_round: 3
+  max_workers: 3
 
 runtime:
   image: apptainer.sif

@@ -32,6 +32,7 @@ def _spec(tmp_path: Path, **overrides) -> CandidateSpec:
         round_id=3, candidate_id=7, parent_sha="abc123",
         family="layout", decision="switch", proposal="do the thing",
         prior_metrics={"SPEED_MS": 150.0},
+        baseline_metrics={"SPEED_MS": 200.0},
         worktree_path=str(tmp_path / "wt"),
         result_dir=str(tmp_path / "result"),
         attempt=2,
@@ -56,7 +57,7 @@ def _deps(tmp_path: Path, cfg: dict | None = None) -> CandidateDeps:
         },
         run_dir=tmp_path, runtime=FakeRuntime(), workspace=FakeWorkspace(),
         executor_agent=object(), judger_agent=object(),
-        gate_lines="", baseline_metrics={"SPEED_MS": 200.0},
+        gate_lines="",
     )
 
 
@@ -161,11 +162,13 @@ def test_cli_writes_terminal_result(tmp_path: Path, monkeypatch):
     result_dir = Path(spec.result_dir)
     assert (result_dir / "_FINISHED").exists()
     result = json.loads((result_dir / "result.json").read_text())
-    assert result["candidate"] == 7
-    assert result["execution"]["job_id"] == "123.4"
-    assert result["execution"]["attempt"] == 2
-    assert result["execution"]["host"]
-    assert result["usage"] == []
+    # result.json is pure business; telemetry/audit live in the sidecar.
+    assert result == {"candidate": 7, "candidate_status": "COMPLETED"}
+    sidecar = json.loads((result_dir / "usage.json").read_text())
+    assert sidecar["execution"]["job_id"] == "123.4"
+    assert sidecar["execution"]["attempt"] == 2
+    assert sidecar["execution"]["host"]
+    assert sidecar["usage"] == []
 
 
 def test_cli_catch_all_still_finishes(tmp_path: Path, monkeypatch):

@@ -8,9 +8,10 @@ HEPJobBackend. The worker is launchable standalone:
   python -m simpleloop.candidate_worker --manifest /path/manifest.json \
       --job-id 12345.0
 
-Completion contract for remote execution: result.json is written atomically
-(tmp + rename) and _FINISHED touched last in result_dir. ANY business-side
-failure (executor/eval/judger error, worker bug) must still produce both —
+Completion contract for remote execution: result.json (pure business
+result) plus usage.json (telemetry/audit sidecar) are written atomically
+and _FINISHED touched last in result_dir. ANY business-side failure
+(executor/eval/judger error, worker bug) must still produce all of them —
 a missing _FINISHED means the process was killed by infrastructure
 (condor_rm/OOM/node death), and only then is a job-level retry meaningful.
 
@@ -103,7 +104,6 @@ class CandidateDeps:
     executor_agent: Agent
     judger_agent: Agent
     gate_lines: str = ""
-    baseline_metrics: dict = field(default_factory=dict)
 
     @property
     def metrics_schema(self) -> dict | None:
@@ -199,13 +199,13 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             sha=result.sha, reason=result.reason, parent_sha=spec.parent_sha,
             workspace=deps.workspace, eval_block=eval_block, cwd=worktree,
             metrics=eval_metrics, prior_metrics=spec.prior_metrics,
-            baseline_metrics=deps.baseline_metrics, metrics_schema=metrics_schema,
+            baseline_metrics=spec.baseline_metrics, metrics_schema=metrics_schema,
             label=f"judger r{spec.round_id}-c{spec.candidate_id}",
         )
         print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
               f"score={judgment.score:.2f} risk={judgment.risk} "
               f"feedback: {judgment.feedback[:120]}", flush=True)
-        print_objective(eval_metrics, spec.prior_metrics, deps.baseline_metrics,
+        print_objective(eval_metrics, spec.prior_metrics, spec.baseline_metrics,
                         metrics_schema)
         return {
             "candidate": spec.candidate_id,
@@ -321,8 +321,10 @@ def print_objective(metrics: dict | None, prior: dict | None,
     print(f"[{stamp()}] objective: " + "  |  ".join(parts), flush=True)
 
 
-def write_result(result_dir: str | Path, result: dict) -> None:
-    """Atomic terminal output: result.json.tmp -> rename -> _FINISHED last.
+def write_result(result_dir: str | Path, result: dict,
+                 *, sidecar: dict | None = None) -> None:
+    """Atomic terminal output: result.json.tmp -> rename, then the sidecar
+    (usage/audit meta for the frontend's telemetry), _FINISHED last.
     The backend only reads the result once _FINISHED exists."""
     result_dir = Path(result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
@@ -330,6 +332,11 @@ def write_result(result_dir: str | Path, result: dict) -> None:
     tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2,
                               default=str) + "\n", encoding="utf-8")
     os.replace(tmp, result_dir / "result.json")
+    if sidecar is not None:
+        meta_tmp = result_dir / "usage.json.tmp"
+        meta_tmp.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2,
+                                       default=str) + "\n", encoding="utf-8")
+        os.replace(meta_tmp, result_dir / "usage.json")
     (result_dir / "_FINISHED").touch()
 
 
@@ -358,9 +365,6 @@ def main(argv: list[str] | None = None) -> int:
         deps = build_deps(cfg, run_dir, usage_observer=usage.append)
         deps.runtime.preflight()
         spec = CandidateSpec.from_dict(spec_dict)
-        # Run-state the resolved config cannot carry: the judger's
-        # vs-baseline axis travels in the manifest.
-        deps.baseline_metrics = spec.baseline_metrics
         result = run_candidate(deps, spec)
     except Exception as exc:
         # Catch-all invariant: a business-side failure still produces a
@@ -376,12 +380,16 @@ def main(argv: list[str] | None = None) -> int:
             str(spec_dict.get("parent_sha") or ""),
             status="WORKER_FAILED",
         )
-    result["usage"] = usage
-    result["execution"] = {
-        "backend": "hepjob",
-        "job_id": args.job_id,
-        "attempt": int(spec_dict.get("attempt") or 1),
-        "host": socket.gethostname(),
+    # result.json stays pure business; telemetry usage and execution audit
+    # travel in the usage.json sidecar for the frontend to ingest.
+    sidecar = {
+        "usage": usage,
+        "execution": {
+            "backend": "hepjob",
+            "job_id": args.job_id,
+            "attempt": int(spec_dict.get("attempt") or 1),
+            "host": socket.gethostname(),
+        },
     }
     result_dir = spec_dict.get("result_dir")
     if not result_dir:
@@ -389,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
               "nowhere to write the terminal result", flush=True)
         return 2
     try:
-        write_result(result_dir, result)
+        write_result(result_dir, result, sidecar=sidecar)
     except OSError as exc:
         print(f"[{stamp()}] FATAL: could not write result to {result_dir}: "
               f"{exc}", flush=True)
