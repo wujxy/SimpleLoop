@@ -166,7 +166,8 @@ def _write_config_snapshot(cfg: dict, config_path: str | Path,
 
 def run(config_path: str | Path, run_dir: str | Path,
         proposals: str | Path | list[str] | None = None,
-        continue_run: bool = False) -> dict:
+        continue_run: bool = False,
+        target_rounds: int | None = None) -> dict:
     """Run the full loop. Returns a summary dict.
 
     `proposals` switches to static-proposal mode; `continue_run` resumes an
@@ -189,14 +190,17 @@ def run(config_path: str | Path, run_dir: str | Path,
     lock_fd = _acquire_run_lock(run_dir_path)
     try:
         _write_config_snapshot(cfg, config_path, run_dir_path)
-        return _run_locked(cfg, run_dir_path, proposals, continue_run)
+        return _run_locked(
+            cfg, run_dir_path, proposals, continue_run, target_rounds,
+        )
     finally:
         _release_run_lock(lock_fd)
 
 
 def _run_locked(cfg: dict, run_dir_path: Path,
                 proposals: str | Path | list[str] | None,
-                continue_run: bool) -> dict:
+                continue_run: bool,
+                target_rounds: int | None = None) -> dict:
     ctx = _build_context(cfg, run_dir_path, resume=continue_run)
 
     static_proposals = _load_proposals(proposals)
@@ -205,11 +209,26 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                          "resumes a claude-proposer run from its history, but "
                          "--proposals drives rounds from a fixed batch.")
     if static_proposals is not None:
+        if target_rounds is not None:
+            raise ValueError(
+                "target_rounds cannot be combined with static proposals"
+            )
         n_rounds = len(static_proposals)
         print(f"[{stamp()}] STATIC-PROPOSAL mode: {n_rounds} round(s) from the "
               f"supplied batch (config max_rounds={cfg['max_rounds']} ignored)", flush=True)
     else:
-        n_rounds = cfg["max_rounds"]
+        if target_rounds is None:
+            n_rounds = cfg["max_rounds"]
+        elif (
+            not isinstance(target_rounds, int)
+            or isinstance(target_rounds, bool)
+            or not 1 <= target_rounds <= cfg["max_rounds"]
+        ):
+            raise ValueError(
+                "target_rounds must be between 1 and configured max_rounds"
+            )
+        else:
+            n_rounds = target_rounds
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
     ctx.workspace.setup()

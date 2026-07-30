@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import inspect
 
 import pytest
 import yaml
 
 from simpleloop import config
+from simpleloop import loop
 from simpleloop.prompt_self_improvement.gate import OptimizerReport, PromptGate
 from simpleloop.prompt_self_improvement.history import PromptHistory
 from simpleloop.prompt_self_improvement.optimizer import MetaOptimizer
+from simpleloop.prompt_self_improvement import supervisor
 from simpleloop.prompts import PROMPT_NAMES, load_semantic
 
 
@@ -209,3 +213,97 @@ def test_optimizer_receives_absolute_read_write_boundaries(tmp_path: Path):
     assert "Fixed artifacts:" in fake.prompt
     assert "optimizer_report.yaml" in fake.prompt
     assert fake.cwd == history.prompt_dir.resolve()
+
+
+def _write_rounds(run_dir: Path, target: int) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "history.jsonl"
+    existing = path.read_text().splitlines() if path.exists() else []
+    with path.open("a", encoding="utf-8") as stream:
+        for round_id in range(len(existing), target):
+            stream.write(json.dumps({"round": round_id}) + "\n")
+
+
+def test_artifact_loop_exposes_target_rounds_override():
+    assert "target_rounds" in inspect.signature(loop.run).parameters
+
+
+def test_supervisor_stops_each_segment_before_optimizer(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+    calls = []
+
+    def artifact_runner(_config, _run_dir, *, target_rounds, **_kwargs):
+        calls.append(("artifact", target_rounds))
+        _write_rounds(run_dir, target_rounds)
+        return {"rounds": target_rounds}
+
+    class NoChangeOptimizer:
+        def run(self, *, prompt_dir, **_kwargs):
+            calls.append(("optimizer", len((run_dir / "history.jsonl").read_text().splitlines())))
+            _write_report(Path(prompt_dir), status="no_change", intent="")
+
+    summary = supervisor.run(
+        task, run_dir, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: NoChangeOptimizer(),
+    )
+
+    assert calls == [
+        ("artifact", 2), ("optimizer", 2),
+        ("artifact", 4), ("optimizer", 4),
+        ("artifact", 5),
+    ]
+    assert summary["rounds"] == 5
+
+
+def test_supervisor_snapshots_accepted_prompt_change(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+
+    def artifact_runner(_config, _run_dir, *, target_rounds, **_kwargs):
+        _write_rounds(run_dir, target_rounds)
+        return {"rounds": target_rounds}
+
+    class RewritingOptimizer:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, *, prompt_dir, **_kwargs):
+            self.calls += 1
+            Path(prompt_dir, "proposer.md").write_text(
+                f"rewritten proposer {self.calls}\n"
+            )
+            _write_report(Path(prompt_dir))
+
+    supervisor.run(
+        task, run_dir, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: RewritingOptimizer(),
+    )
+
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "prompt_history")
+    assert history.state["active_version"] == "v002"
+    assert (history.history_dir / "v001/proposer.md").read_text() == "rewritten proposer 1\n"
+
+
+def test_supervisor_restores_parent_after_optimizer_error(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+
+    def artifact_runner(_config, _run_dir, *, target_rounds, **_kwargs):
+        _write_rounds(run_dir, target_rounds)
+        return {"rounds": target_rounds}
+
+    class BrokenOptimizer:
+        def run(self, *, prompt_dir, **_kwargs):
+            Path(prompt_dir, "proposer.md").write_text("partial")
+            raise RuntimeError("agent crashed")
+
+    supervisor.run(
+        task, run_dir, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: BrokenOptimizer(),
+    )
+
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "prompt_history")
+    assert history.state["active_version"] == "v000"
+    assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
+    assert [event["status"] for event in history.events()] == ["rejected", "rejected"]
