@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import Agent, normalize_free_text
+from ..prompts import load_semantic
 from ..harness import views
 from ..harness import memory as memory_mod
 
@@ -90,7 +91,7 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
             history: list[dict], insights: list[dict], base_sha: str, cwd: Path,
             candidates_per_round: int = 1,
             recent_rounds: int = views._PROPOSER_RECENT_ROUNDS_DEFAULT,
-            gate_block: str = "") -> ProposalBatch:
+            gate_block: str = "", prompt_dir: str | Path | None = None) -> ProposalBatch:
     """Return ProposalBatch for the next round."""
     # History is projected through the proposer's view (no raw eval_block).
     visible = views.for_proposer(history, recent_rounds=recent_rounds)
@@ -123,43 +124,8 @@ def propose(agent: Agent, *, goal: str, editable: list[str], frozen: list[str],
         hist_block = "  (none yet — this is the first round)"
 
 
-    prompt = f"""You are the PROPOSER in an iterative optimization search.
-
-Your job is to propose the next {candidates_per_round} optimization experiments:
-decide what may be worth trying, based on the accepted source and what previous
-experiments actually taught us.
-
-You are one part of a team:
-- You propose optimization hypotheses and search directions.
-- The EXECUTOR investigates implementation details and implements each proposal.
-- The JUDGER evaluates the resulting diff, correctness, performance, and risk.
-- The harness uses measured results and gates to decide what enters the accepted source.
-
-Use previous outcomes as accumulated search experience. Successful experiments
-may reveal promising mechanisms or code regions. Failed, regressed, rejected,
-and nonselected experiments are also useful: learn from them instead of simply
-repeating them. Pay particular attention to the objective change relative to
-the direct accepted parent. Passing a gate means an experiment was valid; it
-does not by itself mean the idea was beneficial.
-
-Before proposing, compare each candidate by code region and optimization mechanism
-against prior outcomes. Renaming, narrowing, or slightly restructuring a neutral
-or regressed idea still counts as the same direction. Do not retry that direction
-unless the proposal identifies materially new evidence, a genuinely different
-mechanism, or a changed measurement protocol. Treat older insights as stale when
-newer measured outcomes contradict them. Keep candidates in the same batch
-meaningfully distinct in mechanism or code region.
-
-Use the current accepted source to keep proposals connected to real code.
-Source reading supports proposal generation; it is not a separate code-review
-or verification task. You do not need to trace every call, inspect every helper,
-prove invariants, or design the implementation. Treat recorded history as
-trustworthy rather than re-auditing old revisions. Once an idea refers to real
-accepted code and has a plausible optimization mechanism, it is grounded enough
-to propose.
-
-A proposal is a grounded hypothesis, not an implementation conclusion. It is
-allowed to be uncertain and it is allowed to fail.
+    semantic = load_semantic("proposer", prompt_dir)
+    prompt = f"""{semantic}
 
 Task goal:
 {goal}
@@ -167,107 +133,37 @@ Task goal:
 Gates:
 {gate_block}
 
-Keep the gates in mind when choosing proposals, but do not try to prove that a
-future implementation will pass them. Avoid obvious conflicts; implementation
-and validation belong to the EXECUTOR and JUDGER.
-
 Current accepted revision:
 - base_sha: {base_sha}
 
 Accumulated search insights:
 {insights_block}
 
-Every candidate in this batch starts from the same accepted revision. A
-candidate affects later generations only if the harness selects and accepts it.
-
 Previous outcomes:
 {hist_block}
 
-Propose exactly {candidates_per_round} experiments. They should explore
-meaningfully different ideas rather than minor variants of the same change.
-Each should be coherent enough to attempt as one round of work.
-
-A useful proposal gives the EXECUTOR enough direction to begin: identify a real
-code area, a plausible source of waste, the broad optimization mechanism, why
-it may help, and a reasonable one-round scope. Leave concrete data structures,
-APIs, cache lifetimes, call rewiring, and other implementation choices to the
-EXECUTOR. Do not turn the proposal into an implementation plan or a guarantee.
-
-The EXECUTOR needs a grounded direction, not a finished investigation. Once the
-EXECUTOR has enough to take over, return the proposals rather than continuing
-to improve the completeness of your investigation.
-
-Source access:
-- You do not have an editable worktree.
-- When a small amount of source context would help, inspect the accepted
-  revision with commands such as `git show {base_sha}:<path>` or
-  `git grep <pattern> {base_sha}`.
-- When an important accumulated insight is too compact to support the choice,
-  you may inspect one supporting episode with `simpleloop memory show <ref>`.
-- Do not edit files, switch revisions, or run the optimization task yourself.
-
-Safety boundaries:
+Runtime context:
+- Generate exactly {candidates_per_round} candidates.
+- Every candidate starts from the accepted revision above.
 - Editable paths: {editable}
 - Frozen paths: {frozen}
-- Do not propose a direction that requires modifying frozen paths.
 
-The output fields form one connected reasoning chain:
+Source access is read-only. Commands such as `git show {base_sha}:<path>`,
+`git grep <pattern> {base_sha}`, and `simpleloop memory show <ref>` support
+investigation of the accepted source and relevant historical episodes.
 
-previous evidence -> reflection -> optional insight -> decision -> proposal
-
-`reflection`:
-- At most 600 characters.
-- Give the batch-level search rationale in at most 1–2 dense sentences: use the
-  accumulated insights, the most relevant recent outcomes, and the current
-  accepted source to identify the historical evidence that matters now.
-- Judge whether the current target bottlenecks or optimization hypotheses still
-  have concrete, substantively distinct opportunities, or have stalled or
-  exhausted their worthwhile headroom.
-- It is not a single continue/switch verdict for the whole batch and does not
-  need to prove every candidate individually.
-- Accumulated insights are compact guides to older experience. When an important
-  insight is too compact, conflicts with recent evidence, may no longer match
-  the current source, or supports revisiting an old direction, you may inspect
-  its referenced episode before deciding.
-- Avoid merely recapping history. It may be empty only when there is no previous
-  outcome to learn from.
-
-`insight`:
-- If the reflection yields a durable lesson not already captured by the
-  accumulated insights and useful to future rounds, give its smallest reusable
-  form as one or two concise, generalizing sentences.
-- The insight is the durable part of the reflection, not a separate recap,
-  implementation note, or proposal. Otherwise return an empty string.
-
-`insight_refs`:
-- Give the exact historical candidate references supporting the new insight,
-  using `r<round>c<candidate>`, for example ["r0c0", "r1c1"].
-- Return an empty list when `insight` is empty.
-
-`decision`:
-- For each proposal, use `continue` when it develops a promising area or
-  mechanism supported by the reflection.
-- Use `switch` when it moves to a different direction in light of that
-  reflection.
-
-For each proposal:
-- `family`: a nonblank label of at most 64 characters. Family labels must be
-  unique after trimming whitespace and ignoring case.
-- `proposal`: a nonblank grounded hypothesis of at most 800 characters that
-  follows from its decision and makes sense under the batch rationale. Name
-  the target area, suspected waste, broad mechanism, expected benefit, and
-  one-round scope. Describe what may be worth trying, not exactly how to code it.
-
-The fields should stay connected: `reflection` explains the current
-understanding, `insight` preserves only the reusable part when one exists, each
-`decision` expresses the resulting search judgement, and each `proposal` is the
-next action implied by that judgement.
-
-If evidence is limited, prefer a conservative, source-grounded hypothesis. Do
-not keep investigating merely to turn uncertainty into certainty.
+Fixed delivery protocol:
+- Return one JSON object matching the supplied schema.
+- reflection and insight are strings; insight_refs is a list of historical
+  `r<round>c<candidate>` references.
+- proposals contains exactly {candidates_per_round} objects with family,
+  decision (`continue` or `switch`), and proposal.
+- family values are distinct, nonblank labels.
+- Source files remain unchanged during proposal generation.
 
 Return JSON only, matching the supplied schema.
 """
+
     data = agent.run_json(
         prompt,
         cwd=cwd,

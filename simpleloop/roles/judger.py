@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import Agent, normalize_free_text
+from ..prompts import load_semantic
 from ..harness import evals
 from ..harness.workspace import Workspace
 
@@ -63,7 +64,7 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
           prior_metrics: dict | None = None,
           baseline_metrics: dict | None = None,
           metrics_schema: dict | None = None,
-          label: str = "judger") -> Judgment:
+          label: str = "judger", prompt_dir: str | Path | None = None) -> Judgment:
     """Grade one round. Returns both full and proposer-facing feedback.
 
     All metrics/deltas passed in are harness-parsed; an empty eval_block means
@@ -74,7 +75,7 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
         diff = f"(no commit produced this round: {reason})"
 
     prompt = _build_prompt(goal, proposal, diff, eval_block,
-                           metrics, prior_metrics, baseline_metrics, metrics_schema)
+                           metrics, prior_metrics, baseline_metrics, metrics_schema, prompt_dir)
     data = agent.run_json(
         prompt,
         cwd=cwd,
@@ -87,7 +88,7 @@ def judge(agent: Agent, *, goal: str, proposal: str, sha: str | None,
 def _build_prompt(goal: str, proposal: str, diff: str, eval_block: str,
                   metrics: dict | None, prior_metrics: dict | None,
                   baseline_metrics: dict | None,
-                  metrics_schema: dict | None) -> str:
+                  metrics_schema: dict | None, prompt_dir: str | Path | None = None) -> str:
     # The authoritative FACTS block is harness-computed; the judger cites its
     # numbers by name and does no extraction/arithmetic.
     facts_block = ""
@@ -140,9 +141,8 @@ def _build_prompt(goal: str, proposal: str, diff: str, eval_block: str,
         "correct, low-risk improvement.\n"
     )
 
-    return f"""You are the JUDGER in a serial optimization loop. Grade this round's change.
-
-Your scope: you see ONE round's diff + metrics. You judge the effect and tag a landing state. You do NOT choose the next direction - leave that to the proposer. Your feedback is a reference for the proposer, not an instruction.
+    semantic = load_semantic("judger", prompt_dir)
+    return f"""{semantic}
 
 Task goal:
 {goal}
@@ -150,42 +150,20 @@ Task goal:
 Direction that was attempted:
 {proposal}
 
-Change (git diff vs the previous round's result):
+Change against the accepted parent:
 ```diff
 {diff}
 ```
-{eval_section}{facts_block}Scoring rubric (score 0.0 to 1.0):
-- 0.90-1.00: clearly exceeds the goal - real measured improvement (in metrics) with no regressions and clean code.
-- 0.70-0.90: solid improvement in the right direction, low risk, code still correct.
-- 0.50-0.70: directionally useful but modest - small gain, or gain without metrics proof, or minor risk.
-- 0.30-0.50: weak / inconclusive - change happened but unclear benefit, or validation incomplete.
-- 0.10-0.30: poor - wrong direction, introduced risk, broke a gate, or mostly duplicate work.
-- 0.00-0.10: failed - no real change, broken code, or touched something it shouldn't.
 
-Judging guidance:
-- Judge whether the change moves toward the goal, achieves real improvement, introduces risk, and is good-quality code.
-{eval_guidance}{facts_guidance}- Penalize unsupported claims, regressions vs the prior round, and changes that break a gate.
-- Give objective facts about what landed, how it measured, and why it behaved that way. Do not choose the next direction.
-- `risk` is your read of the refactor's LATENT correctness risk (not the measured speed - the harness owns speed for best selection): 'high' if the change plausibly breaks on inputs the eval didn't exercise (e.g. a cache keyed on too few state vars, a cached null pointer on an untested branch, arithmetic that drifted); 'medium' if there's a caveat worth flagging but no clear break; 'low' if the refactor is a clean bit-faithful move with the same operators/evaluation order/types. Be concrete in feedback about WHY the risk level.
+{eval_section}{facts_block}Fixed evidence protocol:
+{eval_guidance}{facts_guidance}- The supplied diff, eval output, and harness facts are the available evidence.
+- Numeric claims come from the authoritative metrics block.
+- `risk` is one of `low`, `medium`, or `high` and describes latent correctness risk.
+- `feedback` begins with `LANDED_STATE: <not-implemented|already-implemented|gate-rejected>` and factually describes implementation and result.
+- `feedback_for_proposer` is compact search experience rather than a next-direction recommendation.
 
-Final delivery contract (mandatory):
-- Your final response MUST be exactly one parseable JSON object with four keys:
-  {{"score": <0.0-1.0>, "risk": "<low|medium|high>", "feedback": "<300-500 chars, four-part>", "feedback_for_proposer": "<one or two concise sentences>"}}
-- A ```json code fence is acceptable; any prose, heading, commentary, or natural-language summary outside the JSON is forbidden.
-- `feedback` must be 300-500 chars, four labeled parts (1-2 sentences each):
-  LANDING_STATE: <not-implemented|already-implemented|gate-rejected>
-  Implemented: <one sentence - what the executor actually changed; state plainly if partial/no-op/gate-rejected/drifted>
-  Result: <one sentence - the key metric + vs-prior delta + gate pass/fail>
-  Analysis: <two sentences - why it succeeded/regressed/failed, and the key heuristic; do not pick the next direction>
-- LANDING_STATE: `not-implemented` (a real diff/commit this round), `already-implemented` (executor made no change, reason="executor made no changes"), `gate-rejected` (changes made but frozen_paths gate rejected them).
-- `feedback_for_proposer` is a short search-context note for later proposal
-  generation. In one or two concise sentences, capture the smallest reusable
-  lesson about the attempted mechanism. When the evidence permits, distinguish
-  what the result says about the mechanism from what may be specific to this
-  implementation. Keep implementation diagnosis in `feedback`; this note does
-  not need to repeat metrics already provided by the harness.
-- Do not suggest the next direction; give current-state diagnostics only.
-- If evidence is incomplete or contradictory, still return the JSON object with a low score and explain the uncertainty in `feedback`.
+Return exactly one JSON object matching the supplied schema with score, risk,
+feedback, and feedback_for_proposer.
 """
 
 

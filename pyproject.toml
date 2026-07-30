@@ -14,3 +14,6 @@ simpleloop = "simpleloop.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["simpleloop*"]
+
+[tool.setuptools.package-data]
+simpleloop = ["prompts/*.md"]

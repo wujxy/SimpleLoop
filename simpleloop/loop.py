@@ -451,6 +451,7 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
             candidates_per_round=cfg.get("candidates_per_round", 1),
             recent_rounds=cfg.get("proposer_recent_rounds", 6),
             gate_block=ctx.gate_lines,
+            prompt_dir=(cfg.get("prompt_self_improvement") or {}).get("prompt_dir"),
         )
     except (AgentError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.

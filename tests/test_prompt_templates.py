@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from simpleloop.prompts import load_semantic
+from simpleloop.roles import executor, judger, proposer
+
+
+class CapturingAgent:
+    def __init__(self, data=None):
+        self.data = data or {}
+        self.prompt = ""
+        self.schema = None
+
+    def run_json(self, prompt, *, json_schema, **_kwargs):
+        self.prompt = prompt
+        self.schema = json_schema
+        return self.data
+
+    def run_text(self, prompt, **_kwargs):
+        self.prompt = prompt
+        return ""
+
+
+class EmptyWorkspace:
+    def changed_paths(self, _worktree):
+        return []
+
+    def diff(self, _parent, _sha):
+        return ""
+
+
+def test_load_semantic_uses_identity_internalized_v000():
+    text = load_semantic("proposer")
+    assert text.startswith("You are the PROPOSER")
+    assert "one connected process" in text
+    assert "Do not retry" not in text
+
+
+def test_load_semantic_uses_active_prompt_directory(tmp_path: Path):
+    (tmp_path / "proposer.md").write_text("active proposer", encoding="utf-8")
+    assert load_semantic("proposer", tmp_path) == "active proposer"
+
+
+def test_proposer_assembles_semantics_context_and_fixed_protocol(tmp_path: Path):
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    (prompt_dir / "proposer.md").write_text("ACTIVE PROPOSER", encoding="utf-8")
+    agent = CapturingAgent({
+        "reflection": "",
+        "insight": "",
+        "insight_refs": [],
+        "proposals": [{"family": "f", "decision": "switch", "proposal": "p"}],
+    })
+
+    proposer.propose(
+        agent, goal="faster", editable=["src/**"], frozen=[], history=[],
+        insights=[], base_sha="abc", cwd=tmp_path, prompt_dir=prompt_dir,
+    )
+
+    assert agent.prompt.startswith("ACTIVE PROPOSER")
+    assert "Task goal:\nfaster" in agent.prompt
+    assert "Source access is read-only" in agent.prompt
+    assert agent.schema["required"] == [
+        "reflection", "insight", "insight_refs", "proposals",
+    ]
+
+
+def test_executor_assembles_active_semantics_and_safety(tmp_path: Path):
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    (prompt_dir / "executor.md").write_text("ACTIVE EXECUTOR", encoding="utf-8")
+    agent = CapturingAgent()
+
+    result = executor.execute(
+        agent, proposal="replace lookup", goal="faster",
+        editable=["src/**"], frozen=["bench/**"], workspace=EmptyWorkspace(),
+        worktree=tmp_path, round_id=0, prompt_dir=prompt_dir,
+    )
+
+    assert result.reason == "executor made no changes"
+    assert agent.prompt.startswith("ACTIVE EXECUTOR")
+    assert "Direction to implement:\nreplace lookup" in agent.prompt
+    assert "bench/**" in agent.prompt
+
+
+def test_judger_assembles_active_semantics_and_landed_state_protocol(tmp_path: Path):
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    (prompt_dir / "judger.md").write_text("ACTIVE JUDGER", encoding="utf-8")
+    agent = CapturingAgent({
+        "score": 0.5,
+        "risk": "low",
+        "feedback": "LANDED_STATE: already-implemented",
+        "feedback_for_proposer": "The source already contained the mechanism.",
+    })
+
+    judger.judge(
+        agent, goal="faster", proposal="replace lookup", sha=None,
+        reason="executor made no changes", parent_sha="abc",
+        workspace=EmptyWorkspace(), eval_block="", cwd=tmp_path,
+        prompt_dir=prompt_dir,
+    )
+
+    assert agent.prompt.startswith("ACTIVE JUDGER")
+    assert "LANDED_STATE:" in agent.prompt
+    assert "LANDING_STATE:" not in agent.prompt

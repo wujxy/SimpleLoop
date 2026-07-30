@@ -167,6 +167,7 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
             workspace=deps.workspace, worktree=worktree, round_id=worktree_id,
             gate_block=deps.gate_lines,
+            prompt_dir=(cfg.get("prompt_self_improvement") or {}).get("prompt_dir"),
         )
         if result.sha:
             print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
@@ -201,6 +202,7 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             metrics=eval_metrics, prior_metrics=spec.prior_metrics,
             baseline_metrics=spec.baseline_metrics, metrics_schema=metrics_schema,
             label=f"judger r{spec.round_id}-c{spec.candidate_id}",
+            prompt_dir=(cfg.get("prompt_self_improvement") or {}).get("prompt_dir"),
         )
         print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
               f"score={judgment.score:.2f} risk={judgment.risk} "
