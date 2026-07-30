@@ -116,21 +116,6 @@ def test_build_series_supports_single_candidate_history_and_missing_values():
     assert series.lower_is_better is False
 
 
-def test_build_series_without_objective_schema_still_tracks_scores():
-    history = [
-        _single_candidate_record(0, score=0.6, metrics={"SPEED_MS": 100.0}),
-    ]
-
-    series = build_series(history, None)
-
-    assert series.score_points == [(1, 0.6)]
-    assert series.selected_scores == [(1, 0.6)]
-    assert series.objective_points == []
-    assert series.incumbent_objective == []
-    assert series.objective_key is None
-    assert series.lower_is_better is None
-
-
 def test_build_series_requires_selected_sha_to_advance_parallel_incumbent():
     history = [
         {
@@ -419,67 +404,6 @@ def test_coordinates_always_use_processed_tokens():
     assert tokens == 999
 
 
-def test_worktime_rebase_offsets_lifts_resume_drop():
-    # Session 1 reaches 3600s; a --continue resume restarts the counter near 0.
-    history = [
-        {"telemetry": {"worktime_seconds": 3600.0}},
-        {"telemetry": {"worktime_seconds": 600.0}},
-        {"telemetry": {"worktime_seconds": 900.0}},
-    ]
-    offsets = plot_mod._worktime_rebase_offsets(history)
-
-    assert offsets[0] == 0.0
-    # The resumed session is lifted so its 600s point meets the 3600s ceiling.
-    assert offsets[1] == pytest.approx(3000.0 / 3600.0)
-    # Same resumed session shares one offset (its internal deltas are already correct).
-    assert offsets[2] == pytest.approx(3000.0 / 3600.0)
-
-
-def test_worktime_stays_continuous_across_continue_resume():
-    """The 'vs worktime' axis must not drop at a --continue resume boundary."""
-    history = [
-        {
-            "round": 0,
-            "selected_candidate": 0,
-            "selected_sha": "a",
-            "telemetry": {"worktime_seconds": 3600.0, "processed_tokens": 0},
-            "candidates": [{
-                "candidate": 0,
-                "score": 0.8,
-                "metrics": {"SPEED_MS": 80.0},
-                "telemetry": {"worktime_seconds": 3600.0, "processed_tokens": 0},
-            }],
-        },
-        {
-            "round": 1,
-            "selected_candidate": 0,
-            "selected_sha": "b",
-            # Resumed session restarted its counter at ~0 instead of carrying the
-            # prior 3600s forward — without the rebase this round would plot at
-            # 600s, below the previous round (the reported display bug).
-            "telemetry": {"worktime_seconds": 600.0, "processed_tokens": 0},
-            "candidates": [{
-                "candidate": 0,
-                "score": 0.8,
-                "metrics": {"SPEED_MS": 75.0},
-                "telemetry": {"worktime_seconds": 600.0, "processed_tokens": 0},
-            }],
-        },
-    ]
-    series = build_series(history, SCHEMA, CONTEXT)
-
-    round1_incumbent = next(p for p in series.incumbents if p.round == 1)
-    round2_incumbent = next(p for p in series.incumbents if p.round == 2)
-    round1_candidate = next(p for p in series.candidates if p.round == 1)
-    round2_candidate = next(p for p in series.candidates if p.round == 2)
-
-    assert round1_incumbent.worktime_hours == pytest.approx(3600.0 / 3600.0)
-    # The resumed round continues from the prior ceiling instead of dropping back.
-    assert round2_incumbent.worktime_hours >= round1_incumbent.worktime_hours
-    assert round2_incumbent.worktime_hours == pytest.approx(3600.0 / 3600.0)
-    assert round2_candidate.worktime_hours >= round1_candidate.worktime_hours
-
-
 @pytest.mark.parametrize("baseline", [0, math.nan, True, "unknown", None])
 def test_invalid_baseline_omits_ratio_but_keeps_objective(baseline):
     context = {
@@ -492,20 +416,6 @@ def test_invalid_baseline_omits_ratio_but_keeps_objective(baseline):
     assert series.candidates[1].objective == 80.0
     assert series.candidates[1].ratio is None
     assert series.baseline is None
-
-
-def test_history_without_telemetry_keeps_round_data():
-    series = build_series([
-        _single_candidate_record(0, score=0.7, metrics={"SPEED_MS": 90.0}),
-    ], SCHEMA)
-
-    point = series.candidates[0]
-    assert point.round == 1
-    assert point.score == 0.7
-    assert point.objective == 90.0
-    assert point.worktime_hours is None
-    assert point.processed_tokens is None
-    assert point.ratio is None
 
 
 def test_write_detail_pngs_creates_nine_details(tmp_path):

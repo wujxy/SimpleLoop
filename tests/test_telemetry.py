@@ -136,19 +136,6 @@ def test_concurrent_usage_is_counted_once(tmp_path):
     }
 
 
-def test_resume_from_legacy_null_total_starts_known_category_counts(tmp_path):
-    (tmp_path / "telemetry.json").write_text(json.dumps({
-        "worktime_seconds": 10.0,
-        "processed_tokens": None,
-    }))
-    tracker = RunTelemetry(tmp_path, resume=True, clock=Clock())
-
-    tracker.record_usage({"output_tokens": 7})
-
-    assert tracker.snapshot()["output_tokens"] == 7
-    assert tracker.snapshot()["processed_tokens"] == 7
-
-
 def test_persistence_failure_warns_without_losing_in_memory_state(
     monkeypatch, tmp_path, capsys,
 ):

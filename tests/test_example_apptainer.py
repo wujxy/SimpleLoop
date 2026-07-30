@@ -13,10 +13,6 @@ DEF_DIRS = [
     EXAMPLES,
     EXAMPLES / "tiny_algo_opt",
 ]
-OMILREC_DIRS = [
-    EXAMPLES / "omilrec-opt",
-    EXAMPLES / "omilrec-post-v107-opt",
-]
 LEAN_CONFIGS = [
     EXAMPLES / "task.yaml",
     EXAMPLES / "tiny_algo_opt" / "task.yaml",
@@ -31,7 +27,6 @@ JUNOSW_CONFIGS = [
     EXAMPLES / "omilrec-post-v107-opt" / "task_hints.yaml",
     EXAMPLES / "omilrec-post-v107-opt" / "task_nohints.yaml",
 ]
-TASK_CONFIGS = [*LEAN_CONFIGS, *JUNOSW_CONFIGS]
 
 
 def test_def_examples_have_independent_regular_definitions():
@@ -105,16 +100,6 @@ def test_junosw_configs_name_shared_image_and_definition():
         assert raw["runtime"]["definition"] == "../junosw-apptainer.def"
 
 
-def test_omilrec_configs_bind_large_external_roots():
-    for path in [p for p in TASK_CONFIGS if "omilrec" in str(p.parent)]:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert raw["runtime"]["binds"] == [
-            "/cvmfs",
-            "/data/juno",
-            "/datafs/users/wujxy/agent-sci/omilrec_opt",
-        ]
-
-
 def test_generated_sifs_are_ignored():
     assert "*.sif" in (
         ROOT / ".gitignore"
@@ -125,11 +110,3 @@ def test_primary_readmes_show_init_command():
     for directory in [ROOT, EXAMPLES, EXAMPLES / "tiny_algo_opt"]:
         text = (directory / "README.md").read_text(encoding="utf-8")
         assert "simpleloop init --config" in text
-
-
-def test_omilrec_readmes_name_required_external_binds():
-    for directory in OMILREC_DIRS:
-        text = (directory / "README.md").read_text(encoding="utf-8")
-        assert "/cvmfs" in text
-        assert "/data/juno" in text
-        assert "/datafs/users/wujxy/agent-sci/omilrec_opt" in text

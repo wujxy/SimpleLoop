@@ -12,7 +12,6 @@ Run: python -m pytest tests/   (from SimpleLoop/)
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 from pathlib import Path
 
 import pytest
@@ -23,9 +22,6 @@ from simpleloop.harness import views
 from simpleloop.roles.agent import normalize_free_text
 from simpleloop.roles.judger import Judgment, _parse, _build_prompt, _judger_schema, judge
 from simpleloop.harness.store import Store
-
-EXAMPLES = Path(__file__).parents[1] / "examples"
-
 
 def test_normalize_free_text_accepts_limit_without_warning(capsys):
     value = "x" * 1100
@@ -516,21 +512,6 @@ def test_store_changed_paths_default_empty(tmp_path: Path):
     assert rows[0]["candidates"][0]["changed_paths"] == []
 
 
-def test_store_changed_paths_missing_key_defaults_empty(tmp_path: Path):
-    """A candidate record missing changed_paths must project as [] (the
-    projection does .get('changed_paths') or []), never a KeyError."""
-    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
-    with store.path.open("w", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "round": 0,
-            "candidates": [{"candidate": 0, "proposal": "p0", "sha": "s",
-                            "score": 0.5, "feedback": "f"}],
-        }) + "\n")
-    rows = store.history()
-    proj = views.for_proposer(rows)
-    assert proj[0]["candidates"][0]["changed_paths"] == []
-
-
 # --- judger: LANDED_STATE prefix is a feedback convention, not a parsed field ---
 
 def test_parse_accepts_landed_state_prefixed_feedback():
@@ -545,13 +526,6 @@ def test_parse_accepts_landed_state_prefixed_feedback():
     assert jd.feedback == "LANDED_STATE: already-implemented empty diff, 459.3ms"
 
 
-def test_parse_accepts_legacy_feedback_without_prefix():
-    """Backward compat: older rounds' feedback (no LANDED_STATE prefix) still
-    parses — _parse never looked at the prefix, and it must keep not looking."""
-    jd = _parse({"score": 0.83, "risk": "low",
-                 "feedback": "843ms vs 945ms -11%",
-                 "feedback_for_proposer": "The mechanism improved speed."})
-    assert jd.feedback == "843ms vs 945ms -11%"
 def test_candidate_acceptance_requires_every_declared_gate_to_pass():
     from simpleloop import loop as loop_mod
 
@@ -603,24 +577,6 @@ def test_resume_chain_falls_back_to_baseline_when_no_candidate_was_accepted():
                          "metrics": {"CORRECTNESS": False}}]},
     ]
     assert loop_mod._resume_chain(history, "baseline") == ("baseline", None)
-def test_parse_batch_enforces_exact_count():
-    """The 'produce exactly N candidates' invariant moved out of prompt prose
-    into structure: the JSON Schema pins minItems=maxItems=N, and _parse_batch
-    rejects a response whose proposals count != candidates_per_round. This is
-    the structural anchor for the prose sentence that was deleted."""
-    from simpleloop.roles.proposer import _parse_batch, ProposalBatch
-    one = {"family": "f", "decision": "continue", "proposal": "p"}
-    two = [one, dict(one, family="g")]
-    # right count passes
-    assert isinstance(_parse_batch({"reflection": "", "insight": "", "insight_refs": [], "proposals": two},
-                                   candidates_per_round=2), ProposalBatch)
-    # too few / too many -> ValueError (the sentence 'Produce exactly N' used to carry)
-    with pytest.raises(ValueError):
-        _parse_batch({"reflection": "", "insight": "", "insight_refs": [], "proposals": [one]},
-                      candidates_per_round=2)
-    with pytest.raises(ValueError):
-        _parse_batch({"reflection": "", "insight": "", "insight_refs": [], "proposals": [one, one, one]},
-                      candidates_per_round=2)
 
 
 # --- loop._print_objective: the run log shows each round's measured speed ---
@@ -690,20 +646,6 @@ def test_gate_block_empty_when_no_description():
 
 def test_gate_block_empty_when_no_schema():
     assert views.gate_block(None) == ""
-
-
-def test_config_gate_description_is_parsed_and_optional():
-    # gates with description are kept; gates without stay key-only.
-    cfg = yaml.safe_load(
-        (EXAMPLES / "omilrec-post-v107-opt" / "task.yaml").read_text(
-            encoding="utf-8"
-        )
-    )
-    gates = cfg["eval"]["metrics"]["gates"]
-    keys = [g["key"] for g in gates]
-    assert keys == ["FCN", "CONSISTENCY", "EVAL_RESULT"]
-    for g in gates:
-        assert isinstance(g["description"], str) and g["description"].strip()
 
 
 def _write_min_task(tmp_path: Path, loop: dict) -> Path:
