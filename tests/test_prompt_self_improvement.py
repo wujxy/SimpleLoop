@@ -6,6 +6,9 @@ import pytest
 import yaml
 
 from simpleloop import config
+from simpleloop.prompt_self_improvement.gate import OptimizerReport, PromptGate
+from simpleloop.prompt_self_improvement.history import PromptHistory
+from simpleloop.prompts import PROMPT_NAMES, load_semantic
 
 
 def _task_file(tmp_path: Path, block=None) -> Path:
@@ -83,3 +86,89 @@ def test_prompt_self_improvement_rejects_invalid_values(
 ):
     with pytest.raises(config.ConfigError, match=message):
         config.load(_task_file(tmp_path, _enabled(**overrides)))
+
+
+def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    assert history.initialize() == "v000"
+    for role in PROMPT_NAMES:
+        expected = load_semantic(role) + "\n"
+        assert (history.prompt_dir / f"{role}.md").read_text() == expected
+        assert (history.history_dir / "v000" / f"{role}.md").read_text() == expected
+    assert history.state["active_version"] == "v000"
+
+
+def test_history_detects_changes_snapshots_and_restores(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    proposer = history.prompt_dir / "proposer.md"
+    proposer.write_text("rewritten proposer\n", encoding="utf-8")
+    assert history.has_changes("v000")
+
+    version = history.snapshot(2, OptimizerReport(
+        status="changed", diagnosis="anchored", evidence=["r0c0"],
+        intent="broaden search",
+    ))
+    assert version == "v001"
+    assert (history.history_dir / "v001/proposer.md").read_text() == "rewritten proposer\n"
+
+    proposer.write_text("partial", encoding="utf-8")
+    history.restore("v001")
+    assert proposer.read_text(encoding="utf-8") == "rewritten proposer\n"
+
+
+def test_history_records_idempotent_trigger_and_recovers_inflight(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    assert history.mark_inflight("run-a", 2)
+    assert not history.mark_inflight("run-a", 2)
+    (history.prompt_dir / "proposer.md").write_text("partial")
+
+    recovered = history.recover_inflight()
+    assert recovered == {"run_id": "run-a", "trigger_round": 2, "parent": "v000"}
+    assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
+    assert history.events()[-1]["status"] == "interrupted"
+
+
+def _write_report(prompt_dir: Path, **overrides) -> Path:
+    data = {
+        "status": "changed",
+        "diagnosis": "role drift",
+        "evidence": ["r0c0"],
+        "intent": "restore ownership",
+        **overrides,
+    }
+    path = prompt_dir / "optimizer_report.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def test_report_parser_is_exact_and_gate_allows_role_rewrite(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    (history.prompt_dir / "proposer.md").write_text("wholly new semantics")
+    report_path = _write_report(history.prompt_dir)
+
+    report = OptimizerReport.load(report_path)
+    assert report.diagnosis == "role drift"
+    assert PromptGate(30000).check(history.prompt_dir, report, changed=True) == []
+
+
+def test_gate_rejects_changed_meta_core_and_report_mismatch(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    meta = history.prompt_dir / "meta_optimizer.md"
+    meta.write_text(meta.read_text().replace("META OPTIMIZER", "TASK SOLVER"))
+    report = OptimizerReport.load(_write_report(history.prompt_dir, status="no_change"))
+
+    errors = PromptGate(30000).check(history.prompt_dir, report, changed=True)
+    assert any("META_IDENTITY_CORE" in error for error in errors)
+    assert any("no_change" in error for error in errors)
+
+
+def test_report_rejects_unknown_fields(tmp_path: Path):
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    path = _write_report(prompt_dir, unknown=True)
+    with pytest.raises(ValueError, match="exactly"):
+        OptimizerReport.load(path)
