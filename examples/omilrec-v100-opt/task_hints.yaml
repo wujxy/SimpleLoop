@@ -41,11 +41,11 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 60
+  max_rounds: 100
   candidates_per_round: 3
   max_workers: 3
   agent_timeout_seconds: 4500
-  proposer_recent_rounds: 4
+  proposer_recent_rounds: 2
 
 runtime:
   image: ../junosw-apptainer.sif
