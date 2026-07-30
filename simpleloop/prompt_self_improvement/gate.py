@@ -73,6 +73,9 @@ class PromptGate:
             errors.append(f"unexpected prompt files: {sorted(extra)}")
         for name in PROMPT_NAMES:
             path = root / f"{name}.md"
+            if path.is_symlink():
+                errors.append(f"{path.name} must not be a symbolic link")
+                continue
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:

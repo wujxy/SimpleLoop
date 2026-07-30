@@ -274,6 +274,16 @@ def _resolve_prompt_self_improvement(raw: object, path: Path) -> dict:
                 f"prompt_self_improvement.{key}: required non-empty path"
             )
         resolved_paths[key] = str(Path(_rel(value, path)).resolve())
+    prompt_dir = Path(resolved_paths["prompt_dir"])
+    history_dir = Path(resolved_paths["history_dir"])
+    if (
+        prompt_dir == history_dir
+        or prompt_dir in history_dir.parents
+        or history_dir in prompt_dir.parents
+    ):
+        raise ConfigError(
+            "prompt_self_improvement prompt_dir and history_dir must not overlap"
+        )
 
     return {
         "enabled": True,

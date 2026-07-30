@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import fcntl
 import json
 import inspect
 
@@ -93,6 +94,24 @@ def test_prompt_self_improvement_rejects_invalid_values(
         config.load(_task_file(tmp_path, _enabled(**overrides)))
 
 
+@pytest.mark.parametrize(
+    ("prompt_dir", "history_dir"),
+    [
+        ("shared", "shared"),
+        ("state/prompts", "state"),
+        ("state", "state/history"),
+    ],
+)
+def test_prompt_and_history_directories_must_be_separate(
+    tmp_path: Path, prompt_dir: str, history_dir: str,
+):
+    with pytest.raises(config.ConfigError, match="must not overlap"):
+        config.load(_task_file(
+            tmp_path,
+            _enabled(prompt_dir=prompt_dir, history_dir=history_dir),
+        ))
+
+
 def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):
     history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
     assert history.initialize() == "v000"
@@ -101,6 +120,18 @@ def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):
         assert (history.prompt_dir / f"{role}.md").read_text() == expected
         assert (history.history_dir / "v000" / f"{role}.md").read_text() == expected
     assert history.state["active_version"] == "v000"
+
+
+def test_history_initialization_replaces_orphan_v000(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    orphan = history.history_dir / "v000"
+    orphan.mkdir(parents=True)
+    (orphan / "partial").write_text("interrupted initialization")
+
+    assert history.initialize() == "v000"
+
+    assert not (orphan / "partial").exists()
+    assert history.state == {"active_version": "v000", "inflight": None}
 
 
 def test_history_detects_changes_snapshots_and_restores(tmp_path: Path):
@@ -133,6 +164,48 @@ def test_history_records_idempotent_trigger_and_recovers_inflight(tmp_path: Path
     assert recovered == {"run_id": "run-a", "trigger_round": 2, "parent": "v000"}
     assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
     assert history.events()[-1]["status"] == "interrupted"
+
+
+def test_history_rolls_back_snapshot_created_by_interrupted_trigger(
+    tmp_path: Path,
+):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    history.mark_inflight("run-a", 2)
+    (history.prompt_dir / "proposer.md").write_text("interrupted rewrite")
+    history.snapshot(2, OptimizerReport(
+        status="changed", diagnosis="test crash window", evidence=[],
+        intent="test recovery",
+    ))
+    assert history.state["active_version"] == "v001"
+
+    history.recover_inflight()
+
+    assert history.state["active_version"] == "v000"
+    assert not (history.history_dir / "v001").exists()
+    assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
+
+
+def test_history_preserves_completed_trigger_with_stale_inflight(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    history.mark_inflight("run-a", 2)
+    proposer = history.prompt_dir / "proposer.md"
+    proposer.write_text("accepted rewrite")
+    history.snapshot(2, OptimizerReport(
+        status="changed", diagnosis="accepted", evidence=[],
+        intent="keep this version",
+    ))
+    history.record_event({
+        "run_id": "run-a", "trigger_round": 2, "parent": "v000",
+        "status": "accepted", "result_version": "v001",
+    })
+
+    history.recover_inflight()
+
+    assert history.state == {"active_version": "v001", "inflight": None}
+    assert proposer.read_text() == "accepted rewrite"
+    assert [event["status"] for event in history.events()] == ["accepted"]
 
 
 def _write_report(prompt_dir: Path, **overrides) -> Path:
@@ -169,6 +242,30 @@ def test_gate_rejects_changed_meta_core_and_report_mismatch(tmp_path: Path):
     errors = PromptGate(30000).check(history.prompt_dir, report, changed=True)
     assert any("META_IDENTITY_CORE" in error for error in errors)
     assert any("no_change" in error for error in errors)
+
+
+def test_gate_rejects_symlink_and_restore_does_not_write_through_it(
+    tmp_path: Path,
+):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    outside = tmp_path / "outside.md"
+    outside.write_text("do not change")
+    proposer = history.prompt_dir / "proposer.md"
+    proposer.unlink()
+    proposer.symlink_to(outside)
+    report = OptimizerReport.load(_write_report(
+        history.prompt_dir, status="no_change", intent="",
+    ))
+
+    errors = PromptGate(30000).check(
+        history.prompt_dir, report, changed=False,
+    )
+    history.restore("v000")
+
+    assert any("symbolic link" in error for error in errors)
+    assert outside.read_text() == "do not change"
+    assert proposer.is_file() and not proposer.is_symlink()
 
 
 def test_report_rejects_unknown_fields(tmp_path: Path):
@@ -254,6 +351,72 @@ def test_supervisor_stops_each_segment_before_optimizer(tmp_path: Path):
         ("artifact", 5),
     ]
     assert summary["rounds"] == 5
+
+
+def test_supervisor_returns_complete_summary_when_run_is_already_done(
+    tmp_path: Path,
+):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+    _write_rounds(run_dir, 5)
+    expected = _summary(run_dir) | {"rounds": 5}
+    calls = []
+
+    def artifact_runner(_config, _run_dir, *, target_rounds, continue_run):
+        calls.append((target_rounds, continue_run))
+        return expected
+
+    class UnusedOptimizer:
+        def run(self, **_kwargs):
+            pytest.fail("optimizer called")
+
+    summary = supervisor.run(
+        task, run_dir, continue_run=True, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: UnusedOptimizer(),
+    )
+
+    assert calls == [(5, True)]
+    assert summary == expected
+
+
+def test_supervisor_requires_explicit_continue_for_existing_rounds(
+    tmp_path: Path,
+):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+    _write_rounds(run_dir, 1)
+
+    with pytest.raises(ValueError, match="--continue"):
+        supervisor.run(
+            task, run_dir,
+            artifact_runner=lambda *_args, **_kwargs: pytest.fail(
+                "artifact loop called"
+            ),
+            optimizer_factory=lambda **_kwargs: pytest.fail("optimizer created"),
+        )
+
+    assert not (tmp_path / "prompt_history").exists()
+
+
+def test_supervisor_rejects_a_second_active_supervisor(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock = (run_dir / ".prompt-self-improvement.lock").open("w")
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(loop.RunLockError, match="prompt supervisor"):
+            supervisor.run(
+                task, run_dir,
+                artifact_runner=lambda *_args, **_kwargs: pytest.fail(
+                    "artifact loop called"
+                ),
+                optimizer_factory=lambda **_kwargs: pytest.fail(
+                    "optimizer created"
+                ),
+            )
+    finally:
+        lock.close()
 
 
 def test_supervisor_snapshots_accepted_prompt_change(tmp_path: Path):

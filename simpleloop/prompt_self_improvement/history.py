@@ -32,9 +32,12 @@ class PromptHistory:
             return str(existing)
         self.prompt_dir.mkdir(parents=True, exist_ok=True)
         self.history_dir.mkdir(parents=True, exist_ok=True)
+        orphan = self.history_dir / "v000"
+        if orphan.exists():
+            shutil.rmtree(orphan)
         for role in PROMPT_NAMES:
-            (self.prompt_dir / f"{role}.md").write_text(
-                load_semantic(role) + "\n", encoding="utf-8",
+            _atomic_text(
+                self.prompt_dir / f"{role}.md", load_semantic(role) + "\n",
             )
         self._write_snapshot("v000", manifest={
             "version": "v000", "parent": None, "trigger_round": None,
@@ -57,14 +60,17 @@ class PromptHistory:
         source = self.history_dir / version
         expected = {f"{role}.md" for role in PROMPT_NAMES}
         for path in self.prompt_dir.iterdir():
-            if path.name in expected:
+            if path.name in expected and path.is_file() and not path.is_symlink():
                 continue
             if path.is_symlink() or path.is_file():
                 path.unlink()
             elif path.is_dir():
                 shutil.rmtree(path)
         for role in PROMPT_NAMES:
-            shutil.copyfile(source / f"{role}.md", self.prompt_dir / f"{role}.md")
+            target = self.prompt_dir / f"{role}.md"
+            temporary = target.with_suffix(".restore")
+            shutil.copyfile(source / f"{role}.md", temporary)
+            os.replace(temporary, target)
 
     def snapshot(self, trigger_round: int, report: OptimizerReport) -> str:
         state = self.state
@@ -104,8 +110,26 @@ class PromptHistory:
         inflight = state.get("inflight")
         if not inflight:
             return None
-        self.restore(inflight["parent"])
-        self.record_event({**inflight, "status": "interrupted"})
+        key = (inflight["run_id"], inflight["trigger_round"])
+        completed = any(
+            (event.get("run_id"), event.get("trigger_round")) == key
+            and event.get("status") in {"accepted", "no_change", "rejected"}
+            for event in self.events()
+        )
+        if completed:
+            state["inflight"] = None
+            self._write_state(state)
+            return inflight
+        parent = str(inflight["parent"])
+        self.restore(parent)
+        self._discard_versions_after(parent)
+        if not any(
+            (event.get("run_id"), event.get("trigger_round")) == key
+            and event.get("status") == "interrupted"
+            for event in self.events()
+        ):
+            self.record_event({**inflight, "status": "interrupted"})
+        state["active_version"] = parent
         state["inflight"] = None
         self._write_state(state)
         return inflight
@@ -147,6 +171,17 @@ class PromptHistory:
             yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+
+    def _discard_versions_after(self, version: str) -> None:
+        current = int(version[1:])
+        for path in self.history_dir.iterdir():
+            if (
+                path.is_dir()
+                and path.name.startswith("v")
+                and path.name[1:].isdigit()
+                and int(path.name[1:]) > current
+            ):
+                shutil.rmtree(path)
 
     def _write_state(self, state: dict) -> None:
         _atomic_text(
