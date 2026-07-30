@@ -79,7 +79,7 @@ class Agent:
         model: str | None = None,
         allowed_tools: str = "Read,Edit,Write,Bash",
         max_output_tokens: int = 64000,
-        usage_observer: Callable[[object, str], None] | None = None,
+        usage_observer: Callable[[object], None] | None = None,
     ):
         self.runtime = runtime
         self.command = command
@@ -96,7 +96,7 @@ class Agent:
         if self.usage_observer is None:
             return
         try:
-            self.usage_observer(usage, label)
+            self.usage_observer(usage)
         except Exception as exc:
             print(
                 f"[telemetry] warning: {label} usage was not recorded: {exc}",

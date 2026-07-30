@@ -405,6 +405,74 @@ def test_build_series_maps_candidate_and_generation_coordinates():
     assert series.incumbents[-1].worktime_hours == 30.0 / 3600.0
 
 
+def test_coordinates_sum_known_token_categories():
+    worktime, tokens = plot_mod._coordinates({
+        "worktime_seconds": 3600.0,
+        "input_tokens": 10,
+        "output_tokens": None,
+        "cache_creation_input_tokens": 20,
+        "cache_read_input_tokens": 30,
+        "processed_tokens": 999,
+    })
+
+    assert worktime == 1.0
+    assert tokens == 60
+
+
+def test_token_rebase_offsets_continue_after_null_gap():
+    history = [
+        {"telemetry": {"processed_tokens": 100}},
+        {"telemetry": {"processed_tokens": None}},
+        {"telemetry": {"processed_tokens": 20}},
+        {"telemetry": {"processed_tokens": 35}},
+    ]
+
+    assert plot_mod._token_rebase_offsets(history) == [0, 0, 100, 100]
+
+
+def test_token_axis_continues_after_null_gap_and_counter_restart():
+    history = [
+        {
+            "round": 0,
+            "selected_candidate": 0,
+            "selected_sha": "a",
+            "telemetry": {"processed_tokens": 100},
+            "candidates": [{
+                "candidate": 0,
+                "score": 0.8,
+                "metrics": {"SPEED_MS": 80.0},
+                "telemetry": {"processed_tokens": 90},
+            }],
+        },
+        {
+            "round": 1,
+            "selected_candidate": None,
+            "selected_sha": None,
+            "telemetry": {"processed_tokens": None},
+            "candidates": [],
+        },
+        {
+            "round": 2,
+            "selected_candidate": 0,
+            "selected_sha": "b",
+            "telemetry": {"processed_tokens": 20},
+            "candidates": [{
+                "candidate": 0,
+                "score": 0.9,
+                "metrics": {"SPEED_MS": 70.0},
+                "telemetry": {"processed_tokens": 10},
+            }],
+        },
+    ]
+
+    series = build_series(history, SCHEMA, CONTEXT)
+    resumed_candidate = next(p for p in series.candidates if p.round == 3)
+    resumed_incumbent = next(p for p in series.incumbents if p.round == 3)
+
+    assert resumed_candidate.processed_tokens == 110
+    assert resumed_incumbent.processed_tokens == 120
+
+
 def test_worktime_rebase_offsets_lifts_resume_drop():
     # Session 1 reaches 3600s; a --continue resume restarts the counter near 0.
     history = [
