@@ -125,7 +125,7 @@ class HEPJobBackend(ExecutionBackend):
             self._submit_baseline(job)
 
             # Wait for the baseline job to complete
-            baseline_metrics = self._supervise_baseline(job)
+            self._supervise_baseline(job)
 
             # Read and validate the result
             if not (result_dir / "_FINISHED").exists():
@@ -139,7 +139,7 @@ class HEPJobBackend(ExecutionBackend):
                     f"baseline result.json is malformed: {exc}")
 
             eval_block = result.get("eval_block", "")
-            metrics = result.get("eval_metrics", {})
+            metrics = result.get("metrics", {})
 
             # Validate baseline metrics
             import math
@@ -326,8 +326,8 @@ class HEPJobBackend(ExecutionBackend):
                 print(f"[{stamp()}] warning: condor_q failed; retrying next poll", flush=True)
             time.sleep(poll)
 
-        # Read and return the result
-        return self._read_result(job).get("eval_metrics", {})
+        # Return success to indicate completion
+        return {}
 
     def _prepare(self, candidate_id: int, proposal: dict,
                  round_id: int, parent_sha: str, prior_metrics: dict,
