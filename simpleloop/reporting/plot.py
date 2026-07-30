@@ -17,12 +17,6 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
 
 _Y_KINDS = ("score", "objective", "ratio")
 _X_KINDS = ("round", "worktime", "tokens")
-_TOKEN_KEYS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
 _Y_SLUGS = {
     "score": "score",
     "objective": "objective",
@@ -114,19 +108,9 @@ def _coordinates(telemetry: object) -> tuple[float | None, int | None]:
     seconds = _number(telemetry.get("worktime_seconds"))
     if seconds is not None and seconds < 0:
         seconds = None
-    category_values = [
-        _tokens(telemetry.get(key))
-        for key in _TOKEN_KEYS
-        if key in telemetry
-    ]
-    tokens = (
-        sum(value for value in category_values if value is not None)
-        if category_values
-        else _tokens(telemetry.get("processed_tokens"))
-    )
     return (
         seconds / 3600.0 if seconds is not None else None,
-        tokens,
+        _tokens(telemetry.get("processed_tokens")),
     )
 
 
@@ -165,24 +149,6 @@ def _worktime_rebase_offsets(history: list[dict]) -> list[float]:
     return offsets
 
 
-def _token_rebase_offsets(history: list[dict]) -> list[int]:
-    """Lift restarted token counters above the last known cumulative total."""
-    offsets: list[int] = []
-    running_tokens = 0
-    ceiling_tokens: int | None = None
-    for record in history:
-        _, tokens = _coordinates(record.get("telemetry"))
-        if tokens is not None:
-            effective = tokens + running_tokens
-            if ceiling_tokens is not None and effective < ceiling_tokens:
-                running_tokens = ceiling_tokens
-                effective = tokens + running_tokens
-            if ceiling_tokens is None or effective > ceiling_tokens:
-                ceiling_tokens = effective
-        offsets.append(running_tokens)
-    return offsets
-
-
 def _observation(
     *,
     round_number: float,
@@ -193,13 +159,10 @@ def _observation(
     lower_is_better: bool | None = None,
     selected: bool = False,
     worktime_offset_hours: float = 0.0,
-    token_offset: int = 0,
 ) -> Observation:
     worktime, tokens = _coordinates(telemetry)
     if worktime is not None and worktime_offset_hours:
         worktime += worktime_offset_hours
-    if tokens is not None and token_offset:
-        tokens += token_offset
     objective_value = _number(objective)
     ratio = _ratio(objective_value, baseline_value, lower_is_better)
     return Observation(
@@ -231,7 +194,6 @@ def build_series(
     if baseline_value == 0.0:
         baseline_value = None
     worktime_offsets = _worktime_rebase_offsets(history)
-    token_offsets = _token_rebase_offsets(history)
     baseline = None
     if baseline_value is not None:
         baseline = _observation(
@@ -256,11 +218,6 @@ def build_series(
             if index < len(worktime_offsets)
             else 0.0
         )
-        token_offset = (
-            token_offsets[index]
-            if index < len(token_offsets)
-            else 0
-        )
         attempts = record.get("candidates") or []
         selected_id = record.get("selected_candidate")
         selected_observation: Observation | None = None
@@ -277,7 +234,6 @@ def build_series(
                 lower_is_better=lower_is_better,
                 selected=selected,
                 worktime_offset_hours=offset_hours,
-                token_offset=token_offset,
             )
             candidates.append(point)
             if selected:
@@ -300,7 +256,6 @@ def build_series(
                 lower_is_better=lower_is_better,
                 selected=True,
                 worktime_offset_hours=offset_hours,
-                token_offset=token_offset,
             ))
 
     return PlotSeries(

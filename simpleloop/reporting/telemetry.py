@@ -92,13 +92,6 @@ class RunTelemetry:
             key: _non_negative_int(state.get(key)) or 0
             for key in _TOKEN_KEYS
         }
-        loaded_total = _non_negative_int(state.get("processed_tokens"))
-        known_total = sum(self._tokens.values())
-        self._token_offset = (
-            max(0, loaded_total - known_total)
-            if loaded_total is not None
-            else 0
-        )
         baseline_metrics = state.get("baseline_metrics")
         baseline_telemetry = state.get("baseline_telemetry")
         self._baseline_metrics = (
@@ -152,7 +145,7 @@ class RunTelemetry:
         return {
             "worktime_seconds": worktime,
             **token_counts,
-            "processed_tokens": self._token_offset + sum(token_counts.values()),
+            "processed_tokens": sum(token_counts.values()),
         }
 
     def _state_locked(self, snapshot: dict | None = None) -> dict:
