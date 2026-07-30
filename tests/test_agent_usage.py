@@ -79,15 +79,20 @@ def test_decode_output_keeps_legacy_plain_json_and_missing_usage():
 
 def test_agent_notifies_usage_observer():
     seen = []
-    agent = Agent(runtime=RecordingRuntime(), usage_observer=seen.append)
+    agent = Agent(
+        runtime=RecordingRuntime(),
+        usage_observer=lambda usage, label: seen.append((usage, label)),
+    )
 
     agent._notify_usage({"input_tokens": 1, "output_tokens": 2}, "proposer")
 
-    assert seen == [{"input_tokens": 1, "output_tokens": 2}]
+    assert seen == [
+        ({"input_tokens": 1, "output_tokens": 2}, "proposer"),
+    ]
 
 
 def test_usage_observer_failure_is_nonfatal(capsys):
-    def fail(_usage):
+    def fail(_usage, _label):
         raise OSError("state unavailable")
 
     agent = Agent(runtime=RecordingRuntime(), usage_observer=fail)

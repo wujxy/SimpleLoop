@@ -85,6 +85,7 @@ class RunTelemetry:
         clock: Callable[[], float] = time.monotonic,
     ):
         self.path = Path(run_dir) / "telemetry.json"
+        self.usage_path = Path(run_dir) / "usage.jsonl"
         self._clock = clock
         self._lock = threading.RLock()
         self._segment_start = clock()
@@ -107,15 +108,30 @@ class RunTelemetry:
             else None
         )
 
-    def record_usage(self, usage: object) -> None:
+    def record_usage(self, usage: object, label: str = "agent") -> None:
         with self._lock:
             count = processed_tokens(usage)
+            self._append_usage_locked(usage, label, count)
             self._tokens = (
                 self._tokens + count
                 if self._tokens is not None and count is not None
                 else None
             )
             self._persist_locked()
+
+    def _append_usage_locked(
+        self, usage: object, label: str, count: int | None,
+    ) -> None:
+        self.usage_path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "label": label,
+            "usage": usage,
+            "processed_tokens": count,
+        }
+        with self.usage_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def set_baseline(self, metrics: dict) -> None:
         """Fix the initial baseline once; continue-mode calls cannot replace it."""

@@ -66,9 +66,33 @@ def test_fresh_tracker_records_active_time_tokens_and_baseline(tmp_path):
 
 def test_missing_usage_makes_tokens_permanently_unavailable(tmp_path):
     tracker = RunTelemetry(tmp_path, clock=Clock())
-    tracker.record_usage(None)
-    tracker.record_usage({"input_tokens": 4, "output_tokens": 1})
+    tracker.record_usage(None, "proposer")
+    tracker.record_usage(
+        {"input_tokens": 4, "output_tokens": 1, "custom": {"raw": True}},
+        "executor",
+    )
+
     assert tracker.snapshot()["processed_tokens"] is None
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "usage.jsonl").read_text().splitlines()
+    ]
+    assert events == [
+        {
+            "label": "proposer",
+            "usage": None,
+            "processed_tokens": None,
+        },
+        {
+            "label": "executor",
+            "usage": {
+                "input_tokens": 4,
+                "output_tokens": 1,
+                "custom": {"raw": True},
+            },
+            "processed_tokens": 5,
+        },
+    ]
 
 
 def test_resume_adds_only_new_active_segment_and_keeps_baseline(tmp_path):
@@ -108,6 +132,12 @@ def test_concurrent_usage_is_counted_once(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(tracker.record_usage, [usage] * 100))
     assert tracker.snapshot()["processed_tokens"] == 300
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "usage.jsonl").read_text().splitlines()
+    ]
+    assert len(events) == 100
+    assert all(event["usage"] == usage for event in events)
 
 
 def test_persistence_failure_warns_without_losing_in_memory_state(
@@ -201,7 +231,7 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
     assert state["baseline_metrics"] == {"SPEED_MS": 100.0}
     assert state["baseline_telemetry"]["processed_tokens"] == 0
 
-    observers[0]({"input_tokens": 2, "output_tokens": 1})
+    observers[0]({"input_tokens": 2, "output_tokens": 1}, "proposer")
     updated = json.loads((run_dir / "telemetry.json").read_text())
     assert updated["processed_tokens"] == 3
 
