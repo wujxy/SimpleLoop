@@ -8,6 +8,7 @@ import yaml
 from simpleloop import config
 from simpleloop.prompt_self_improvement.gate import OptimizerReport, PromptGate
 from simpleloop.prompt_self_improvement.history import PromptHistory
+from simpleloop.prompt_self_improvement.optimizer import MetaOptimizer
 from simpleloop.prompts import PROMPT_NAMES, load_semantic
 
 
@@ -172,3 +173,39 @@ def test_report_rejects_unknown_fields(tmp_path: Path):
     path = _write_report(prompt_dir, unknown=True)
     with pytest.raises(ValueError, match="exactly"):
         OptimizerReport.load(path)
+
+
+def test_optimizer_receives_absolute_read_write_boundaries(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+
+    class CapturingAgent:
+        prompt = ""
+        cwd = None
+
+        def run_text(self, prompt, *, cwd, **_kwargs):
+            self.prompt = prompt
+            self.cwd = cwd
+            return ""
+
+    fake = CapturingAgent()
+    optimizer = MetaOptimizer(
+        "claude", 60, 8000, agent_factory=lambda **_kwargs: fake,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+
+    optimizer.run(
+        run_dir=run_dir, prompt_dir=history.prompt_dir,
+        history_dir=history.history_dir, source_dir=source_dir,
+        goal="faster", gate_block="CORRECTNESS",
+    )
+
+    assert str(run_dir.resolve()) in fake.prompt
+    assert str(history.history_dir.resolve()) in fake.prompt
+    assert str(source_dir.resolve()) in fake.prompt
+    assert "Fixed artifacts:" in fake.prompt
+    assert "optimizer_report.yaml" in fake.prompt
+    assert fake.cwd == history.prompt_dir.resolve()

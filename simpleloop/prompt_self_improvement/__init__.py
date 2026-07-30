@@ -2,5 +2,6 @@
 
 from .gate import OptimizerReport, PromptGate
 from .history import PromptHistory
+from .optimizer import MetaOptimizer
 
-__all__ = ["OptimizerReport", "PromptGate", "PromptHistory"]
+__all__ = ["MetaOptimizer", "OptimizerReport", "PromptGate", "PromptHistory"]
