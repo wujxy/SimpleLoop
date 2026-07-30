@@ -25,6 +25,7 @@ Minimal schema:
   execution.hepjob.accounting_group_user: str  (optional, default current user)
   execution.hepjob.ihep_group: str    (optional; +IHEP_RealGroup job attribute)
   execution.hepjob.request_os: str    (optional, default AlmaLinux9)
+  execution.hepjob.cpu_model: str    (optional; target a CPU model — zen4/genoa or zen5/turin — emitted as a condor Requirements expression)
   execution.hepjob.memory_mb: int     (optional, default 6000)
   execution.hepjob.cpus: int          (optional, default 1)
   execution.hepjob.poll_seconds: int  (optional, default 30)
@@ -342,6 +343,7 @@ _HEPJOB_DEFAULTS = {
     "accounting_group_user": None,   # filled with the current OS user
     "ihep_group": None,
     "request_os": "AlmaLinux9",
+    "cpu_model": None,
     "memory_mb": 6000,
     "cpus": 1,
     "poll_seconds": 30,
@@ -363,6 +365,19 @@ _HEPJOB_INT_RANGES = {
     "idle_warn_seconds": (60, None),
     "run_timeout_seconds": (300, None),
     "disappearance_grace_seconds": (0, None),
+}
+
+# CPU model -> condor Requirements expression targeting the IHEP pool's
+# machine ads (CpuFamily/CpuModelNumber). The pool advertises no CPU brand
+# string, so targeting by model name requires this explicit map. Verified
+# against scheduler@pvm069.ihep.ac.cn on 2026-07-30:
+#   family 25 / model 17 -> AMD Zen 4 (Genoa), 125 slots (majority)
+#   family 26 / model  2 -> AMD Zen 5 (Turin), 6 slots (asic001, lhws318)
+_CPU_MODEL_REQUIREMENTS = {
+    "zen4": "CpuFamily==25 && CpuModelNumber==17",
+    "genoa": "CpuFamily==25 && CpuModelNumber==17",
+    "zen5": "CpuFamily==26 && CpuModelNumber==2",
+    "turin": "CpuFamily==26 && CpuModelNumber==2",
 }
 
 
@@ -404,11 +419,19 @@ def _resolve_execution(raw: object) -> tuple[str, dict]:
             raise ConfigError(
                 f"execution.hepjob.{key}: required when backend is hepjob")
     for key in ("schedd_name", "accounting_group", "accounting_group_user",
-                "ihep_group", "request_os", "python_executable",
+                "ihep_group", "request_os", "cpu_model", "python_executable",
                 "submit_cmd", "query_cmd", "remove_cmd"):
         value = hepjob.get(key)
         if value is not None and not isinstance(value, str):
             raise ConfigError(f"execution.hepjob.{key}: must be a string")
+    if hepjob.get("cpu_model") is not None:
+        model = hepjob["cpu_model"].strip().lower()
+        if model not in _CPU_MODEL_REQUIREMENTS:
+            raise ConfigError(
+                f"execution.hepjob.cpu_model: unknown model "
+                f"{hepjob['cpu_model']!r}; choose from "
+                f"{sorted(_CPU_MODEL_REQUIREMENTS)}")
+        hepjob["cpu_model"] = model
     for key, (low, _high) in _HEPJOB_INT_RANGES.items():
         value = hepjob[key]
         if not isinstance(value, int) or isinstance(value, bool) or value < low:

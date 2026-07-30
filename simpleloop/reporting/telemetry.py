@@ -10,6 +10,7 @@ from typing import Callable
 
 
 _CACHE_KEYS = ("cache_creation_input_tokens", "cache_read_input_tokens")
+_TOKEN_KEYS = ("input_tokens", "output_tokens", *_CACHE_KEYS)
 
 
 def _non_negative_int(value: object) -> int | None:
@@ -18,21 +19,15 @@ def _non_negative_int(value: object) -> int | None:
     return value
 
 
-def processed_tokens(usage: object) -> int | None:
-    """Return Claude's processed-token total, or None for incomplete usage."""
+def processed_tokens(usage: object) -> int:
+    """Sum every valid Claude token field; missing values contribute zero."""
     if not isinstance(usage, dict):
-        return None
-    input_tokens = _non_negative_int(usage.get("input_tokens"))
-    output_tokens = _non_negative_int(usage.get("output_tokens"))
-    if input_tokens is None or output_tokens is None:
-        return None
-    cache_tokens = 0
-    for key in _CACHE_KEYS:
-        value = _non_negative_int(usage.get(key, 0))
-        if value is None:
-            return None
-        cache_tokens += value
-    return input_tokens + output_tokens + cache_tokens
+        return 0
+    return sum(
+        value
+        for key in _TOKEN_KEYS
+        if (value := _non_negative_int(usage.get(key))) is not None
+    )
 
 
 def _non_negative_number(value: object) -> float | None:
@@ -91,11 +86,12 @@ class RunTelemetry:
         state = self._load() if resume else {}
 
         default_worktime = None if resume else 0.0
-        default_tokens = None if resume else 0
         loaded_worktime = state.get("worktime_seconds", default_worktime)
-        loaded_tokens = state.get("processed_tokens", default_tokens)
         self._worktime = _non_negative_number(loaded_worktime)
-        self._tokens = _non_negative_int(loaded_tokens)
+        self._tokens = {
+            key: _non_negative_int(state.get(key)) or 0
+            for key in _TOKEN_KEYS
+        }
         baseline_metrics = state.get("baseline_metrics")
         baseline_telemetry = state.get("baseline_telemetry")
         self._baseline_metrics = (
@@ -109,12 +105,11 @@ class RunTelemetry:
 
     def record_usage(self, usage: object) -> None:
         with self._lock:
-            count = processed_tokens(usage)
-            self._tokens = (
-                self._tokens + count
-                if self._tokens is not None and count is not None
-                else None
-            )
+            if isinstance(usage, dict):
+                for key in _TOKEN_KEYS:
+                    count = _non_negative_int(usage.get(key))
+                    if count is not None:
+                        self._tokens[key] += count
             self._persist_locked()
 
     def set_baseline(self, metrics: dict) -> None:
@@ -146,15 +141,18 @@ class RunTelemetry:
         worktime = self._worktime
         if worktime is not None:
             worktime += max(0.0, self._clock() - self._segment_start)
+        token_counts = dict(self._tokens)
         return {
             "worktime_seconds": worktime,
-            "processed_tokens": self._tokens,
+            **token_counts,
+            "processed_tokens": sum(token_counts.values()),
         }
 
     def _state_locked(self, snapshot: dict | None = None) -> dict:
         current = snapshot or self._snapshot_locked()
         return {
             "worktime_seconds": current["worktime_seconds"],
+            **{key: current[key] for key in _TOKEN_KEYS},
             "processed_tokens": current["processed_tokens"],
             "baseline_metrics": self._baseline_metrics,
             "baseline_telemetry": self._baseline_telemetry,

@@ -175,6 +175,17 @@ def run(config_path: str | Path, run_dir: str | Path,
     # Resolve run_dir now: git worktrees and Popen cwd must agree on location.
     run_dir_path = Path(run_dir).resolve()
     run_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # Prevent accidental overwriting of existing runs: if the run directory
+    # already has history.jsonl with content, require --continue or explicit cleanup.
+    if not continue_run:
+        history_path = run_dir_path / "history.jsonl"
+        if history_path.exists() and history_path.stat().st_size > 0:
+            raise ValueError(
+                f"run-dir {run_dir} already contains existing runs (history.jsonl found). "
+                f"Use --continue to resume, or remove the directory to start fresh."
+            )
+
     lock_fd = _acquire_run_lock(run_dir_path)
     try:
         _write_config_snapshot(cfg, config_path, run_dir_path)
@@ -381,8 +392,8 @@ def _starting_state(ctx: RunContext, continue_run: bool,
     acceptance test: a failure aborts before any optimization role is called."""
     baseline_sha = ctx.workspace.baseline_sha()
     if not continue_run:
-        _, baseline_metrics = _eval_baseline(
-            ctx.workspace, ctx.cfg, baseline_sha, ctx.runtime)
+        _, baseline_metrics = ctx.execution_backend.eval_baseline(
+            baseline_sha=baseline_sha)
         ctx.telemetry.set_baseline(baseline_metrics)
         ctx.baseline_metrics = baseline_metrics
         return 0, baseline_sha, baseline_metrics
@@ -406,8 +417,8 @@ def _starting_state(ctx: RunContext, continue_run: bool,
           f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
           flush=True)
     # Baseline eval still runs so the resumed judger keeps its vs-baseline axis.
-    _, baseline_metrics = _eval_baseline(
-        ctx.workspace, ctx.cfg, baseline_sha, ctx.runtime)
+    _, baseline_metrics = ctx.execution_backend.eval_baseline(
+        baseline_sha=baseline_sha)
     ctx.baseline_metrics = baseline_metrics
     if last_accepted is None:
         prior_metrics = baseline_metrics
@@ -651,92 +662,6 @@ def _resume_chain(history: list[dict],
                              if c.get("selected")), None)
             return selected_sha, selected or record
     return baseline_sha, None
-
-
-def _require_baseline_acceptance(
-    result: evals.EvalResult,
-    metrics_schema: dict,
-) -> None:
-    """Reject an unusable baseline before any optimization agent is called."""
-    failed_codes = [code for code in result.returncodes if code != 0]
-    if failed_codes:
-        raise BaselineAcceptanceError(
-            "baseline evaluation command failed with exit "
-            f"{failed_codes[0]}:\n{result.text[:8000]}"
-        )
-
-    objective = metrics_schema["objective"]["key"]
-    value = result.metrics.get(objective)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
-        raise BaselineAcceptanceError(
-            f"baseline objective {objective} is missing or not finite:\n"
-            f"{result.text[:8000]}"
-        )
-
-    failed_gates = [
-        gate["key"]
-        for gate in metrics_schema.get("gates", [])
-        if result.metrics.get(gate["key"]) is not True
-    ]
-    if failed_gates:
-        raise BaselineAcceptanceError(
-            "baseline gate(s) did not pass: "
-            f"{', '.join(failed_gates)}:\n{result.text[:8000]}"
-        )
-
-
-def _eval_baseline(
-    workspace: Workspace,
-    cfg: dict,
-    baseline_sha: str,
-    runtime: ApptainerRuntime,
-) -> tuple[str, dict]:
-    """Run the eval commands once on the unoptimized baseline commit; returns
-    (eval_block, metrics). A failure aborts the run."""
-    print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]}) for the judger's "
-          f"vs-baseline axis...", flush=True)
-    wt = None
-    try:
-        wt = workspace.add_worktree("baseline", baseline_sha)
-        bind_paths = [
-            *(str(path) for path in runtime.binds
-              if path != runtime.run_dir),
-            str(runtime.run_dir),
-        ]
-        context = (
-            f"image: {runtime.image}\n"
-            f"binds: {', '.join(bind_paths)}\n"
-            f"cwd: {wt}"
-        )
-        try:
-            result = evals.run_eval(
-                cfg["eval_commands"],
-                cwd=wt,
-                runtime=runtime,
-                metrics_schema=cfg.get("metrics"),
-                timeout_seconds=cfg.get("eval_timeout_seconds", 600),
-                output_cap=cfg.get("eval_output_cap_chars", 16000),
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise BaselineAcceptanceError(
-                "baseline evaluation failed to run: "
-                f"{exc}\n{context}"
-            ) from exc
-        try:
-            _require_baseline_acceptance(result, cfg.get("metrics"))
-        except BaselineAcceptanceError as exc:
-            raise BaselineAcceptanceError(
-                f"{exc}\n{context}"
-            ) from exc
-        print(f"[{stamp()}] baseline eval done.", flush=True)
-        return result.text, result.metrics
-    finally:
-        if wt is not None:
-            workspace.remove_worktree("baseline")
 
 
 def stamp() -> str:

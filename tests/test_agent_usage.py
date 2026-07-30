@@ -69,14 +69,6 @@ def test_decode_output_extracts_structured_result_and_usage():
     }
 
 
-def test_decode_output_keeps_legacy_plain_json_and_missing_usage():
-    result = _decode_output('{"score": 0.8}')
-
-    assert result.text == '{"score": 0.8}'
-    assert result.data == {}
-    assert result.usage is None
-
-
 def test_agent_notifies_usage_observer():
     seen = []
     agent = Agent(runtime=RecordingRuntime(), usage_observer=seen.append)

@@ -724,39 +724,93 @@ def test_run_eval_preserves_stdout_and_stderr_on_failure(
         ),
     ],
 )
-def test_require_baseline_acceptance_rejects_bad_results(
+def test_local_backend_require_baseline_acceptance_rejects_bad_results(
     result: EvalResult,
     schema: dict | None,
     message: str,
 ):
+    from simpleloop.execution.local import LocalBackend
+    from simpleloop.loop import BaselineAcceptanceError
+
+    class FakeRuntime:
+        def summary_lines(self):
+            return ()
+
+        def preflight(self):
+            pass
+
+        def __getattr__(self, name):
+            # Mock any other attributes that might be accessed
+            return None
+
+    class FakeWorkspace:
+        def __init__(self):
+            pass
+
+        def add_worktree(self, name, sha):
+            return Path("/fake/worktree")
+
+        def remove_worktree(self, name):
+            pass
+
+    class FakeContext:
+        def __init__(self):
+            self.cfg = {
+                "eval_commands": ["echo test"],
+                "eval_timeout_seconds": 60,
+                "eval_output_cap_chars": 16000,
+                "metrics": schema,
+            }
+            self.runtime = FakeRuntime()
+            self.workspace = FakeWorkspace()
+
+    backend = LocalBackend(FakeContext())
+
     with pytest.raises(
-        loop_mod.BaselineAcceptanceError,
+        BaselineAcceptanceError,
         match=message,
     ):
-        loop_mod._require_baseline_acceptance(result, schema)
+        # We need to test the validation logic
+        # Since we can't easily run the full eval_baseline, test the validation separately
+        backend._require_baseline_acceptance(result, schema)
 
 
 @pytest.mark.parametrize("value", [True, float("nan"), float("inf")])
-def test_require_baseline_acceptance_rejects_unusable_objective(value):
+def test_local_backend_require_baseline_acceptance_rejects_unusable_objective(value):
+    from simpleloop.execution.local import LocalBackend
+    from simpleloop.loop import BaselineAcceptanceError
+
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
         "gates": [],
     }
     result = EvalResult("bad objective", {"SPEED_MS": value}, (0,))
 
+    class FakeContext:
+        pass
+
+    backend = LocalBackend(FakeContext())
+
     with pytest.raises(
-        loop_mod.BaselineAcceptanceError,
+        BaselineAcceptanceError,
         match="SPEED_MS",
     ):
-        loop_mod._require_baseline_acceptance(result, schema)
+        backend._require_baseline_acceptance(result, schema)
 
 
-def test_require_baseline_acceptance_accepts_objective_and_all_gates():
+def test_local_backend_require_baseline_acceptance_accepts_objective_and_all_gates():
+    from simpleloop.execution.local import LocalBackend
+
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
         "gates": [{"key": "A"}, {"key": "B"}],
     }
-    loop_mod._require_baseline_acceptance(
+
+    class FakeContext:
+        pass
+
+    backend = LocalBackend(FakeContext())
+    backend._require_baseline_acceptance(
         EvalResult(
             "ok",
             {"SPEED_MS": 10.0, "A": True, "B": True},
@@ -798,6 +852,22 @@ def test_run_preflights_before_agent_or_workspace(
         def baseline_sha(self):
             return "baseline-sha"
 
+    class FakeBackend:
+        def __init__(self, ctx):
+            pass
+
+        def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
+            return "", {"SPEED_MS": 100.0}
+
+        def run_candidates(self, *, proposals: list[dict], round_id: int,
+                           parent_sha: str, prior_metrics: dict,
+                           baseline_metrics: dict, journal=None) -> list[dict]:
+            return []
+
+        def resume_round(self, jobs: list[dict], *, round_id: int,
+                         parent_sha: str, journal=None) -> list[dict]:
+            return []
+
     cfg = {
         "goal": "test",
         "editable_paths": ["src/**"],
@@ -818,10 +888,7 @@ def test_run_preflights_before_agent_or_workspace(
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
-    monkeypatch.setattr(
-        loop_mod, "_eval_baseline",
-        lambda *_args, **_kwargs: ("", {"SPEED_MS": 100.0}),
-    )
+    monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 
     loop_mod.run("task.yaml", tmp_path / "run")
 
