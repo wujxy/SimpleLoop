@@ -55,6 +55,14 @@ class PromptHistory:
 
     def restore(self, version: str) -> None:
         source = self.history_dir / version
+        expected = {f"{role}.md" for role in PROMPT_NAMES}
+        for path in self.prompt_dir.iterdir():
+            if path.name in expected:
+                continue
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
         for role in PROMPT_NAMES:
             shutil.copyfile(source / f"{role}.md", self.prompt_dir / f"{role}.md")
 

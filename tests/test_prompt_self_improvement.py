@@ -7,7 +7,7 @@ import inspect
 import pytest
 import yaml
 
-from simpleloop import config
+from simpleloop import cli, config
 from simpleloop import loop
 from simpleloop.prompt_self_improvement.gate import OptimizerReport, PromptGate
 from simpleloop.prompt_self_improvement.history import PromptHistory
@@ -307,3 +307,79 @@ def test_supervisor_restores_parent_after_optimizer_error(tmp_path: Path):
     assert history.state["active_version"] == "v000"
     assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
     assert [event["status"] for event in history.events()] == ["rejected", "rejected"]
+
+
+def test_supervisor_removes_unexpected_files_after_rejection(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+
+    def artifact_runner(_config, _run_dir, *, target_rounds, **_kwargs):
+        _write_rounds(run_dir, target_rounds)
+        return {"rounds": target_rounds}
+
+    class PollutingOptimizer:
+        def run(self, *, prompt_dir, **_kwargs):
+            Path(prompt_dir, "unexpected.txt").write_text("outside contract")
+            _write_report(Path(prompt_dir), status="no_change", intent="")
+
+    supervisor.run(
+        task, run_dir, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: PollutingOptimizer(),
+    )
+
+    prompt_dir = tmp_path / "prompts"
+    assert {path.name for path in prompt_dir.iterdir()} == {
+        f"{role}.md" for role in PROMPT_NAMES
+    }
+
+
+def _summary(run_dir: Path) -> dict:
+    return {
+        "best_sha": None, "best_score": -1.0, "rounds": 0,
+        "repo": str(run_dir / "repo"),
+    }
+
+
+def test_cli_dispatches_enabled_run_to_supervisor(monkeypatch, tmp_path: Path):
+    task = _task_file(tmp_path, _enabled())
+    run_dir = tmp_path / "run"
+    calls = []
+    monkeypatch.setattr(
+        supervisor, "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or _summary(run_dir),
+    )
+    monkeypatch.setattr(
+        loop, "run", lambda *_args, **_kwargs: pytest.fail("inner loop called directly"),
+    )
+
+    cli.main(["run", "--config", str(task), "--run-dir", str(run_dir)])
+
+    assert len(calls) == 1
+
+
+def test_cli_keeps_disabled_run_on_artifact_loop(monkeypatch, tmp_path: Path):
+    task = _task_file(tmp_path)
+    run_dir = tmp_path / "run"
+    calls = []
+    monkeypatch.setattr(
+        loop, "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or _summary(run_dir),
+    )
+    monkeypatch.setattr(
+        supervisor, "run", lambda *_args, **_kwargs: pytest.fail("supervisor called"),
+    )
+
+    cli.main(["run", "--config", str(task), "--run-dir", str(run_dir)])
+
+    assert len(calls) == 1
+
+
+def test_cli_rejects_static_proposals_with_self_improvement(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled())
+    proposals = tmp_path / "proposals.yaml"
+    proposals.write_text("- change one thing\n")
+    with pytest.raises(SystemExit):
+        cli.main([
+            "run", "--config", str(task), "--run-dir", str(tmp_path / "run"),
+            "--proposals", str(proposals),
+        ])

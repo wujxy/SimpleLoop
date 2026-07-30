@@ -938,6 +938,11 @@ def test_run_cli_reports_runtime_failures_without_traceback(
     prefix: str,
 ):
     monkeypatch.setattr(
+        config_mod,
+        "load",
+        lambda _path: {"prompt_self_improvement": {"enabled": False}},
+    )
+    monkeypatch.setattr(
         loop_mod,
         "run",
         lambda *args, **kwargs: (_ for _ in ()).throw(error),

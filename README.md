@@ -168,3 +168,25 @@ only ever sees its own run's chain. Apptainer additionally isolates the
 software environment from an activated host virtualenv or JUNO shell. Normal
 home/network access remains enabled, so this is runtime isolation rather than a
 complete security sandbox.
+
+## Development-time prompt self-improvement
+
+An enabled task can run the artifact loop in fixed segments and invoke a
+Meta Optimizer after each complete segment:
+
+```yaml
+prompt_self_improvement:
+  enabled: true
+  interval_rounds: 10
+  optimizer_command: claude
+  prompt_dir: prompts
+  history_dir: prompt_history
+  max_prompt_chars: 30000
+```
+
+`prompt_dir` and `history_dir` resolve relative to the task config. On the
+first run, SimpleLoop creates the identity-internalized v000 prompt set and its
+snapshot. Later accepted edits create v001, v002, and so on; `events.jsonl`
+also records `no_change`, rejected, and interrupted optimizer calls. The
+artifact loop is stopped while the Meta Optimizer runs. Static `--proposals`
+mode stays separate from prompt self-improvement.

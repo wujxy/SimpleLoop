@@ -17,6 +17,7 @@ from .container.runtime import RuntimePreflightError
 from .initialize import InitError, initialize
 from .reporting import plot as plot_mod
 from .reporting import telemetry as telemetry_mod
+from .prompt_self_improvement import supervisor
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -252,9 +253,21 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "run":
         try:
-            summary = loop.run(args.config, args.run_dir,
-                               proposals=args.proposals,
-                               continue_run=args.continue_run)
+            cfg = config_mod.load(args.config)
+            if cfg["prompt_self_improvement"].get("enabled"):
+                if args.proposals:
+                    raise ValueError(
+                        "--proposals cannot be combined with prompt self-improvement"
+                    )
+                summary = supervisor.run(
+                    args.config, args.run_dir,
+                    continue_run=args.continue_run,
+                )
+            else:
+                summary = loop.run(
+                    args.config, args.run_dir, proposals=args.proposals,
+                    continue_run=args.continue_run,
+                )
         except config_mod.ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             raise SystemExit(1)
