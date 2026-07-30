@@ -54,6 +54,7 @@ execution:
   hepjob:
     schedd_name: scheduler@pvm069.ihep.ac.cn
     accounting_group: JUNO.juno.default
+    cpu_model: zen4
     memory_mb: 6000
     poll_seconds: 15
     max_attempts: 2

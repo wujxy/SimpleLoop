@@ -38,6 +38,7 @@ from .. import candidate_worker
 from ..candidate_worker import stamp
 from ..container import runtime as runtime_mod
 from .base import ExecutionBackend, InfraRoundError, RoundJournal
+from ..config import _CPU_MODEL_REQUIREMENTS
 
 # condor JobStatus codes (from a successful `condor_q -af JobStatus` query)
 _JOB_IDLE = 1
@@ -186,6 +187,9 @@ class HEPJobBackend(ExecutionBackend):
             f"accounting_group_user = {self.cfg['accounting_group_user']}",
             f'+HepJob_RequestOS = "{self.cfg["request_os"]}"',
         ]
+        if self.cfg.get("cpu_model"):
+            lines.append(
+                f"Requirements = {_CPU_MODEL_REQUIREMENTS[self.cfg['cpu_model']]}")
         if self.cfg.get("ihep_group"):
             lines.append(f'+IHEP_RealGroup = "{self.cfg["ihep_group"]}"')
         else:

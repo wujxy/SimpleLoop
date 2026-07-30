@@ -90,6 +90,28 @@ def test_hepjob_resolves_full_block(tmp_path: Path):
     assert h["python_executable"]  # sys.executable
 
 
+def test_hepjob_cpu_model_resolved_and_normalized(tmp_path: Path):
+    cfg = config_mod.load(_write(tmp_path, {
+        "backend": "hepjob",
+        "hepjob": {
+            "schedd_name": "s", "accounting_group": "g",
+            "cpu_model": "Genoa",
+        },
+    }))
+    assert cfg["hepjob"]["cpu_model"] == "genoa"
+
+
+def test_hepjob_unknown_cpu_model_is_error(tmp_path: Path):
+    with pytest.raises(config_mod.ConfigError, match="cpu_model"):
+        config_mod.load(_write(tmp_path, {
+            "backend": "hepjob",
+            "hepjob": {
+                "schedd_name": "s", "accounting_group": "g",
+                "cpu_model": "bogus",
+            },
+        }))
+
+
 def test_unknown_execution_key_is_error(tmp_path: Path):
     with pytest.raises(config_mod.ConfigError, match="unknown"):
         config_mod.load(_write(tmp_path, {"backend": "local",

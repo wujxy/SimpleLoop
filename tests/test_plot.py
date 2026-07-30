@@ -405,6 +405,20 @@ def test_build_series_maps_candidate_and_generation_coordinates():
     assert series.incumbents[-1].worktime_hours == 30.0 / 3600.0
 
 
+def test_coordinates_always_use_processed_tokens():
+    worktime, tokens = plot_mod._coordinates({
+        "worktime_seconds": 3600.0,
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "cache_creation_input_tokens": 30,
+        "cache_read_input_tokens": 40,
+        "processed_tokens": 999,
+    })
+
+    assert worktime == 1.0
+    assert tokens == 999
+
+
 def test_worktime_rebase_offsets_lifts_resume_drop():
     # Session 1 reaches 3600s; a --continue resume restarts the counter near 0.
     history = [

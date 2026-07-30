@@ -32,15 +32,15 @@ def test_processed_tokens_treats_missing_cache_fields_as_zero():
     assert processed_tokens({"input_tokens": 10, "output_tokens": 5}) == 15
 
 
-@pytest.mark.parametrize("usage", [
-    None,
-    {},
-    {"input_tokens": True, "output_tokens": 1},
-    {"input_tokens": -1, "output_tokens": 1},
-    {"input_tokens": 1},
+@pytest.mark.parametrize(("usage", "expected"), [
+    (None, 0),
+    ({}, 0),
+    ({"input_tokens": True, "output_tokens": 1}, 1),
+    ({"input_tokens": -1, "output_tokens": 1}, 1),
+    ({"input_tokens": 1, "output_tokens": None}, 1),
 ])
-def test_processed_tokens_rejects_incomplete_or_invalid_usage(usage):
-    assert processed_tokens(usage) is None
+def test_processed_tokens_skips_missing_or_invalid_fields(usage, expected):
+    assert processed_tokens(usage) == expected
 
 
 def test_fresh_tracker_records_active_time_tokens_and_baseline(tmp_path):
@@ -50,24 +50,40 @@ def test_fresh_tracker_records_active_time_tokens_and_baseline(tmp_path):
     tracker.record_usage({"input_tokens": 4, "output_tokens": 1})
     tracker.set_baseline({"SPEED_MS": 100.0})
 
-    assert tracker.snapshot() == {
+    expected = {
         "worktime_seconds": 5.0,
+        "input_tokens": 4,
+        "output_tokens": 1,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
         "processed_tokens": 5,
     }
+    assert tracker.snapshot() == expected
     assert tracker.plot_context() == {
         "baseline_metrics": {"SPEED_MS": 100.0},
-        "baseline_telemetry": {
-            "worktime_seconds": 5.0,
-            "processed_tokens": 5,
-        },
+        "baseline_telemetry": expected,
     }
 
 
-def test_missing_usage_makes_tokens_permanently_unavailable(tmp_path):
+def test_missing_usage_is_skipped_without_poisoning_later_counts(tmp_path):
     tracker = RunTelemetry(tmp_path, clock=Clock())
     tracker.record_usage(None)
-    tracker.record_usage({"input_tokens": 4, "output_tokens": 1})
-    assert tracker.snapshot()["processed_tokens"] is None
+    tracker.record_usage({
+        "input_tokens": 4,
+        "output_tokens": None,
+        "cache_creation_input_tokens": 2,
+        "cache_read_input_tokens": 3,
+    })
+
+    assert tracker.snapshot() == {
+        "worktime_seconds": 0.0,
+        "input_tokens": 4,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 2,
+        "cache_read_input_tokens": 3,
+        "processed_tokens": 9,
+    }
+    assert not (tmp_path / "usage.jsonl").exists()
 
 
 def test_resume_adds_only_new_active_segment_and_keeps_baseline(tmp_path):
@@ -94,6 +110,10 @@ def test_persisted_state_has_only_mvp_fields(tmp_path):
     assert state["processed_tokens"] == 0
     assert set(state) == {
         "worktime_seconds",
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
         "processed_tokens",
         "baseline_metrics",
         "baseline_telemetry",
@@ -106,7 +126,27 @@ def test_concurrent_usage_is_counted_once(tmp_path):
     usage = {"input_tokens": 2, "output_tokens": 1}
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(tracker.record_usage, [usage] * 100))
-    assert tracker.snapshot()["processed_tokens"] == 300
+    assert tracker.snapshot() == {
+        "worktime_seconds": 0.0,
+        "input_tokens": 200,
+        "output_tokens": 100,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "processed_tokens": 300,
+    }
+
+
+def test_resume_from_legacy_null_total_starts_known_category_counts(tmp_path):
+    (tmp_path / "telemetry.json").write_text(json.dumps({
+        "worktime_seconds": 10.0,
+        "processed_tokens": None,
+    }))
+    tracker = RunTelemetry(tmp_path, resume=True, clock=Clock())
+
+    tracker.record_usage({"output_tokens": 7})
+
+    assert tracker.snapshot()["output_tokens"] == 7
+    assert tracker.snapshot()["processed_tokens"] == 7
 
 
 def test_persistence_failure_warns_without_losing_in_memory_state(
@@ -128,7 +168,11 @@ def test_missing_resume_state_keeps_resource_axes_unavailable(tmp_path):
     tracker = RunTelemetry(tmp_path, resume=True, clock=Clock())
     assert tracker.snapshot() == {
         "worktime_seconds": None,
-        "processed_tokens": None,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "processed_tokens": 0,
     }
 
 
@@ -255,7 +299,9 @@ def test_store_persists_candidate_and_generation_telemetry(tmp_path):
 def test_finalize_candidates_ingests_usage_and_stamps_snapshots():
     """The loop (not the backend) owns telemetry: worker-reported usage is
     popped from the candidate and recorded, then each candidate gets a
-    persisted snapshot for its history row."""
+    persisted snapshot for its history row. On ihep_scale this is the
+    HEPJobBackend usage-ingest path (main removed it because it has no
+    remote backend)."""
     tracker = SnapshotTracker()
     ctx = RunContext(cfg={}, telemetry=tracker)
     candidates = [

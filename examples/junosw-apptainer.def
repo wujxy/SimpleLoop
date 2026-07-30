@@ -40,6 +40,11 @@ From: almalinux:9
     tar -xJf node-v22.19.0-linux-x64.tar.xz -C /usr/local --strip-components=1
     rm -f node-v22.19.0-linux-x64.tar.xz
     python3 -m pip install --no-cache-dir pytest
+    # Install pytest for CVMFS Python 3.11 (J26.1.1) by injecting into its site-packages
+    # Container will bind-mount /cvmfs at runtime, but during build we create a staging directory
+    # that will be merged into PYTHONPATH when the eval script runs.
+    mkdir -p /usr/local/lib/cvmfs_python311_extra
+    python3 -m pip install --no-cache-dir --target /usr/local/lib/cvmfs_python311_extra pytest
     npm install -g @anthropic-ai/claude-code@2.1.216
     dnf clean all
     rm -rf /var/cache/dnf
@@ -47,6 +52,11 @@ From: almalinux:9
 %environment
     export LANG=C.UTF-8
     export LC_ALL=C.UTF-8
+    # pytest (and deps) installed at build time into this target dir with the
+    # container's python3; it is pure-Python and importable by the CVMFS
+    # python 3.11 that sl_eval_v100.sh actually invokes. Prepend it so
+    # `python -m pytest` resolves after JUNO setup reshuffles PYTHONPATH.
+    export PYTHONPATH=/usr/local/lib/cvmfs_python311_extra${PYTHONPATH:+:$PYTHONPATH}
 
 %test
     command -v bash

@@ -41,23 +41,28 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 60
-  candidates_per_round: 3
-  max_workers: 3
+  max_rounds: 2
+  candidates_per_round: 2
+  max_workers: 2
   agent_timeout_seconds: 4500
-  proposer_recent_rounds: 4
+  proposer_recent_rounds: 2
 
 runtime:
   image: ../junosw-apptainer.sif
   definition: ../junosw-apptainer.def
   binds:
     - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
+    - /lustrefs/juno26/users/lidian
 
 eval:
   commands:
-    - "bash scripts/sl_eval_v100.sh --evtmax 10"
+    # RecMap (4 LFS .root files, ~979MB) lives in the source pkg and is shared
+    # read-only across all candidate/baseline worktrees instead of being
+    # smudged (and duplicated) into each worktree. OMILRECV2_BENCH_RECMAP
+    # defaults to OMILRECV2_TEST_RECMAP inside sl_eval_v100.sh, so one var
+    # covers both the pytest gates and the benchmark. The path is visible
+    # inside the container because /lustrefs/juno26/users/lidian is bound.
+    - "OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash scripts/sl_eval_v100.sh --evtmax 10"
   metrics:
     objective:
       key: SPEED_MS
@@ -95,5 +100,16 @@ eval:
           or incomplete evaluator execution fails this gate.
 
 source:
-  path: ../../../omilrec-v100-gated
+  path: ../../../omilrec-v100-opt-pkg 
   baseline_ref: simpleloop-v100-gated-baseline
+
+execution:
+  backend: hepjob
+  hepjob:
+    schedd_name: scheduler@pvm069.ihep.ac.cn
+    accounting_group: JUNO.juno.default
+    cpu_model: zen5
+    memory_mb: 6000
+    poll_seconds: 15
+    max_attempts: 2
+    run_timeout_seconds: 5400
