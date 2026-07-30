@@ -26,6 +26,7 @@ this backend only ever sees and produces the opaque jobs table.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
@@ -39,6 +40,7 @@ from ..candidate_worker import stamp
 from ..container import runtime as runtime_mod
 from .base import ExecutionBackend, InfraRoundError, RoundJournal
 from ..config import _CPU_MODEL_REQUIREMENTS
+from ..loop import BaselineAcceptanceError
 
 # condor JobStatus codes (from a successful `condor_q -af JobStatus` query)
 _JOB_IDLE = 1
@@ -86,6 +88,97 @@ class HEPJobBackend(ExecutionBackend):
 
     # ---- backend interface ----
 
+    def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
+        """Run the baseline evaluation as a single condor job.
+
+        Returns (eval_block, metrics). Raises BaselineAcceptanceError on failure.
+        """
+        from ..loop import BaselineAcceptanceError, stamp
+        from ..harness import evals
+
+        baseline_job_id = "baseline"
+        result_dir = self.run_dir / "baseline"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        worktree = None
+        try:
+            worktree = self.ctx.workspace.add_worktree(baseline_job_id, baseline_sha)
+            spec = candidate_worker.CandidateSpec(
+                round_id=-1, candidate_id=-1,  # Special IDs for baseline
+                parent_sha=baseline_sha,
+                family="baseline",
+                decision="baseline",
+                proposal="baseline evaluation",
+                run_dir=str(self.run_dir),
+                prior_metrics={},
+                baseline_metrics={},
+                worktree_path=str(worktree),
+                result_dir=str(result_dir),
+                attempt=1,
+            )
+            # Write manifest for the baseline worker
+            (result_dir / "manifest.json").write_text(
+                json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8")
+
+            # Submit baseline as a special condor job
+            job = self._prepare_baseline_job(result_dir)
+            self._submit_baseline(job)
+
+            # Wait for the baseline job to complete
+            baseline_metrics = self._supervise_baseline(job)
+
+            # Read and validate the result
+            if not (result_dir / "_FINISHED").exists():
+                raise BaselineAcceptanceError(
+                    f"baseline job {job.job_id} completed without _FINISHED marker")
+
+            try:
+                result = self._read_result(job)
+            except ValueError as exc:
+                raise BaselineAcceptanceError(
+                    f"baseline result.json is malformed: {exc}")
+
+            eval_block = result.get("eval_block", "")
+            metrics = result.get("eval_metrics", {})
+
+            # Validate baseline metrics
+            import math
+            metrics_schema = self.ctx.cfg.get("metrics")
+            if metrics_schema:
+                objective_key = metrics_schema["objective"]["key"]
+                objective_value = metrics.get(objective_key)
+                if (
+                    isinstance(objective_value, bool)
+                    or not isinstance(objective_value, (int, float))
+                    or not math.isfinite(objective_value)
+                ):
+                    raise BaselineAcceptanceError(
+                        f"baseline objective {objective_key} is missing or not finite:\n"
+                        f"baseline metrics: {metrics}")
+
+                failed_gates = [
+                    gate["key"]
+                    for gate in metrics_schema.get("gates", [])
+                    if metrics.get(gate["key"]) is not True
+                ]
+                if failed_gates:
+                    raise BaselineAcceptanceError(
+                        f"baseline gate(s) did not pass: {', '.join(failed_gates)}:\n"
+                        f"baseline metrics: {metrics}")
+
+            # Remove the baseline worktree
+            self.ctx.workspace.remove_worktree(baseline_job_id)
+
+            print(f"[{stamp()}] baseline eval done on condor job {job.job_id}", flush=True)
+            return eval_block, metrics
+        finally:
+            if worktree is not None and (result_dir / "_FINISHED").exists():
+                # Worktree already removed above on success; clean up on failure
+                try:
+                    self.ctx.workspace.remove_worktree(baseline_job_id)
+                except Exception:
+                    pass
+
     def run_candidates(self, *, proposals: list[dict], round_id: int,
                        parent_sha: str, prior_metrics: dict,
                        baseline_metrics: dict,
@@ -130,6 +223,111 @@ class HEPJobBackend(ExecutionBackend):
         return self._supervise(jobs)
 
     # ---- prepare / submit ----
+
+    def _prepare_baseline_job(self, result_dir: Path) -> _Job:
+        """Prepare a minimal job object for baseline evaluation."""
+        return _Job(candidate_id=-1, worktree_id="baseline", result_dir=result_dir)
+
+    def _submit_baseline(self, job: _Job) -> None:
+        """Submit baseline evaluation as a single condor job."""
+        job_sh = job.result_dir / "job.sh"
+        job_sh.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -uo pipefail\n"
+            f"source {shlex.quote(str(self._job_env_path()))}\n"
+            f"exec {shlex.quote(self.cfg['python_executable'])}"
+            " -m simpleloop.candidate_worker"
+            f" --manifest {shlex.quote(str(job.result_dir / 'manifest.json'))}"
+            f" --baseline-only\n",  # New flag to indicate baseline-only execution
+            encoding="utf-8")
+        job_sh.chmod(0o755)
+        lines = [
+            "universe = vanilla",
+            f"executable = {job_sh}",
+            'arguments = "$(ClusterId).$(ProcId)"',
+            f"output = {job.result_dir / 'job.out'}",
+            f"error = {job.result_dir / 'job.err'}",
+            f"log = {job.result_dir / 'job.log'}",
+            "should_transfer_files = NO",
+            f"request_memory = {self.cfg['memory_mb']}",
+            f"request_cpus = {self.cfg['cpus']}",
+            f"accounting_group = {self.cfg['accounting_group']}",
+            f"accounting_group_user = {self.cfg['accounting_group_user']}",
+            f'+HepJob_RequestOS = "{self.cfg["request_os"]}"',
+        ]
+        if self.cfg.get("cpu_model"):
+            lines.append(
+                f"Requirements = {_CPU_MODEL_REQUIREMENTS[self.cfg['cpu_model']]}")
+        if self.cfg.get("ihep_group"):
+            lines.append(f'+IHEP_RealGroup = "{self.cfg["ihep_group"]}"')
+        else:
+            parts = self.cfg["accounting_group"].split(".")
+            if len(parts) >= 2 and parts[0] and parts[1]:
+                lines.append(f'+IHEP_RealGroup = "{parts[1]}"')
+        lines.append("queue")
+        submit_file = job.result_dir / "job.sub"
+        submit_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        argv = [self.cfg["submit_cmd"]]
+        if self.cfg.get("schedd_name"):
+            argv += ["-name", self.cfg["schedd_name"]]
+        argv.append(str(submit_file))
+        completed = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, check=False)
+        if completed.returncode != 0:
+            raise BaselineAcceptanceError(
+                f"condor submit failed for baseline: "
+                f"{completed.stderr.strip() or completed.stdout.strip()}")
+        match = re.search(r"submitted to cluster (\d+)", completed.stdout)
+        if not match:
+            raise BaselineAcceptanceError(
+                f"could not parse cluster id from submit output: "
+                f"{completed.stdout.strip()[:400]}")
+        job.job_id = f"{match.group(1)}.0"
+        job.state = "SUBMITTED"
+        job.submitted_at = time.monotonic()
+        print(f"[{stamp()}] baseline submitted as job {job.job_id}", flush=True)
+
+    def _supervise_baseline(self, job: _Job) -> dict:
+        """Monitor a single baseline job until completion, return its metrics."""
+        poll = self.cfg["poll_seconds"]
+        while True:
+            statuses = self._query_statuses([job.job_id])
+            now = time.monotonic()
+            if statuses is not None:
+                status = statuses.get(job.job_id)
+                if status == _JOB_HELD:
+                    reason = self._hold_reason(job.job_id)
+                    raise BaselineAcceptanceError(f"baseline job {job.job_id} HELD: {reason}")
+                elif status == _JOB_RUNNING:
+                    if job.running_since is None:
+                        job.running_since = now
+                        print(f"[{stamp()}] baseline job {job.job_id} running", flush=True)
+                    elif now - job.running_since > self.cfg["run_timeout_seconds"]:
+                        self._remove(job)
+                        raise BaselineAcceptanceError(
+                            f"baseline job {job.job_id} exceeded run_timeout "
+                            f"({self.cfg['run_timeout_seconds']}s)")
+                elif status == _JOB_IDLE:
+                    if (now - job.submitted_at > self.cfg["idle_warn_seconds"]
+                            and not job.idle_warned):
+                        job.idle_warned = True
+                        print(f"[{stamp()}] warning: baseline job {job.job_id} has been "
+                              f"idle for over {self.cfg['idle_warn_seconds']}s", flush=True)
+                elif status is None:
+                    if (job.result_dir / "_FINISHED").exists():
+                        print(f"[{stamp()}] baseline job {job.job_id} finished", flush=True)
+                        break
+                    if job.gone_since is None:
+                        job.gone_since = now
+                    elif now - job.gone_since > self.cfg["disappearance_grace_seconds"]:
+                        raise BaselineAcceptanceError(
+                            f"baseline job {job.job_id} left the queue without a result")
+            else:
+                print(f"[{stamp()}] warning: condor_q failed; retrying next poll", flush=True)
+            time.sleep(poll)
+
+        # Read and return the result
+        return self._read_result(job).get("eval_metrics", {})
 
     def _prepare(self, candidate_id: int, proposal: dict,
                  round_id: int, parent_sha: str, prior_metrics: dict,

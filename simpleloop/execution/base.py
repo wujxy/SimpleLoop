@@ -44,12 +44,19 @@ class ExecutionBackend:
     def run_candidates(self, *, proposals: list[dict], round_id: int,
                        parent_sha: str, prior_metrics: dict,
                        baseline_metrics: dict,
-                       journal: RoundJournal | None = None) -> list[dict]:
+                       journal: "RoundJournal | None" = None) -> list[dict]:
+        raise NotImplementedError
+
+    def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
+        """Run the baseline evaluation for the unoptimized baseline commit.
+
+        Returns (eval_block, metrics). A failure should raise BaselineAcceptanceError.
+        """
         raise NotImplementedError
 
     def resume_round(self, jobs: list[dict], *, round_id: int,
                      parent_sha: str,
-                     journal: RoundJournal | None = None) -> list[dict]:
+                     journal: "RoundJournal | None" = None) -> list[dict]:
         """Re-enter the poll loop for an in-flight round after a frontend
         restart. `jobs` is the opaque job table the backend previously passed
         to journal.save(); the proposer is NOT called again. The default

@@ -226,15 +226,39 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         def baseline_sha(self):
             return "baseline"
 
+    class FakeBackend:
+        def __init__(self, ctx):
+            pass
+
+        def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
+            return "baseline eval", {"SPEED_MS": 100.0}
+
+        def run_candidates(self, *, proposals: list[dict], round_id: int,
+                           parent_sha: str, prior_metrics: dict,
+                           baseline_metrics: dict, journal=None) -> list[dict]:
+            return [{
+                "candidate": 0,
+                "family": "test",
+                "decision": "test",
+                "proposal": "test",
+                "sha": None,
+                "score": 0.0,
+                "risk": "high",
+                "feedback": "test",
+                "metrics": {"SPEED_MS": 95.0},
+                "accepted": False,
+                "telemetry": {"worktime_seconds": 1.0, "processed_tokens": 10},
+            }]
+
+        def resume_round(self, jobs: list[dict], *, round_id: int,
+                         parent_sha: str, journal=None) -> list[dict]:
+            return []
+
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
-    monkeypatch.setattr(
-        loop_mod,
-        "_eval_baseline",
-        lambda *_args: ("baseline eval", {"SPEED_MS": 100.0}),
-    )
+    monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 
     loop_mod.run("config.yaml", run_dir)
 

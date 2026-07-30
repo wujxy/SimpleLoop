@@ -63,13 +63,28 @@ def test_static_mode_accepts_by_gates_alone_and_records_generations(
     monkeypatch, tmp_path
 ):
     run_dir = tmp_path / "run"
+
+    class FakeBackend:
+        def __init__(self, ctx):
+            pass
+
+        def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
+            return "", {"SPEED_MS": 100.0, "CORRECTNESS": True}
+
+        def run_candidates(self, *, proposals: list[dict], round_id: int,
+                           parent_sha: str, prior_metrics: dict,
+                           baseline_metrics: dict, journal=None) -> list[dict]:
+            return [outcomes[round_id]]
+
+        def resume_round(self, jobs: list[dict], *, round_id: int,
+                         parent_sha: str, journal=None) -> list[dict]:
+            return []
+
     monkeypatch.setattr(loop_mod.config_mod, "load",
                         lambda _path: _config(tmp_path))
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
-    monkeypatch.setattr(loop_mod, "_eval_baseline",
-                        lambda *_args: ("", {"SPEED_MS": 100.0,
-                                             "CORRECTNESS": True}))
+    monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
     monkeypatch.setattr(loop_mod, "_refresh_progress_plot",
                         lambda *_args, **_kwargs: None)
 

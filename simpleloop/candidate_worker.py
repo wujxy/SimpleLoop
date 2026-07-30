@@ -248,6 +248,48 @@ def _status_for(sha: str | None, reason: str | None) -> str:
     return "COMPLETED"
 
 
+def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> dict:
+    """Run only the evaluation part for baseline assessment.
+
+    Skips executor/judger and just runs eval commands to get metrics.
+    """
+    print(f"[{stamp()}] running baseline eval on worktree {spec.worktree_path}", flush=True)
+
+    # Run the eval commands
+    result = evals.run_eval(
+        cfg["eval_commands"],
+        cwd=Path(spec.worktree_path),
+        runtime=deps.runtime,
+        metrics_schema=cfg.get("metrics"),
+        timeout_seconds=cfg.get("eval_timeout_seconds", 600),
+        output_cap=cfg.get("eval_output_cap_chars", 16000),
+    )
+
+    # Validate the result
+    if not result.commands_ok:
+        raise ValueError(f"baseline evaluation failed: {result.text[:1000]}")
+
+    # Return a result dict compatible with the worker contract
+    return {
+        "candidate": spec.candidate_id,
+        "family": spec.family,
+        "decision": spec.decision,
+        "proposal": spec.proposal,
+        "sha": spec.parent_sha,  # Baseline just reports the original commit
+        "score": 0.0,
+        "risk": "low",
+        "feedback": "baseline evaluation completed",
+        "feedback_for_proposer": "",
+        "eval_block": result.text,
+        "metrics": result.metrics,
+        "changed_paths": [],
+        "accepted": True,  # Baseline is always accepted
+        "selected": False,
+        "base_sha": spec.parent_sha,
+        "candidate_status": "BASELINE",
+    }
+
+
 def candidate_failure(candidate_id: int, spec: CandidateSpec,
                       reason: str, parent_sha: str, sha: str | None = None,
                       eval_block: str = "", eval_metrics: dict | None = None,
@@ -350,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Path to the candidate manifest JSON.")
     parser.add_argument("--job-id", default=None,
                         help="Scheduler job id (recorded in result.execution).")
+    parser.add_argument("--baseline-only", action="store_true",
+                        help="Only run eval for baseline, skip executor/judger.")
     args = parser.parse_args(argv)
 
     usage: list = []
@@ -365,7 +409,10 @@ def main(argv: list[str] | None = None) -> int:
         deps = build_deps(cfg, run_dir, usage_observer=usage.append)
         deps.runtime.preflight()
         spec = CandidateSpec.from_dict(spec_dict)
-        result = run_candidate(deps, spec)
+        if args.baseline_only:
+            result = _run_baseline_eval(deps, spec, cfg)
+        else:
+            result = run_candidate(deps, spec)
     except Exception as exc:
         # Catch-all invariant: a business-side failure still produces a
         # terminal result; _FINISHED absence must mean "killed by infra".

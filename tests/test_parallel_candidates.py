@@ -894,6 +894,22 @@ def _run_insight_integration(
         def baseline_sha(self):
             return "baseline-sha"
 
+    class FakeBackend:
+        def __init__(self, ctx):
+            pass
+
+        def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
+            return "", {}
+
+        def run_candidates(self, *, proposals: list[dict], round_id: int,
+                           parent_sha: str, prior_metrics: dict,
+                           baseline_metrics: dict, journal=None) -> list[dict]:
+            return fake_run_candidates()
+
+        def resume_round(self, jobs: list[dict], *, round_id: int,
+                         parent_sha: str, journal=None) -> list[dict]:
+            return []
+
     executed = []
 
     def fake_propose(*_args, **kwargs):
@@ -930,9 +946,8 @@ def _run_insight_integration(
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
-    monkeypatch.setattr(loop_mod, "_eval_baseline", lambda *_args: ("", {}))
+    monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
     monkeypatch.setattr(loop_mod.proposer_mod, "propose", fake_propose)
-    monkeypatch.setattr(loop_mod, "_run_candidates", fake_run_candidates)
     monkeypatch.setattr(loop_mod, "_select_winner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loop_mod, "_refresh_progress_plot", lambda *_args: None)
 
@@ -1089,14 +1104,29 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         executor_called = True
         raise AssertionError("executor must not run")
 
+    class FakeBackend:
+        def __init__(self, ctx):
+            pass
+
+        def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
+            return "", {}
+
+        def run_candidates(self, *, proposals: list[dict], round_id: int,
+                           parent_sha: str, prior_metrics: dict,
+                           baseline_metrics: dict, journal=None) -> list[dict]:
+            return fail_if_executor_runs()
+
+        def resume_round(self, jobs: list[dict], *, round_id: int,
+                         parent_sha: str, journal=None) -> list[dict]:
+            return []
+
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "Store", FakeStore)
-    monkeypatch.setattr(loop_mod, "_eval_baseline", lambda *_args: ("", {}))
+    monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
     monkeypatch.setattr(loop_mod.proposer_mod, "propose", fail_proposer)
-    monkeypatch.setattr(loop_mod, "_run_candidates", fail_if_executor_runs)
 
     with pytest.raises(ValueError, match="invalid proposer batch"):
         loop_mod.run("config.yaml", tmp_path / "run")

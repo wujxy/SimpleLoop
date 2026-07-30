@@ -41,9 +41,9 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 2
-  candidates_per_round: 2
-  max_workers: 2
+  max_rounds: 10
+  candidates_per_round: 3
+  max_workers: 3
   agent_timeout_seconds: 4500
   proposer_recent_rounds: 2
 
