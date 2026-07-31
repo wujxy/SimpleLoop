@@ -1,5 +1,10 @@
 # SimpleLoop Prompt-level Development-time Self-Improvement MVP
 
+> 历史设计说明：公共配置、状态所有权和触发语义已由
+> `docs/superpowers/specs/2026-07-31-self-improvement-mvp-convergence-design.md`
+> 取代。当前实现仍是 prompt-only，但外层公共能力名为
+> `self_improvement`，且每个 run 都从独立 v000 开始。
+
 ## 1. 目标
 
 SimpleLoop 当前通过内环优化用户任务：
@@ -394,16 +399,13 @@ MVP 只检查真实硬边界：
 ## 11. 配置
 
 ```yaml
-prompt_self_improvement:
-  enabled: true
+self_improvement:
   interval_rounds: 10
-  optimizer_command: claude
-  prompt_dir: prompts
-  history_dir: prompt_history
-  max_prompt_chars: 30000
 ```
 
-`interval_rounds` 表示每隔多少个完整 round 调查一次，不表示每次必须修改。
+配置块存在即启用；`interval_rounds` 表示每隔多少个完整 round 调查一次，
+不表示每次必须修改。active prompts、history、optimizer command 和 prompt
+长度硬上限均由 harness 内部管理。
 
 ## 12. 成功标准
 

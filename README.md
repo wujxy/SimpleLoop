@@ -169,24 +169,19 @@ software environment from an activated host virtualenv or JUNO shell. Normal
 home/network access remains enabled, so this is runtime isolation rather than a
 complete security sandbox.
 
-## Development-time prompt self-improvement
+## Development-time self-improvement
 
-An enabled task can run the artifact loop in fixed segments and invoke a
-Meta Optimizer after each complete segment:
+The outer loop currently evolves prompts only. Add the block to run the
+artifact loop in fixed segments and invoke a Meta Optimizer between segments:
 
 ```yaml
-prompt_self_improvement:
-  enabled: true
+self_improvement:
   interval_rounds: 10
-  optimizer_command: claude
-  prompt_dir: prompts
-  history_dir: prompt_history
-  max_prompt_chars: 30000
 ```
 
-`prompt_dir` and `history_dir` resolve relative to the task config. On the
-first run, SimpleLoop creates the identity-internalized v000 prompt set and its
-snapshot. Later accepted edits create v001, v002, and so on; `events.jsonl`
-also records `no_change`, rejected, and interrupted optimizer calls. The
-artifact loop is stopped while the Meta Optimizer runs. Static `--proposals`
-mode stays separate from prompt self-improvement.
+Each new run creates an independent identity-internalized v000 prompt set
+under `run_dir/self_improvement/`. Accepted edits create v001, v002, and so
+on within that run; `--continue` resumes only that lineage. The artifact loop
+is stopped while the Meta Optimizer runs, and no optimizer is called after the
+final artifact segment because there are no later rounds to evaluate its
+prompts. Static `--proposals` mode stays separate from self-improvement.

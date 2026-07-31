@@ -77,3 +77,6 @@ eval:
 source:
   path: ../../path/to/your/repo  # relative to THIS file; must be a git repo
   baseline_ref: HEAD             # optional, default HEAD
+
+self_improvement:
+  interval_rounds: 2

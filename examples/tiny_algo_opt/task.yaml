@@ -21,14 +21,8 @@ loop:
   candidates_per_round: 3
   max_workers: 3
 
-prompt_self_improvement:
-  enabled: true
+self_improvement:
   interval_rounds: 2
-  optimizer_command: claude
-  # Paths are relative to this task.yaml.
-  prompt_dir: prompts
-  history_dir: prompt_history
-  max_prompt_chars: 30000
 
 runtime:
   image: apptainer.sif
