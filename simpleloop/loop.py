@@ -481,9 +481,9 @@ def _summary(ctx: RunContext, run_dir_path: Path) -> dict:
     best = _best_candidate(history, schema) if history and obj_key else None
     baseline_sha = workspace.baseline_sha()
     summary = {
-        "best_sha": store.best_sha,
-        "best_round": store.best_round,
-        "best_candidate": store.best_candidate,
+        "best_sha": best.get("sha") if best else None,
+        "best_round": best.get("round") if best else None,
+        "best_candidate": best.get("candidate") if best else None,
         "objective_key": obj_key,
         "best_objective": (best.get("metrics") or {}).get(obj_key) if best else None,
         "baseline_objective": baseline_metrics.get(obj_key),
@@ -536,14 +536,14 @@ def _run_candidates(ctx: RunContext, proposals: list[str],
     max_workers = min(ctx.cfg.get("max_workers", 1), max(1, len(proposals)))
     if max_workers <= 1 or len(proposals) <= 1:
         return [
-            _run_one_candidate(
+            _run_candidate_guarded(
                 ctx, i, proposal, round_id, parent_sha)
             for i, proposal in enumerate(proposals)
         ]
     results: list[dict | None] = [None] * len(proposals)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_run_one_candidate, ctx, i, proposal, round_id,
+            pool.submit(_run_candidate_guarded, ctx, i, proposal, round_id,
                         parent_sha): i
             for i, proposal in enumerate(proposals)
         }
@@ -560,6 +560,30 @@ def _run_candidates(ctx: RunContext, proposals: list[str],
                     parent_sha, round_id=round_id,
                     metrics_schema=ctx.metrics_schema)
     return [r for r in results if r is not None]
+
+
+def _run_candidate_guarded(
+    ctx: RunContext,
+    candidate_id: int,
+    proposal: str,
+    round_id: int,
+    parent_sha: str,
+) -> dict:
+    try:
+        return _run_one_candidate(
+            ctx, candidate_id, proposal, round_id, parent_sha,
+        )
+    except Exception as exc:
+        print(
+            f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
+            f"worker failed: {exc}",
+            flush=True,
+        )
+        return _candidate_failure(
+            candidate_id, proposal, f"candidate worker failed: {exc}",
+            parent_sha, round_id=round_id,
+            metrics_schema=ctx.metrics_schema,
+        )
 
 
 def _deps_from_ctx(ctx: RunContext) -> candidate_worker.CandidateDeps:

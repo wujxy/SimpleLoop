@@ -1,3 +1,5 @@
+import pytest
+
 from simpleloop.harness import gate
 
 
@@ -59,3 +61,14 @@ def test_build_results_treats_missing_metric_as_unknown():
         "detail": "metric missing or unknown",
     }
     assert gate.all_passed(results) is False
+
+
+@pytest.mark.parametrize("key", ["PATHS", "EVAL_COMMANDS", "FCN"])
+def test_build_results_rejects_reserved_or_duplicate_gate_names(key: str):
+    schema = {
+        "objective": {"key": "SPEED_MS", "lower_is_better": True},
+        "gates": [{"key": "FCN"}, {"key": key}],
+    }
+
+    with pytest.raises(ValueError, match="gate key"):
+        gate.build_results(schema, paths=True, eval_commands=False)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from . import memory as memory_mod
@@ -15,6 +16,7 @@ def eligible(candidate: dict, metrics_schema: dict) -> bool:
     numeric = (
         isinstance(objective, (int, float))
         and not isinstance(objective, bool)
+        and math.isfinite(objective)
     )
     if "eligible" in candidate:
         return (

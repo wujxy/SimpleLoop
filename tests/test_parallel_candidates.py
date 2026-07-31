@@ -452,6 +452,25 @@ def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
     assert "candidate r3-c1 worker failed: worker 1 exploded" in out
 
 
+def test_run_candidates_normalizes_serial_worker_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        loop_mod, "_run_one_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("serial worker exploded")
+        ),
+    )
+
+    candidates = _run_candidates(
+        RunContext(cfg={"max_workers": 1}), ["p0"], 4, "parent",
+    )
+
+    assert candidates[0]["status"] == "WORKER_FAILED"
+    assert candidates[0]["parent_sha"] == "parent"
+    assert "candidate r4-c0 worker failed: serial worker exploded" in (
+        capsys.readouterr().out
+    )
+
+
 def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):
     agent = Agent(runtime=object())
     expected = {"reflection": "", "proposals": []}

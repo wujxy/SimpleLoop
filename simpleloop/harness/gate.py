@@ -23,8 +23,20 @@ def build_results(
     eval_detail: str = "",
     metrics: dict | None = None,
 ) -> dict[str, dict]:
-    results = {PATHS: _result(paths, path_detail)}
     configured = (metrics_schema or {}).get("gates", [])
+    objective_key = ((metrics_schema or {}).get("objective") or {}).get("key")
+    if objective_key in {PATHS, EVAL_COMMANDS}:
+        raise ValueError(f"objective key {objective_key} is reserved by the harness")
+    seen = {PATHS, EVAL_COMMANDS}
+    if objective_key:
+        seen.add(objective_key)
+    for item in configured:
+        key = item["key"]
+        if key in seen:
+            raise ValueError(f"gate key {key} is reserved or duplicated")
+        seen.add(key)
+
+    results = {PATHS: _result(paths, path_detail)}
     if paths is not True:
         reason = "not run because PATHS failed" if paths is False else "not run"
         results[EVAL_COMMANDS] = _result(None, reason)

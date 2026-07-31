@@ -240,6 +240,18 @@ def test_new_candidate_cannot_override_failed_gate_with_eligible_flag():
     assert store_mod.eligible(inconsistent, _STORE_SCHEMA) is False
 
 
+@pytest.mark.parametrize("objective", [float("nan"), float("inf")])
+def test_store_rejects_nonfinite_objective(objective: float):
+    candidate = {
+        "sha": "candidate",
+        "gate_passed": True,
+        "eligible": True,
+        "metrics": {"SPEED_MS": objective, "CORRECTNESS": True},
+    }
+
+    assert store_mod.eligible(candidate, _STORE_SCHEMA) is False
+
+
 # --- Store: changed_paths persisted (landing-state signal for the proposer) ---
 
 def test_store_persists_changed_paths(tmp_path: Path):

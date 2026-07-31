@@ -100,6 +100,13 @@ def test_run_candidate_completed(tmp_path: Path, monkeypatch):
                  "accepted"} & result.keys())
 
 
+@pytest.mark.parametrize("objective", [float("nan"), float("inf")])
+def test_candidate_with_nonfinite_objective_is_ineligible(objective: float):
+    assert worker_mod._eligible(
+        "candidate", True, {"SPEED_MS": objective}, _SCHEMA,
+    ) is False
+
+
 def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
     called = False
 

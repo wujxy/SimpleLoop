@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
 from dataclasses import dataclass
@@ -245,6 +246,7 @@ def _eligible(sha: str | None, gate_passed: bool, metrics: dict,
     return (
         isinstance(objective, (int, float))
         and not isinstance(objective, bool)
+        and math.isfinite(objective)
     )
 
 

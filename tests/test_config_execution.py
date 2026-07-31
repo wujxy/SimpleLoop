@@ -51,6 +51,31 @@ def test_default_backend_is_local(tmp_path: Path):
     assert cfg["hepjob"]["max_attempts"] == 2
 
 
+@pytest.mark.parametrize("key", ["PATHS", "EVAL_COMMANDS"])
+def test_metrics_reject_reserved_keys(tmp_path: Path, key: str):
+    raw = _base_task(tmp_path)
+    raw["eval"]["metrics"]["gates"] = [{"key": key}]
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match="reserved"):
+        config_mod.load(path)
+
+
+def test_metrics_reject_duplicate_and_objective_gate_keys(tmp_path: Path):
+    for gates in (
+        [{"key": "CORRECTNESS"}, {"key": "CORRECTNESS"}],
+        [{"key": "SPEED_MS"}],
+    ):
+        raw = _base_task(tmp_path)
+        raw["eval"]["metrics"]["gates"] = gates
+        path = tmp_path / "task.yaml"
+        path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+        with pytest.raises(config_mod.ConfigError, match="unique"):
+            config_mod.load(path)
+
+
 def test_explicit_local_backend(tmp_path: Path):
     cfg = config_mod.load(_write(tmp_path, {"backend": "local"}))
     assert cfg["execution_backend"] == "local"

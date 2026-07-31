@@ -330,6 +330,12 @@ def _resolve_metrics(raw: object) -> dict:
     if not isinstance(obj_key, str) or not obj_key.strip():
         raise ConfigError("eval.metrics.objective.key: required non-empty string "
                           "(the key=value line the harness parses, e.g. SPEED_MS)")
+    obj_key = obj_key.strip()
+    reserved = {"PATHS", "EVAL_COMMANDS"}
+    if obj_key in reserved:
+        raise ConfigError(
+            f"eval.metrics.objective.key: {obj_key} is reserved by the harness"
+        )
     obj_unknown = set(obj) - {"key", "lower_is_better"}
     if obj_unknown:
         raise ConfigError(f"eval.metrics.objective: unknown key(s): {sorted(obj_unknown)}")
@@ -342,6 +348,7 @@ def _resolve_metrics(raw: object) -> dict:
     raw_gates = raw.get("gates", [])
     if not isinstance(raw_gates, list):
         raise ConfigError("eval.metrics.gates: must be a list of {key: str} objects")
+    seen = {obj_key}
     for i, g in enumerate(raw_gates):
         if not isinstance(g, dict):
             raise ConfigError(f"eval.metrics.gates[{i}]: must be an object with a 'key' field")
@@ -351,6 +358,16 @@ def _resolve_metrics(raw: object) -> dict:
         gk = g.get("key")
         if not isinstance(gk, str) or not gk.strip():
             raise ConfigError(f"eval.metrics.gates[{i}].key: required non-empty string")
+        gk = gk.strip()
+        if gk in reserved:
+            raise ConfigError(
+                f"eval.metrics.gates[{i}].key: {gk} is reserved by the harness"
+            )
+        if gk in seen:
+            raise ConfigError(
+                "eval.metrics objective and gate keys must be unique: " + gk
+            )
+        seen.add(gk)
         description = g.get("description")
         if description is not None and not isinstance(description, str):
             raise ConfigError(f"eval.metrics.gates[{i}].description: must be a string")

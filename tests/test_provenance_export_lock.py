@@ -12,6 +12,7 @@ import yaml
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop.harness import export as export_mod
+from simpleloop.harness import gate
 from simpleloop.harness.store import Store
 from simpleloop.harness.workspace import Workspace
 
@@ -155,6 +156,27 @@ def _make_source(tmp_path: Path) -> Path:
     return src
 
 
+def test_rename_from_frozen_to_editable_exposes_both_paths(tmp_path: Path):
+    src = _make_source(tmp_path)
+    (src / "frozen.txt").write_text("protected\n")
+    _git(src, "add", "frozen.txt")
+    _git(src, "-c", "user.name=t", "-c", "user.email=t@e.invalid",
+         "commit", "-qm", "add frozen file")
+    run_dir = tmp_path / "run"
+    ws = Workspace(run_dir, str(src), "HEAD", ["editable/**"])
+    ws.setup()
+    wt = ws.add_worktree("rename", ws.baseline_sha())
+    (wt / "editable").mkdir()
+    _git(wt, "mv", "frozen.txt", "editable/moved.txt")
+
+    changed = ws.changed_paths(wt)
+
+    assert changed == ["editable/moved.txt", "frozen.txt"]
+    assert gate.check_diff(
+        changed, ["editable/**"], ["frozen.txt"],
+    ) == (False, ["frozen.txt: touches a frozen path"])
+
+
 def _seed_run(tmp_path: Path, *, risk: str = "low"):
     """A real one-round run_dir: cloned repo, one committed candidate, history,
     and a resolved-config snapshot."""
@@ -196,6 +218,21 @@ def test_summary_writes_summary_json(tmp_path: Path):
     assert summary["final_chain_sha"] == sha
     assert summary["objective_key"] == "SPEED_MS"
     assert json.loads((run_dir / "summary.json").read_text()) == summary
+
+
+def test_summary_rebuilds_best_fields_from_history_on_resume(tmp_path: Path):
+    _, run_dir, ws, _, _, sha = _seed_run(tmp_path)
+    resumed_store = Store(run_dir, metrics_schema=SCHEMA)
+    ctx = loop_mod.RunContext(
+        cfg={"metrics": SCHEMA}, run_dir=run_dir, workspace=ws,
+        store=resumed_store,
+    )
+
+    summary = loop_mod._summary(ctx, run_dir)
+
+    assert summary["best_sha"] == sha
+    assert summary["best_round"] == 0
+    assert summary["best_candidate"] == 0
 
 
 def test_export_best_produces_diff_bundle_and_notes(tmp_path: Path):
