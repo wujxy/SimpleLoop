@@ -53,7 +53,7 @@ def _resolve_target(history: list[dict], schema: dict, what: str,
         best = best_candidate(history, schema)
         if best is None:
             raise ExportError(
-                "no eligible best candidate (gate-pass + risk!=high + numeric "
+                "no eligible best candidate (all gates pass + numeric "
                 "objective) — nothing to export")
         return (best["sha"], f"best candidate r{best['round']}c{best.get('candidate')}",
                 best.get("metrics") or {})

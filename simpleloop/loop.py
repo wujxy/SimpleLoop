@@ -365,8 +365,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         parent_sha = next_base_sha
 
-    print(f"\n[{stamp()}] done. best={ctx.store.best_sha} "
-          f"(score {ctx.store.best_score:.2f})", flush=True)
+    print(f"\n[{stamp()}] done. best={ctx.store.best_sha}", flush=True)
     print(f"[{stamp()}] working repo (for tracing): {ctx.workspace.repo}", flush=True)
     return _summary(ctx, run_dir_path)
 
@@ -535,7 +534,6 @@ def _summary(ctx: RunContext, run_dir_path: Path) -> dict:
         "best_sha": store.best_sha,
         "best_round": store.best_round,
         "best_candidate": store.best_candidate,
-        "best_score": store.best_score,
         "objective_key": obj_key,
         "best_objective": (best.get("metrics") or {}).get(obj_key) if best else None,
         "baseline_objective": baseline_metrics.get(obj_key),

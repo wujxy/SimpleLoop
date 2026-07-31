@@ -517,36 +517,28 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
         "gates": [{"key": "CORRECTNESS"}],
     })
     candidates = [
-        {"candidate": 0, "family": "hoist", "proposal": "p0", "sha": "a",
-         "score": 0.5, "risk": "low",
-         "feedback": "LANDED_STATE: not-implemented\nImplemented: p0\nResult: worse\nAnalysis: no win.",
-         "feedback_for_proposer": "Hoisting did not help this workload.",
+        {"candidate": 0, "proposal": "p0", "parent_sha": "base", "sha": "a",
+         "status": "COMPLETED", "gate_passed": True, "eligible": True,
+         "gates": {"CORRECTNESS": {"passed": True, "detail": ""}},
          "metrics": {"SPEED_MS": 600.0, "CORRECTNESS": True},
-         "changed_paths": ["a.cc"], "accepted": True, "selected": False},
-        {"candidate": 1, "family": "layout", "proposal": "p1", "sha": "b",
-         "score": 0.7, "risk": "low",
-         "feedback": "LANDED_STATE: not-implemented\nImplemented: p1\nResult: better\nAnalysis: cache locality.",
-         "feedback_for_proposer": "Layout remains a promising direction.",
+         "changed_paths": ["a.cc"], "selected": False},
+        {"candidate": 1, "proposal": "p1", "parent_sha": "base", "sha": "b",
+         "status": "COMPLETED", "gate_passed": True, "eligible": True,
+         "gates": {"CORRECTNESS": {"passed": True, "detail": ""}},
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True},
-         "changed_paths": ["b.cc"], "accepted": True, "selected": True},
+         "changed_paths": ["b.cc"], "selected": True},
     ]
     store.append_generation(0, parent_sha="base", selected_candidate=1,
-                            selected_sha="b", candidates=candidates,
-                            reflection="batch reflection")
+                            selected_sha="b", candidates=candidates)
     rows = store.history()
     assert rows[0]["selected_sha"] == "b"
     assert rows[0]["candidates"][1]["selected"] is True
-    assert rows[0]["feedback_for_proposer"] == "Layout remains a promising direction."
-    assert rows[0]["candidates"][0]["feedback_for_proposer"] == (
-        "Hoisting did not help this workload."
-    )
+    assert rows[0]["candidates"][0]["gates"]["CORRECTNESS"]["passed"] is True
     assert store.best_sha == "b"
 
     projected = views.for_proposer(rows)
     assert projected[0]["selected_sha"] == "b"
-    assert projected[0]["candidates"][0]["feedback_for_proposer"] == (
-        "Hoisting did not help this workload."
-    )
+    assert projected[0]["candidates"][0]["eligible"] is True
     assert "feedback" not in projected[0]["candidates"][0]
 
 

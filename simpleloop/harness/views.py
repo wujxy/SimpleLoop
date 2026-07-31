@@ -1,30 +1,10 @@
-"""Per-role projections over history records: the proposer sees only the fields
-it should (via for_proposer, limited to the recent_rounds most recent rounds);
-the store stays the full single source of truth."""
+"""Compact factual projections over append-only experiment history."""
 from __future__ import annotations
-
-import re
-
 
 _PROPOSER_RECENT_ROUNDS_DEFAULT = 6
 
-# The judger prefixes feedback with `LANDED_STATE: <tag>` (contract in
-# judger.py); surface it as a structured field instead of prose re-parsing.
-_LANDING_STATE_RE = re.compile(r"LANDED_STATE:\s*([a-z-]+)", re.IGNORECASE)
-
-
-def _landing_state(feedback: str | None) -> str | None:
-    """Extract the judger's LANDED_STATE tag from feedback, or None (unlabelled)."""
-    if not feedback:
-        return None
-    m = _LANDING_STATE_RE.search(feedback)
-    return m.group(1).lower() if m else None
-
-
 def for_proposer(history: list[dict], *, recent_rounds: int = _PROPOSER_RECENT_ROUNDS_DEFAULT) -> list[dict]:
-    """What the proposer sees of each prior round: candidate shas, selected
-    state, score, risk, parsed metrics, changed_paths and the proposer-facing
-    lesson — never the raw eval_block (noisy, hallucination risk)."""
+    """Return recent SHA, Gate, metric, and changed-path evidence."""
     return [
         {
             "round": r["round"],
@@ -32,23 +12,21 @@ def for_proposer(history: list[dict], *, recent_rounds: int = _PROPOSER_RECENT_R
             "selected_candidate": r.get("selected_candidate"),
             "selected_sha": r.get("selected_sha"),
             "base_sha": r.get("base_sha"),
-            "reflection": r.get("reflection", ""),
             "candidates": [
                 {
                     "candidate": c.get("candidate"),
-                    "family": c.get("family"),
                     "proposal": c.get("proposal") or "",
+                    "parent_sha": c.get("parent_sha") or r.get("parent_sha"),
                     "sha": c.get("sha") or None,
+                    "status": c.get("status") or c.get("candidate_status"),
                     "selected": bool(c.get("selected")),
-                    "accepted": c.get("accepted"),
-                    "score": c.get("score"),
-                    "risk": c.get("risk"),
+                    "gate_passed": c.get(
+                        "gate_passed", c.get("accepted"),
+                    ),
+                    "eligible": c.get("eligible"),
+                    "gates": c.get("gates") or {},
                     "metrics": c.get("metrics") or {},
                     "changed_paths": c.get("changed_paths") or [],
-                    "landing_state": _landing_state(c.get("feedback", "")),
-                    "feedback_for_proposer": (
-                        c.get("feedback_for_proposer") or ""
-                    ),
                 }
                 for c in (r.get("candidates") or [])
             ],
@@ -68,5 +46,4 @@ def gate_block(metrics_schema: dict | None) -> str:
     if not described:
         return ""
     return "\n".join(f"- {g['key']}: {g['description']}" for g in described)
-
 

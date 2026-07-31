@@ -21,6 +21,7 @@ from simpleloop import config as config_mod
 from simpleloop.harness import views
 from simpleloop.roles.agent import normalize_free_text
 from simpleloop.roles.judger import Judgment, _parse, _build_prompt, _judger_schema, judge
+from simpleloop.harness import store as store_mod
 from simpleloop.harness.store import Store
 
 def test_normalize_free_text_accepts_limit_without_warning(capsys):
@@ -46,86 +47,46 @@ def test_normalize_free_text_warns_and_truncates_after_strip(capsys):
 
 # --- views.for_proposer: projects landing-state signals to the proposer ---
 
-def test_for_proposer_projects_landing_state():
-    """The proposer sees full candidate/base SHAs + acceptance state so it can
-    self-audit whether a direction is already landed (git diff) and whether its
-    payoff is exhausted (metric trend), and tell "sound but didn't land" (low
-    risk + empty) from "latent bug" (high risk). The proposer must NOT see eval_block
-    (raw, noisy, hallucination risk)."""
-    history = [
-        {"round": 0, "parent_sha": "base0000", "selected_candidate": 0,
-         "selected_sha": "aaaa1111bbbb2222", "base_sha": "aaaa1111bbbb2222",
-         "reflection": "r0",
-         "candidates": [
-             {"candidate": 0, "family": "single", "proposal": "p0",
-              "sha": "aaaa1111bbbb2222", "selected": True, "accepted": True,
-              "score": 0.7, "risk": "low",
-              "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z",
-              "eval_block": "e0",
-              "feedback_for_proposer": "The mechanism remains promising.",
-              "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
-              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]}]},
-        {"round": 1, "parent_sha": "aaaa1111bbbb2222", "selected_candidate": None,
-         "selected_sha": None, "base_sha": "aaaa1111bbbb2222",
-         "reflection": "r1",
-         "candidates": [
-             {"candidate": 0, "family": "single", "proposal": "p1",
-              "sha": "cccc3333dddd4444", "selected": False, "accepted": False,
-              "score": 0.05, "risk": "low",
-              "feedback": "LANDED_STATE: not-implemented correctness FAIL",
-              "eval_block": "e1",
-              "feedback_for_proposer": "This attempt failed correctness.",
-              "metrics": {"CORRECTNESS": False},
-              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"]}]},
-    ]
-    out = views.for_proposer(history)
-    assert out == [
-        {"round": 0, "parent_sha": "base0000", "selected_candidate": 0,
-         "selected_sha": "aaaa1111bbbb2222", "base_sha": "aaaa1111bbbb2222",
-         "reflection": "r0",
-         "candidates": [
-             {"candidate": 0, "family": "single", "proposal": "p0",
-              "sha": "aaaa1111bbbb2222", "selected": True, "accepted": True,
-              "score": 0.7, "risk": "low",
-              "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True},
-              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
-              "landing_state": "not-implemented",
-              "feedback_for_proposer": "The mechanism remains promising."}]},
-        {"round": 1, "parent_sha": "aaaa1111bbbb2222", "selected_candidate": None,
-         "selected_sha": None, "base_sha": "aaaa1111bbbb2222",
-         "reflection": "r1",
-         "candidates": [
-             {"candidate": 0, "family": "single", "proposal": "p1",
-              "sha": "cccc3333dddd4444", "selected": False, "accepted": False,
-              "score": 0.05, "risk": "low",
-              "metrics": {"CORRECTNESS": False},
-              "changed_paths": ["OMILRECV2/src/OMILRECV2.cc"],
-              "landing_state": "not-implemented",
-              "feedback_for_proposer": "This attempt failed correctness."}]},
-    ]
-    # belt-and-braces: the noisy/raw fields never leak
-    for row in out:
-        for c in row["candidates"]:
-            assert "eval_block" not in c
-            assert "feedback" not in c
-
-
-def test_for_proposer_feedback_does_not_fall_back_to_full_text():
-    projected = views.for_proposer([{
+def test_for_proposer_projects_only_factual_candidate_state():
+    history = [{
         "round": 0,
+        "parent_sha": "base",
+        "selected_candidate": 0,
+        "selected_sha": "candidate",
+        "base_sha": "candidate",
         "candidates": [{
             "candidate": 0,
-            "proposal": "direction",
-            "sha": "sha",
-            "score": 0.2,
-            "feedback": "FULL_TECHNICAL_SENTINEL",
+            "proposal": "rewrite kernel",
+            "parent_sha": "base",
+            "sha": "candidate",
+            "status": "COMPLETED",
+            "selected": True,
+            "gate_passed": True,
+            "eligible": True,
+            "gates": {"PATHS": {"passed": True, "detail": ""}},
+            "metrics": {"SPEED_MS": 90.0},
+            "changed_paths": ["src/kernel.cc"],
+            "eval_block": "raw evaluator output",
+            "feedback": "legacy narrative",
+            "score": 0.9,
         }],
-    }])
+    }]
 
-    candidate = projected[0]["candidates"][0]
-    assert candidate["feedback_for_proposer"] == ""
-    assert "feedback" not in candidate
+    projected = views.for_proposer(history)
 
+    assert projected[0]["candidates"] == [{
+        "candidate": 0,
+        "proposal": "rewrite kernel",
+        "parent_sha": "base",
+        "sha": "candidate",
+        "status": "COMPLETED",
+        "selected": True,
+        "gate_passed": True,
+        "eligible": True,
+        "gates": {"PATHS": {"passed": True, "detail": ""}},
+        "metrics": {"SPEED_MS": 90.0},
+        "changed_paths": ["src/kernel.cc"],
+    }]
 
 def test_for_proposer_empty_history():
     assert views.for_proposer([]) == []
@@ -442,23 +403,61 @@ _STORE_SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
                  "gates": [{"key": "CORRECTNESS"}]}
 
 
-def test_store_persists_feedback(tmp_path: Path):
+def test_store_persists_only_factual_candidate_fields(tmp_path: Path):
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+    candidate = {
+        "candidate": 0,
+        "proposal": "replace the reconstruction kernel",
+        "parent_sha": "parent",
+        "sha": "candidate",
+        "status": "COMPLETED",
+        "metrics": {"SPEED_MS": 90.0, "CORRECTNESS": True},
+        "changed_paths": ["src/new_kernel.cc"],
+        "gates": {
+            "PATHS": {"passed": True, "detail": ""},
+            "EVAL_COMMANDS": {"passed": True, "detail": ""},
+            "CORRECTNESS": {"passed": True, "detail": ""},
+        },
+        "gate_passed": True,
+        "eligible": True,
+        "selected": False,
+    }
+
     store.append_generation(
-        0, parent_sha="parent", selected_candidate=0, selected_sha="sha0",
-        candidates=[{
-            "candidate": 0, "proposal": "p0", "sha": "sha0", "score": 0.7,
-            "risk": "low", "accepted": True,
-            "feedback": "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: -10% speed\nAnalysis: cache locality",
-            "eval_block": "e0",
-            "feedback_for_proposer": "Precomputation is worth revisiting.",
-        }])
-    rows = store.history()
-    assert len(rows) == 1
-    assert "LANDED_STATE" in rows[0]["feedback"]
-    assert "Implemented:" in rows[0]["feedback"]
-    assert rows[0]["feedback_for_proposer"] == "Precomputation is worth revisiting."
-    assert rows[0]["candidates"][0]["eval_block"] == "e0"
+        0,
+        parent_sha="parent",
+        selected_candidate=0,
+        selected_sha="candidate",
+        candidates=[candidate],
+    )
+
+    row = store.history()[0]
+    assert row["candidates"][0]["status"] == "COMPLETED"
+    assert row["candidates"][0]["gates"]["PATHS"]["passed"] is True
+    assert not ({"score", "risk", "feedback", "feedback_for_proposer",
+                 "family", "decision", "accepted"}
+                & row["candidates"][0].keys())
+
+
+def test_legacy_high_risk_candidate_stays_ineligible():
+    legacy = {
+        "sha": "old",
+        "risk": "high",
+        "metrics": {"SPEED_MS": 80.0, "CORRECTNESS": True},
+    }
+
+    assert store_mod.eligible(legacy, _STORE_SCHEMA) is False
+
+
+def test_new_candidate_cannot_override_failed_gate_with_eligible_flag():
+    inconsistent = {
+        "sha": "candidate",
+        "gate_passed": False,
+        "eligible": True,
+        "metrics": {"SPEED_MS": 80.0, "CORRECTNESS": False},
+    }
+
+    assert store_mod.eligible(inconsistent, _STORE_SCHEMA) is False
 
 
 # --- Store: changed_paths persisted (landing-state signal for the proposer) ---
@@ -492,7 +491,8 @@ def test_store_persists_candidate_acceptance_and_resulting_base(tmp_path: Path):
         }])
     row = store.history()[0]
     assert row["candidates"][0]["sha"] == "candidate0"
-    assert row["candidates"][0]["accepted"] is False
+    assert row["candidates"][0]["gate_passed"] is False
+    assert row["candidates"][0]["eligible"] is False
     assert row["selected_sha"] is None
     assert row["base_sha"] == "baseline"
 
@@ -527,31 +527,6 @@ def test_parse_accepts_landed_state_prefixed_feedback():
     assert jd.feedback == "LANDED_STATE: already-implemented empty diff, 459.3ms"
 
 
-def test_candidate_acceptance_requires_every_declared_gate_to_pass():
-    from simpleloop import loop as loop_mod
-
-    schema = {
-        "objective": {"key": "SPEED_MS", "lower_is_better": True},
-        "gates": [{"key": "CORRECTNESS"}, {"key": "EVAL_RESULT"}],
-    }
-    assert loop_mod._candidate_accepted(
-        "candidate", {"CORRECTNESS": True, "EVAL_RESULT": True}, schema) is True
-    assert loop_mod._candidate_accepted(
-        "candidate", {"CORRECTNESS": False, "EVAL_RESULT": True}, schema) is False
-    assert loop_mod._candidate_accepted(
-        "candidate", {"CORRECTNESS": True}, schema) is False
-    assert loop_mod._candidate_accepted(
-        "candidate", {"CORRECTNESS": True, "EVAL_RESULT": None}, schema) is False
-
-
-def test_candidate_acceptance_keeps_legacy_no_gate_behavior():
-    from simpleloop import loop as loop_mod
-
-    assert loop_mod._candidate_accepted("candidate", {}, None) is True
-    assert loop_mod._candidate_accepted("candidate", {}, {"gates": []}) is True
-    assert loop_mod._candidate_accepted(None, {}, None) is False
-
-
 def test_resume_chain_skips_rejected_tail_and_uses_last_accepted_metrics():
     from simpleloop import loop as loop_mod
 
@@ -580,49 +555,6 @@ def test_resume_chain_falls_back_to_baseline_when_no_candidate_was_accepted():
     assert loop_mod._resume_chain(history, "baseline") == ("baseline", None)
 
 
-# --- loop._print_objective: the run log shows each round's measured speed ---
-# Before this the speed number lived inside judger feedback (truncated to 120
-# chars in the log) or only in history.jsonl, so the run log couldn't show
-# whether a round actually improved. Now the harness prints the authoritative
-# parsed objective with vs-prior / vs-baseline deltas. Pure-print helper, so we
-# capture stdout and assert on the line. (No agent spawned.)
-
-def test_print_objective_emits_speed_with_deltas(capsys):
-    from simpleloop.loop import _print_objective
-    schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True}, "gates": []}
-    # this round 705, prior 762, baseline 910 -> both improvements (lower is better)
-    _print_objective({"SPEED_MS": 705.6, "CORRECTNESS": True},
-                     {"SPEED_MS": 762.7}, {"SPEED_MS": 910.0}, schema)
-    out = capsys.readouterr().out
-    assert "objective:" in out
-    assert "SPEED_MS=705.6" in out
-    assert "vs prior" in out and "762.7" in out and "-7.5%" in out and "better" in out
-    assert "vs baseline" in out and "910" in out
-
-
-def test_print_objective_silent_when_no_measurement(capsys):
-    """A no-commit / eval-crashed round has no objective value. The score+feedback
-    line above already says 'no commit', so a redundant 'objective: unknown' line
-    would be noise. _print_objective stays silent then."""
-    from simpleloop.loop import _print_objective
-    schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True}, "gates": []}
-    _print_objective({}, {"SPEED_MS": 762.7}, {"SPEED_MS": 910.0}, schema)
-    assert capsys.readouterr().out == ""
-    # defensively silent when passed no schema:
-    _print_objective({"SPEED_MS": 705.0}, None, None, None)
-    assert capsys.readouterr().out == ""
-
-
-def test_print_objective_higher_is_better_arrow(capsys):
-    """lower_is_better is read from the schema — a throughput objective (higher is
-    better) flips the delta arrow so the log doesn't lie about which way is good."""
-    from simpleloop.loop import _print_objective
-    schema = {"objective": {"key": "THROUGHPUT", "lower_is_better": False}, "gates": []}
-    # this 110, prior 100 -> +10% and that is BETTER for throughput
-    _print_objective({"THROUGHPUT": 110.0}, {"THROUGHPUT": 100.0}, {"THROUGHPUT": 90.0}, schema)
-    out = capsys.readouterr().out
-    assert "THROUGHPUT=110" in out
-    assert "+10.0%" in out and "better" in out
 def test_gate_block_renders_key_and_description_lines():
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
