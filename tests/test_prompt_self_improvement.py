@@ -10,10 +10,10 @@ import yaml
 
 from simpleloop import cli, config
 from simpleloop import loop
-from simpleloop.prompt_self_improvement.gate import OptimizerReport, PromptGate
-from simpleloop.prompt_self_improvement.history import PromptHistory
-from simpleloop.prompt_self_improvement.optimizer import MetaOptimizer
-from simpleloop.prompt_self_improvement import supervisor
+from simpleloop.self_improvement.gate import OptimizerReport, PromptGate
+from simpleloop.self_improvement.history import PromptHistory
+from simpleloop.self_improvement.optimizer import MetaOptimizer
+from simpleloop.self_improvement import supervisor
 from simpleloop.prompts import PROMPT_NAMES, load_semantic
 
 
@@ -39,7 +39,7 @@ def _task_file(tmp_path: Path, block=None) -> Path:
         },
     }
     if block is not None:
-        raw["prompt_self_improvement"] = block
+        raw["self_improvement"] = block
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path
@@ -47,69 +47,48 @@ def _task_file(tmp_path: Path, block=None) -> Path:
 
 def _enabled(**overrides):
     return {
-        "enabled": True,
         "interval_rounds": 2,
-        "optimizer_command": "claude",
-        "prompt_dir": "prompts",
-        "history_dir": "prompt_history",
-        "max_prompt_chars": 30000,
         **overrides,
     }
 
 
-def test_prompt_self_improvement_defaults_disabled(tmp_path: Path):
+def test_self_improvement_defaults_disabled(tmp_path: Path):
     cfg = config.load(_task_file(tmp_path))
-    assert cfg["prompt_self_improvement"] == {"enabled": False}
+    assert cfg["self_improvement"] is None
 
 
-def test_prompt_self_improvement_resolves_enabled_block(tmp_path: Path):
+def test_self_improvement_resolves_minimal_block(tmp_path: Path):
     cfg = config.load(_task_file(tmp_path, _enabled()))
-    block = cfg["prompt_self_improvement"]
-    assert block == {
-        "enabled": True,
-        "interval_rounds": 2,
-        "optimizer_command": "claude",
-        "prompt_dir": str((tmp_path / "prompts").resolve()),
-        "history_dir": str((tmp_path / "prompt_history").resolve()),
-        "max_prompt_chars": 30000,
-    }
+    assert cfg["self_improvement"] == {"interval_rounds": 2}
 
 
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"enabled": "yes"}, "enabled"),
         ({"interval_rounds": 0}, "interval_rounds"),
-        ({"max_prompt_chars": 999}, "max_prompt_chars"),
-        ({"optimizer_command": ""}, "optimizer_command"),
-        ({"prompt_dir": ""}, "prompt_dir"),
-        ({"history_dir": ""}, "history_dir"),
+        ({"enabled": True}, "unknown"),
+        ({"max_prompt_chars": 30000}, "unknown"),
+        ({"optimizer_command": "claude"}, "unknown"),
+        ({"prompt_dir": "prompts"}, "unknown"),
+        ({"history_dir": "history"}, "unknown"),
         ({"unknown": True}, "unknown"),
     ],
 )
-def test_prompt_self_improvement_rejects_invalid_values(
+def test_self_improvement_rejects_invalid_values(
     tmp_path: Path, overrides: dict, message: str,
 ):
     with pytest.raises(config.ConfigError, match=message):
         config.load(_task_file(tmp_path, _enabled(**overrides)))
 
 
-@pytest.mark.parametrize(
-    ("prompt_dir", "history_dir"),
-    [
-        ("shared", "shared"),
-        ("state/prompts", "state"),
-        ("state", "state/history"),
-    ],
-)
-def test_prompt_and_history_directories_must_be_separate(
-    tmp_path: Path, prompt_dir: str, history_dir: str,
-):
-    with pytest.raises(config.ConfigError, match="must not overlap"):
-        config.load(_task_file(
-            tmp_path,
-            _enabled(prompt_dir=prompt_dir, history_dir=history_dir),
-        ))
+def test_old_prompt_self_improvement_name_is_rejected(tmp_path: Path):
+    task = _task_file(tmp_path)
+    raw = yaml.safe_load(task.read_text())
+    raw["prompt_self_improvement"] = {"enabled": True}
+    task.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config.ConfigError, match="unknown top-level"):
+        config.load(task)
 
 
 def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):

@@ -35,6 +35,7 @@ Minimal schema:
   execution.hepjob.disappearance_grace_seconds: int (optional, default 120)
   execution.hepjob.python_executable: str  (optional, default the frontend's sys.executable)
   execution.hepjob.submit_cmd/query_cmd/remove_cmd: str  (optional condor_* overrides)
+  self_improvement.interval_rounds: int     (optional; block presence enables)
   source.path: path                   (required; the repo to optimize)
   source.baseline_ref: str            (optional, default HEAD)
 
@@ -53,7 +54,7 @@ import yaml
 
 TASK_TOP_KEYS = {
     "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution",
-    "prompt_self_improvement",
+    "self_improvement",
 }
 
 
@@ -198,9 +199,7 @@ def _resolve(
     metrics = _resolve_metrics(eval_block["metrics"])
 
     execution_backend, hepjob = _resolve_execution(raw.get("execution"))
-    prompt_self_improvement = _resolve_prompt_self_improvement(
-        raw.get("prompt_self_improvement"), path,
-    )
+    self_improvement = _resolve_self_improvement(raw.get("self_improvement"))
 
     return {
         "goal": str(goal),
@@ -225,73 +224,26 @@ def _resolve(
         "repo_path": str(repo),
         "baseline_ref": baseline_ref,
         "config_dir": str(path.parent),
-        "prompt_self_improvement": prompt_self_improvement,
+        "self_improvement": self_improvement,
     }
 
 
-def _resolve_prompt_self_improvement(raw: object, path: Path) -> dict:
+def _resolve_self_improvement(raw: object) -> dict | None:
     if raw is None:
-        return {"enabled": False}
+        return None
     if not isinstance(raw, dict):
-        raise ConfigError("prompt_self_improvement: must be an object")
-    allowed = {
-        "enabled", "interval_rounds", "optimizer_command", "prompt_dir",
-        "history_dir", "max_prompt_chars",
-    }
-    unknown = set(raw) - allowed
+        raise ConfigError("self_improvement: must be an object")
+    unknown = set(raw) - {"interval_rounds"}
     if unknown:
         raise ConfigError(
-            "prompt_self_improvement: unknown key(s): "
-            f"{sorted(unknown)}"
+            f"self_improvement: unknown key(s): {sorted(unknown)}"
         )
-    enabled = raw.get("enabled", False)
-    if not isinstance(enabled, bool):
-        raise ConfigError("prompt_self_improvement.enabled: must be a bool")
-    if not enabled:
-        return {"enabled": False}
-
     interval = raw.get("interval_rounds", 10)
     if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
         raise ConfigError(
-            "prompt_self_improvement.interval_rounds: must be a positive integer"
+            "self_improvement.interval_rounds: must be a positive integer"
         )
-    max_chars = raw.get("max_prompt_chars", 30000)
-    if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 1000:
-        raise ConfigError(
-            "prompt_self_improvement.max_prompt_chars: must be an integer >= 1000"
-        )
-    command = raw.get("optimizer_command", "claude")
-    if not isinstance(command, str) or not command.strip():
-        raise ConfigError(
-            "prompt_self_improvement.optimizer_command: must be a non-empty string"
-        )
-
-    resolved_paths = {}
-    for key in ("prompt_dir", "history_dir"):
-        value = raw.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError(
-                f"prompt_self_improvement.{key}: required non-empty path"
-            )
-        resolved_paths[key] = str(Path(_rel(value, path)).resolve())
-    prompt_dir = Path(resolved_paths["prompt_dir"])
-    history_dir = Path(resolved_paths["history_dir"])
-    if (
-        prompt_dir == history_dir
-        or prompt_dir in history_dir.parents
-        or history_dir in prompt_dir.parents
-    ):
-        raise ConfigError(
-            "prompt_self_improvement prompt_dir and history_dir must not overlap"
-        )
-
-    return {
-        "enabled": True,
-        "interval_rounds": interval,
-        "optimizer_command": command.strip(),
-        **resolved_paths,
-        "max_prompt_chars": max_chars,
-    }
+    return {"interval_rounds": interval}
 
 
 def _resolve_runtime(

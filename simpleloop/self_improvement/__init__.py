@@ -1,4 +1,4 @@
-"""Development-time prompt evolution for SimpleLoop."""
+"""Run-local self-improvement for SimpleLoop."""
 
 from .gate import OptimizerReport, PromptGate
 from .history import PromptHistory

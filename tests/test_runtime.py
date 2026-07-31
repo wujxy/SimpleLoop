@@ -940,7 +940,7 @@ def test_run_cli_reports_runtime_failures_without_traceback(
     monkeypatch.setattr(
         config_mod,
         "load",
-        lambda _path: {"prompt_self_improvement": {"enabled": False}},
+        lambda _path: {"self_improvement": None},
     )
     monkeypatch.setattr(
         loop_mod,

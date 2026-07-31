@@ -1,4 +1,4 @@
-"""Unattended outer loop for development-time prompt evolution."""
+"""Unattended outer loop for run-local self-improvement."""
 from __future__ import annotations
 
 import fcntl
