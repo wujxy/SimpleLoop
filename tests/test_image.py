@@ -49,6 +49,8 @@ def test_build_image_uses_fakeroot_and_explicit_output(
         "/usr/bin/apptainer",
         "build",
         "--fakeroot",
+        "--mksquashfs-args",
+        "-processors 1",
         str(output.resolve()),
         str(definition.resolve()),
     ]
@@ -126,6 +128,8 @@ def test_force_is_forwarded_to_apptainer(
         "/usr/bin/apptainer",
         "build",
         "--fakeroot",
+        "--mksquashfs-args",
+        "-processors 1",
         "--force",
         str(output.resolve()),
         str(definition.resolve()),

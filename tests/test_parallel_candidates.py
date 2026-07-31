@@ -805,6 +805,7 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
 def _run_insight_integration(
     monkeypatch, tmp_path, *, insight, refs, existing_insights=None,
     corrupt_insights=False, proposer_calls=None, prompt_dir=None,
+    max_rounds=2, target_rounds=None,
 ):
     run_dir = tmp_path / "run"
     seed = Store(run_dir, metrics_schema=_SCHEMA)
@@ -838,7 +839,7 @@ def _run_insight_integration(
         "goal": "go faster",
         "editable_paths": ["src/**"],
         "frozen_paths": [],
-        "max_rounds": 2,
+        "max_rounds": max_rounds,
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
@@ -935,6 +936,7 @@ def _run_insight_integration(
 
     loop_mod.run(
         "config.yaml", run_dir, continue_run=True, prompt_dir=prompt_dir,
+        target_rounds=target_rounds,
     )
     return run_dir, executed
 
@@ -966,6 +968,23 @@ def test_run_injects_active_prompt_directory_into_proposer(
         refs=[],
         prompt_dir=tmp_path / "active-prompts",
     )
+
+
+def test_segment_progress_reports_global_total_and_next_optimizer(
+    monkeypatch, tmp_path, capsys,
+):
+    _run_insight_integration(
+        monkeypatch,
+        tmp_path,
+        insight="",
+        refs=[],
+        max_rounds=6,
+        target_rounds=2,
+    )
+
+    output = capsys.readouterr().out
+    assert "=== current round 2/6 ===" in output
+    assert "Next optimizer will be started after round 2" in output
 
 
 def test_run_skips_invalid_insight_without_skipping_generation(

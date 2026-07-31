@@ -4,8 +4,28 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import yaml
+
 from ..prompts import load_semantic
 from ..roles.agent import Agent
+
+
+_REPORT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["diagnosis", "evidence"],
+    "properties": {
+        "diagnosis": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": r"\S",
+        },
+        "evidence": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+}
 
 
 class LocalRuntime:
@@ -69,7 +89,6 @@ Write access:
 - {prompt_dir / 'executor.md'}
 - {prompt_dir / 'judger.md'}
 - {prompt_dir / 'meta_optimizer.md'} outside META_IDENTITY_CORE
-- {prompt_dir / 'optimizer_report.yaml'}
 
 Fixed artifacts:
 - META_IDENTITY_CORE
@@ -78,8 +97,15 @@ Fixed artifacts:
 - task Goal and user Gates
 - run history and measured results
 
-Edit the active prompt files directly. Write optimizer_report.yaml with exactly:
+Edit the active prompt files directly. Return exactly:
 - diagnosis: non-empty text
 - evidence: a list of references selected during the investigation
 """
-        self.agent.run_text(prompt, cwd=prompt_dir, label="meta optimizer")
+        report = self.agent.run_json(
+            prompt, cwd=prompt_dir, label="meta optimizer",
+            json_schema=_REPORT_SCHEMA,
+        )
+        (prompt_dir / "optimizer_report.yaml").write_text(
+            yaml.safe_dump(report, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )

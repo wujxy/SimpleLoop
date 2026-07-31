@@ -244,9 +244,24 @@ def _run_locked(cfg: dict, run_dir_path: Path,
     if start is None:  # --continue with nothing left to do
         return _summary(ctx, run_dir_path)
     start_round, parent_sha, prior_metrics = start
+    display_rounds = cfg["max_rounds"] if target_rounds is not None else n_rounds
 
     for round_id in range(start_round, n_rounds):
-        print(f"\n[{stamp()}] === round {round_id + 1}/{n_rounds} ===", flush=True)
+        print(
+            f"\n[{stamp()}] === current round "
+            f"{round_id + 1}/{display_rounds} ===",
+            flush=True,
+        )
+        if (
+            round_id == start_round
+            and target_rounds is not None
+            and target_rounds < cfg["max_rounds"]
+        ):
+            print(
+                f"[{stamp()}] Next optimizer will be started after round "
+                f"{target_rounds}",
+                flush=True,
+            )
 
         inflight = _load_inflight(ctx.run_dir)
         if inflight is not None:

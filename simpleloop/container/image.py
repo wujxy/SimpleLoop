@@ -50,7 +50,13 @@ def build_image(
     if not apptainer:
         raise ImageBuildError("apptainer executable not found on host")
 
-    argv = [apptainer, "build", "--fakeroot"]
+    argv = [
+        apptainer,
+        "build",
+        "--fakeroot",
+        "--mksquashfs-args",
+        "-processors 1",
+    ]
     if force:
         argv.append("--force")
     argv.extend([str(output_path), str(definition_path)])

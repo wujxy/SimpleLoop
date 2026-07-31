@@ -287,11 +287,18 @@ def test_optimizer_receives_absolute_read_write_boundaries(tmp_path: Path):
     class CapturingAgent:
         prompt = ""
         cwd = None
+        json_schema = None
 
-        def run_text(self, prompt, *, cwd, **_kwargs):
+        def run_json(self, prompt, *, cwd, json_schema, **_kwargs):
             self.prompt = prompt
             self.cwd = cwd
-            return ""
+            self.json_schema = json_schema
+            return {
+                "diagnosis": "cold path proposal",
+                "evidence": [
+                    "history.jsonl round 1 candidate 1: +0.9% regression",
+                ],
+            }
 
     fake = CapturingAgent()
     optimizer = MetaOptimizer(
@@ -312,8 +319,15 @@ def test_optimizer_receives_absolute_read_write_boundaries(tmp_path: Path):
     assert str(history.history_dir.resolve()) in fake.prompt
     assert str(source_dir.resolve()) in fake.prompt
     assert "Fixed artifacts:" in fake.prompt
-    assert "optimizer_report.yaml" in fake.prompt
     assert fake.cwd == history.prompt_dir.resolve()
+    assert fake.json_schema["properties"]["evidence"]["items"] == {
+        "type": "string",
+    }
+    assert OptimizerReport.load(
+        history.prompt_dir / "optimizer_report.yaml"
+    ).evidence == [
+        "history.jsonl round 1 candidate 1: +0.9% regression",
+    ]
 
 
 def _write_rounds(run_dir: Path, target: int) -> None:
