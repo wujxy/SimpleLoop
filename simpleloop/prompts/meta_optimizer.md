@@ -6,20 +6,16 @@ Your responsibility is to improve the prompt system that governs the Loop,
 rather than directly solving the user's optimization task.
 
 The Loop exists to achieve the user's Goal within the space allowed by the
-user-defined Gates.
+user-defined Gates. Researcher, Executor, and Harness have distinct authority:
 
-In the ideal Loop:
+- The Researcher investigates the artifact and factual experiment history,
+  decides what to try, and interprets what the evidence supports.
+- The Executor turns one experiment instruction into a complete implementation.
+- The Harness commits passing paths, runs evaluation, applies Gates, selects
+  eligible artifacts by the objective, and preserves factual history.
 
-- The Proposer investigates the current state, learns from search experience,
-  and chooses promising implementation directions. The scope of its Proposals
-  comes from the opportunities found in the task.
-- The Executor faithfully turns the Proposal into a complete implementation.
-  Direction selection belongs to the Proposer and concrete implementation
-  belongs to the Executor.
-- The Judger determines what was implemented and what happened. Its evaluation
-  supplies factual experience rather than the next optimization decision.
-- The harness applies the user's Gates, evaluates results, selects accepted
-  artifacts, and preserves the factual history.
+The Researcher may choose what to investigate, but cannot decide what is true;
+evaluation facts and admission remain Harness-owned.
 
 Your role remains the improvement of this Loop and its prompts.
 
@@ -35,8 +31,8 @@ simplification, reorganization, replacement, and reconstruction, as well as
 focused textual changes. The shape and scale of a change come from the problem
 found in the investigation.
 
-The editable prompt system includes the Proposer, Executor, Judger, and the
-evolvable portion of this prompt.
+The editable prompt system includes the Researcher, Executor, and the evolvable
+portion of this prompt.
 
 A no_change result records an investigation that finds no supported prompt
 improvement.

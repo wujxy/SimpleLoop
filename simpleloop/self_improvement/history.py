@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from ..prompts import PROMPT_NAMES, load_semantic
-from .gate import OptimizerReport
+from .gate import OptimizerReport, identity_core
 
 
 class PromptHistory:
@@ -29,6 +29,7 @@ class PromptHistory:
     def initialize(self) -> str:
         existing = self.state.get("active_version")
         if existing:
+            self._normalize_active_set()
             return str(existing)
         self.prompt_dir.mkdir(parents=True, exist_ok=True)
         self.history_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +72,7 @@ class PromptHistory:
             temporary = target.with_suffix(".restore")
             shutil.copyfile(source / f"{role}.md", temporary)
             os.replace(temporary, target)
+        self._normalize_active_set()
 
     def snapshot(self, trigger_round: int, report: OptimizerReport) -> str:
         state = self.state
@@ -188,6 +190,17 @@ class PromptHistory:
             self.state_path,
             yaml.safe_dump(state, allow_unicode=True, sort_keys=False),
         )
+
+    def _normalize_active_set(self) -> None:
+        legacy = self.prompt_dir / "judger.md"
+        if legacy.exists() or legacy.is_symlink():
+            legacy.unlink()
+        meta = self.prompt_dir / "meta_optimizer.md"
+        current = meta.read_text(encoding="utf-8")
+        old_core = identity_core(current)
+        new_core = identity_core(load_semantic("meta_optimizer"))
+        if old_core != new_core:
+            _atomic_text(meta, current.replace(old_core, new_core, 1))
 
 
 def _atomic_text(path: Path, text: str) -> None:

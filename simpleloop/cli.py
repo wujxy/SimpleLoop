@@ -284,8 +284,16 @@ def main(argv: list[str] | None = None) -> None:
             # bad --proposals file or empty static batch — do not start a half-run.
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1)
-        print(f"\nBest: {summary['best_sha']} (score {summary['best_score']:.2f}) "
-              f"over {summary['rounds']} rounds")
+        objective = summary.get("best_objective")
+        objective_key = summary.get("objective_key")
+        measured = (
+            f" ({objective_key} {objective})"
+            if objective_key and objective is not None else ""
+        )
+        print(
+            f"\nBest: {summary['best_sha']}{measured} "
+            f"over {summary['rounds']} rounds"
+        )
         print(f"Working repo: {summary['repo']}")
         return
 

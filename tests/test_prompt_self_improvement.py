@@ -10,7 +10,9 @@ import yaml
 
 from simpleloop import cli, config
 from simpleloop import loop
-from simpleloop.self_improvement.gate import OptimizerReport, PromptGate
+from simpleloop.self_improvement.gate import (
+    OptimizerReport, PromptGate, identity_core,
+)
 from simpleloop.self_improvement.history import PromptHistory
 from simpleloop.self_improvement.optimizer import MetaOptimizer
 from simpleloop.self_improvement import supervisor
@@ -117,6 +119,44 @@ def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):
     assert history.state["active_version"] == "v000"
 
 
+def test_prompt_names_exclude_judger():
+    assert PROMPT_NAMES == ("proposer", "executor", "meta_optimizer")
+
+
+def test_existing_lineage_migrates_only_the_active_prompt_set(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.prompt_dir.mkdir(parents=True)
+    snapshot = history.history_dir / "v000"
+    snapshot.mkdir(parents=True)
+    legacy_meta = load_semantic("meta_optimizer").replace(
+        "Researcher, Executor, and Harness",
+        "Proposer, Executor, Judger, and Harness",
+        1,
+    )
+    for name, value in {
+        "proposer": load_semantic("proposer"),
+        "executor": load_semantic("executor"),
+        "judger": "legacy judger",
+        "meta_optimizer": legacy_meta,
+    }.items():
+        (history.prompt_dir / f"{name}.md").write_text(value, encoding="utf-8")
+        (snapshot / f"{name}.md").write_text(value, encoding="utf-8")
+    (snapshot / "manifest.yaml").write_text("version: v000\n", encoding="utf-8")
+    history._write_state({"active_version": "v000", "inflight": None})
+
+    assert history.initialize() == "v000"
+    assert not (history.prompt_dir / "judger.md").exists()
+    assert (snapshot / "judger.md").read_text(encoding="utf-8") == "legacy judger"
+    assert identity_core(
+        (history.prompt_dir / "meta_optimizer.md").read_text(encoding="utf-8")
+    ) == identity_core(load_semantic("meta_optimizer"))
+    assert PromptGate().check(history.prompt_dir) == []
+
+    history.restore("v000")
+    assert not (history.prompt_dir / "judger.md").exists()
+    assert PromptGate().check(history.prompt_dir) == []
+
+
 def test_history_initialization_replaces_orphan_v000(tmp_path: Path):
     history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
     orphan = history.history_dir / "v000"
@@ -156,7 +196,7 @@ def test_history_records_idempotent_trigger_and_recovers_inflight(tmp_path: Path
 
     recovered = history.recover_inflight()
     assert recovered == {"run_id": "run-a", "trigger_round": 2, "parent": "v000"}
-    assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
+    assert "You are the RESEARCHER" in (history.prompt_dir / "proposer.md").read_text()
     assert history.events()[-1]["status"] == "interrupted"
 
 
@@ -176,7 +216,7 @@ def test_history_rolls_back_snapshot_created_by_interrupted_trigger(
 
     assert history.state["active_version"] == "v000"
     assert not (history.history_dir / "v001").exists()
-    assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
+    assert "You are the RESEARCHER" in (history.prompt_dir / "proposer.md").read_text()
 
 
 def test_history_preserves_completed_trigger_with_stale_inflight(tmp_path: Path):
@@ -532,7 +572,7 @@ def test_supervisor_restores_parent_after_optimizer_error(tmp_path: Path):
     root = run_dir / "self_improvement"
     history = PromptHistory(root / "prompts", root / "prompt_history")
     assert history.state["active_version"] == "v000"
-    assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
+    assert "You are the RESEARCHER" in (history.prompt_dir / "proposer.md").read_text()
     assert [event["status"] for event in history.events()] == ["rejected", "rejected"]
 
 
@@ -598,14 +638,14 @@ def test_each_run_starts_from_its_own_v000(tmp_path: Path):
 
     assert history_a.state["active_version"] == "v001"
     assert history_b.state["active_version"] == "v000"
-    assert "You are the PROPOSER" in (
+    assert "You are the RESEARCHER" in (
         history_b.prompt_dir / "proposer.md"
     ).read_text()
 
 
 def _summary(run_dir: Path) -> dict:
     return {
-        "best_sha": None, "best_score": -1.0, "rounds": 0,
+        "best_sha": None, "rounds": 0,
         "repo": str(run_dir / "repo"),
     }
 

@@ -87,7 +87,6 @@ Read access:
 Write access:
 - {prompt_dir / 'proposer.md'}
 - {prompt_dir / 'executor.md'}
-- {prompt_dir / 'judger.md'}
 - {prompt_dir / 'meta_optimizer.md'} outside META_IDENTITY_CORE
 
 Fixed artifacts:
