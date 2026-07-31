@@ -127,8 +127,7 @@ def test_history_detects_changes_snapshots_and_restores(tmp_path: Path):
     assert history.has_changes("v000")
 
     version = history.snapshot(2, OptimizerReport(
-        status="changed", diagnosis="anchored", evidence=["r0c0"],
-        intent="broaden search",
+        diagnosis="anchored", evidence=["r0c0"],
     ))
     assert version == "v001"
     assert (history.history_dir / "v001/proposer.md").read_text() == "rewritten proposer\n"
@@ -159,8 +158,7 @@ def test_history_rolls_back_snapshot_created_by_interrupted_trigger(
     history.mark_inflight("run-a", 2)
     (history.prompt_dir / "proposer.md").write_text("interrupted rewrite")
     history.snapshot(2, OptimizerReport(
-        status="changed", diagnosis="test crash window", evidence=[],
-        intent="test recovery",
+        diagnosis="test crash window", evidence=[],
     ))
     assert history.state["active_version"] == "v001"
 
@@ -178,8 +176,7 @@ def test_history_preserves_completed_trigger_with_stale_inflight(tmp_path: Path)
     proposer = history.prompt_dir / "proposer.md"
     proposer.write_text("accepted rewrite")
     history.snapshot(2, OptimizerReport(
-        status="changed", diagnosis="accepted", evidence=[],
-        intent="keep this version",
+        diagnosis="accepted", evidence=[],
     ))
     history.record_event({
         "run_id": "run-a", "trigger_round": 2, "parent": "v000",
@@ -195,10 +192,8 @@ def test_history_preserves_completed_trigger_with_stale_inflight(tmp_path: Path)
 
 def _write_report(prompt_dir: Path, **overrides) -> Path:
     data = {
-        "status": "changed",
         "diagnosis": "role drift",
         "evidence": ["r0c0"],
-        "intent": "restore ownership",
         **overrides,
     }
     path = prompt_dir / "optimizer_report.yaml"
@@ -214,19 +209,18 @@ def test_report_parser_is_exact_and_gate_allows_role_rewrite(tmp_path: Path):
 
     report = OptimizerReport.load(report_path)
     assert report.diagnosis == "role drift"
-    assert PromptGate(30000).check(history.prompt_dir, report, changed=True) == []
+    assert PromptGate().check(history.prompt_dir) == []
 
 
-def test_gate_rejects_changed_meta_core_and_report_mismatch(tmp_path: Path):
+def test_gate_rejects_changed_meta_core(tmp_path: Path):
     history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
     history.initialize()
     meta = history.prompt_dir / "meta_optimizer.md"
     meta.write_text(meta.read_text().replace("META OPTIMIZER", "TASK SOLVER"))
-    report = OptimizerReport.load(_write_report(history.prompt_dir, status="no_change"))
+    OptimizerReport.load(_write_report(history.prompt_dir))
 
-    errors = PromptGate(30000).check(history.prompt_dir, report, changed=True)
+    errors = PromptGate().check(history.prompt_dir)
     assert any("META_IDENTITY_CORE" in error for error in errors)
-    assert any("no_change" in error for error in errors)
 
 
 def test_gate_rejects_symlink_and_restore_does_not_write_through_it(
@@ -239,13 +233,9 @@ def test_gate_rejects_symlink_and_restore_does_not_write_through_it(
     proposer = history.prompt_dir / "proposer.md"
     proposer.unlink()
     proposer.symlink_to(outside)
-    report = OptimizerReport.load(_write_report(
-        history.prompt_dir, status="no_change", intent="",
-    ))
+    OptimizerReport.load(_write_report(history.prompt_dir))
 
-    errors = PromptGate(30000).check(
-        history.prompt_dir, report, changed=False,
-    )
+    errors = PromptGate().check(history.prompt_dir)
     history.restore("v000")
 
     assert any("symbolic link" in error for error in errors)
@@ -259,6 +249,25 @@ def test_report_rejects_unknown_fields(tmp_path: Path):
     path = _write_report(prompt_dir, unknown=True)
     with pytest.raises(ValueError, match="exactly"):
         OptimizerReport.load(path)
+
+
+def test_report_rejects_empty_diagnosis(tmp_path: Path):
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    path = _write_report(prompt_dir, diagnosis="")
+    with pytest.raises(ValueError, match="diagnosis"):
+        OptimizerReport.load(path)
+
+
+def test_gate_uses_internal_prompt_length_limit(tmp_path: Path):
+    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
+    history.initialize()
+    (history.prompt_dir / "proposer.md").write_text("x" * 30001)
+
+    assert any(
+        "exceeds 30000" in error
+        for error in PromptGate().check(history.prompt_dir)
+    )
 
 
 def test_optimizer_receives_absolute_read_write_boundaries(tmp_path: Path):
@@ -276,7 +285,7 @@ def test_optimizer_receives_absolute_read_write_boundaries(tmp_path: Path):
 
     fake = CapturingAgent()
     optimizer = MetaOptimizer(
-        "claude", 60, 8000, agent_factory=lambda **_kwargs: fake,
+        60, 8000, agent_factory=lambda **_kwargs: fake,
     )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -327,7 +336,7 @@ def test_supervisor_stops_each_segment_before_optimizer(tmp_path: Path):
     class NoChangeOptimizer:
         def run(self, *, prompt_dir, **_kwargs):
             calls.append(("optimizer", len((run_dir / "history.jsonl").read_text().splitlines())))
-            _write_report(Path(prompt_dir), status="no_change", intent="")
+            _write_report(Path(prompt_dir))
 
     summary = supervisor.run(
         task, run_dir, artifact_runner=artifact_runner,
@@ -364,7 +373,7 @@ def test_supervisor_does_not_optimize_after_final_interval_boundary(
             calls.append(("optimizer", len(
                 (run_dir / "history.jsonl").read_text().splitlines()
             )))
-            _write_report(Path(prompt_dir), status="no_change", intent="")
+            _write_report(Path(prompt_dir))
 
     supervisor.run(
         task, run_dir, artifact_runner=artifact_runner,
@@ -514,7 +523,7 @@ def test_supervisor_removes_unexpected_files_after_rejection(tmp_path: Path):
     class PollutingOptimizer:
         def run(self, *, prompt_dir, **_kwargs):
             Path(prompt_dir, "unexpected.txt").write_text("outside contract")
-            _write_report(Path(prompt_dir), status="no_change", intent="")
+            _write_report(Path(prompt_dir))
 
     supervisor.run(
         task, run_dir, artifact_runner=artifact_runner,
@@ -551,7 +560,7 @@ def test_each_run_starts_from_its_own_v000(tmp_path: Path):
     )
     (history_a.prompt_dir / "proposer.md").write_text("run A prompt")
     assert history_a.snapshot(1, OptimizerReport(
-        status="changed", diagnosis="run A only", evidence=[], intent="isolate",
+        diagnosis="run A only", evidence=[],
     )) == "v001"
 
     supervisor.run(

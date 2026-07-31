@@ -43,7 +43,7 @@ class PromptHistory:
             "version": "v000", "parent": None, "trigger_round": None,
             "created_at": _stamp(), "changed": list(PROMPT_NAMES),
             "diagnosis": "identity-internalized initial prompt system",
-            "evidence": [], "intent": "establish v000",
+            "evidence": [],
         })
         self._write_state({"active_version": "v000", "inflight": None})
         return "v000"
@@ -85,7 +85,7 @@ class PromptHistory:
             "version": version, "parent": parent,
             "trigger_round": trigger_round, "created_at": _stamp(),
             "changed": changed, "diagnosis": report.diagnosis,
-            "evidence": report.evidence, "intent": report.intent,
+            "evidence": report.evidence,
         })
         state["active_version"] = version
         self._write_state(state)

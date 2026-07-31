@@ -23,14 +23,13 @@ class LocalRuntime:
 class MetaOptimizer:
     def __init__(
         self,
-        command: str,
         timeout_seconds: int,
         max_output_tokens: int,
         *,
         agent_factory=Agent,
     ):
         self.agent = agent_factory(
-            runtime=LocalRuntime(), command=command,
+            runtime=LocalRuntime(),
             timeout_seconds=timeout_seconds,
             max_output_tokens=max_output_tokens,
             allowed_tools="Read,Edit,Write,Bash",
@@ -80,9 +79,7 @@ Fixed artifacts:
 - run history and measured results
 
 Edit the active prompt files directly. Write optimizer_report.yaml with exactly:
-- status: changed or no_change
 - diagnosis: non-empty text
 - evidence: a list of references selected during the investigation
-- intent: text, empty for no_change
 """
         self.agent.run_text(prompt, cwd=prompt_dir, label="meta optimizer")

@@ -69,9 +69,8 @@ def _run_locked(
     )
     history.initialize()
     history.recover_inflight()
-    gate = PromptGate(30000)
+    gate = PromptGate()
     optimizer = optimizer_factory(
-        command="claude",
         timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
         max_output_tokens=cfg.get("agent_max_output_tokens", 64000),
     )
@@ -131,7 +130,7 @@ def _trigger(
         )
         report = OptimizerReport.load(report_path)
         changed = history.has_changes(parent)
-        errors = gate.check(history.prompt_dir, report, changed=changed)
+        errors = gate.check(history.prompt_dir)
         if errors:
             raise ValueError("; ".join(errors))
         if changed:
