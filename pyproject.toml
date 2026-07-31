@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "simpleloop"
 version = "0.1.0"
-description = "A minimal serial LLM optimization loop: proposer -> executor -> judger."
+description = "An open Researcher -> Executor loop with deterministic Harness evaluation."
 requires-python = ">=3.9"
 dependencies = ["pyyaml>=5.1", "matplotlib>=3.5"]
 

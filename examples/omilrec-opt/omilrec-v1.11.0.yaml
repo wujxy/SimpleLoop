@@ -10,7 +10,7 @@ kind: task
 # The single eval command (scripts/sl_eval.sh) does the whole chain in one shot —
 # source JUNO env, build lib + test_fcn, run the FCN drift gate, run quick_bench —
 # because SimpleLoop gives each eval command a 600s budget and a fresh worktree
-# (no build artifacts). It prints FCN=/SPEED_MS=/EVAL_RESULT= lines the judger reads.
+# (no build artifacts). It prints FCN=/SPEED_MS=/EVAL_RESULT= lines for the harness.
 # Default --evtmax 10 fits the 600s budget; raise the SimpleLoop eval timeout or
 # use --evtmax 100 for a less noisy delta.
 
@@ -59,7 +59,7 @@ runtime:
 eval:
   commands:
     # One self-contained command: env + build + FCN gate + speed bench.
-    # Prints FCN=, SPEED_MS=, EVAL_RESULT= for the judger.
+    # Prints FCN=, SPEED_MS=, EVAL_RESULT= for the harness.
     - "bash scripts/sl_eval.sh --evtmax 10"
   metrics:
     objective:

@@ -61,13 +61,13 @@ def _resolve_target(history: list[dict], schema: dict, what: str,
         head_sha = history[-1].get("base_sha")
         if not head_sha or head_sha == baseline_sha:
             raise ExportError(
-                "the accepted chain never advanced past the baseline — "
+                "the selected chain never advanced past the baseline — "
                 "nothing to export")
-        last_accepted = next(
+        last_selected = next(
             (r for r in reversed(history) if r.get("selected_sha")), {})
         return (head_sha,
-                f"accepted chain head after round {history[-1].get('round')}",
-                last_accepted.get("metrics") or {})
+                f"selected chain head after round {history[-1].get('round')}",
+                last_selected.get("metrics") or {})
     raise ExportError(f"unknown export target {what!r}; use best|head")
 
 

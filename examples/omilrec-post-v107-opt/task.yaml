@@ -6,39 +6,20 @@ kind: task
 
 task:
   goal: >
-    Optimize the speed of the v1.0.0 OMILRECV2 reconstruction algorithm under
-    OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the post-v1.0.7
-    FCN replay gate (1e-13 drift) and the end-to-end reconstruction within
-    4 mm vertex, 7 keV energy, 10 ps t0, and 0.1 PE peSum tolerances.
-
-    The two gates differ in strictness and must not be conflated:
-    - The FCN gate (omilrec_charge_ll.cc, omilrec_time_pdf.cc) is TIGHT: 1e-13
-      only absorbs compiler/libm reorderings that don't change accuracy. Any
-      change to the likelihood's float-op order/rounding — reassociation,
-      log<->log1p, pow<->cube, double<->float, reordering accumulation, or
-      precomputing "equivalent" normalization constants — drifts past 1e-13 and
-      fails. Minuit amplifies sub-ULP differences across the ~15k-term reduction.
-      SAFE FCN changes alter only fetch/layout, not what is computed: hoisting,
-      caching, SoA, index partitioning, precomputing loop-invariant magnitudes.
-    - The CONSISTENCY gate (omilrec_reconstruction.cc) is a PHYSICS tolerance
-      (4mm/7keV/10ps/0.1PE): float-op changes there are fine as long as the
-      reconstructed physics output stays within range.
-
-    Focus on: hoisting loop-invariant work, caching repeated values, SoA data
-    layout, precompute, index partitioning, dead code elimination — structural
-    refactors, not arithmetic ones. Edit only the admitted source files.
+    Minimize reconstruction SPEED_MS while satisfying every configured gate.
+    The current implementation is the starting artifact, not a constraint on
+    the form or scale of a valid solution.
 
 safety:
   editable_paths:
-    - "OMILRECV2/src/**/*.cc"
-    - "OMILRECV2/src/**/*.h"
+    - "OMILRECV2/src/**"
+    - "OMILRECV2/CMakeLists.txt"
   frozen_paths:
     - "tests/**"
     - "scripts/**"
     - "benchmarks/**"
     - "reference/**"
     - "CMakeLists.txt"
-    - "OMILRECV2/CMakeLists.txt"
     - "pyproject.toml"
     - "docs/**"
     - "CLAUDE.md"
@@ -70,26 +51,12 @@ eval:
     gates:
       - key: FCN
         description: >
-          The likelihood value Minuit minimizes, replayed against the v1.0.7-rev1
-          golden pack at 1e-13 relative drift. This tolerance is narrow by design:
-          it only absorbs compiler/libm reorderings that do NOT change accuracy
-          (FMA contraction, instruction scheduling). Any change to the reduction's
-          float-op order/rounding shifts the result and fails it, because Minuit
-          amplifies sub-ULP differences across the ~15k charge-term accumulation.
-          Therefore FORBIDDEN in the FCN path (omilrec_charge_ll.cc,
-          omilrec_time_pdf.cc): reassociation of sums, log<->log1p, pow<->x*x*x,
-          sqrt<->1/sqrt+mul, double<->float casts, reordering of accumulation,
-          and precomputing "equivalent" normalization constants (e.g. folding
-          1/(sigma*sqrt(2*pi)) out of TMath::Gaus) — these look structural but
-          change the reduction order and drift past 1e-13. SAFE in the FCN path
-          are changes that alter only fetch/layout, not what is computed: hoisting
-          loop-invariant work, caching repeated values, SoA data layout, index
-          partitioning, precomputing loop-invariant magnitudes.
+          The production likelihood matches the v1.0.7-rev1 golden pack within
+          1e-13 relative drift.
       - key: CONSISTENCY
         description: >
-          Reconstructed physics (vertex/energy/t0/peSum) within 4mm/7keV/10ps/0.1PE
-          of v1.0.7-rev1. Allows float op changes as long as physics output stays
-          within range. The reconstruction code lives in OMILRECV2/src/omilrec_reconstruction.cc.
+          Reconstructed vertex, energy, t0, and peSum stay within
+          4 mm, 7 keV, 10 ps, and 0.1 PE of v1.0.7-rev1.
       - key: EVAL_RESULT
         description: >
           Eval script completed (fails on build/timeout/crash).

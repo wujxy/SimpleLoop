@@ -17,7 +17,7 @@ Minimal schema:
   eval.commands: [str]                (required non-empty; harness-run after each commit)
   eval.metrics: {objective, gates}    (required; the key=value lines the harness parses)
   eval.timeout_seconds: int           (optional, default 600; per eval command budget)
-  eval.output_cap_chars: int          (optional, default 16000; per-command output kept for the judger)
+  eval.output_cap_chars: int          (optional, default 16000; retained output per command)
   eval.history_cap_chars: int         (optional, default 6000; eval text kept per round in history.jsonl)
   execution.backend: local|hepjob     (optional, default local; candidate execution backend)
   execution.hepjob.schedd_name: str   (required for hepjob; condor schedd, e.g. scheduler@host)
@@ -190,7 +190,7 @@ def _resolve(
         raise ConfigError("eval.history_cap_chars: must be an integer >= 500")
 
     # eval.metrics declares the key=value lines the harness parses (objective +
-    # gates); required so best selection never degrades to the judger's score.
+    # gates); required so best selection always has an objective measurement.
     if "metrics" not in eval_block:
         raise ConfigError(
             "eval.metrics: required — declare the objective (and gates) the "

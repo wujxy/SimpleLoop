@@ -2,7 +2,7 @@
 """Benchmark: measure median ms/call for count_pairs on a fixed input.
 
 Writes benchmarks/speed.csv with the measured ms_per_call. This is the speed
-metric the judger can read from eval output. Correctness is NOT checked here —
+metric the harness parses from eval output. Correctness is NOT checked here —
 that's check_drift.py's job.
 """
 from __future__ import annotations

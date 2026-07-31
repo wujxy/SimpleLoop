@@ -322,7 +322,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             reason = ("candidate rejected by hard gates"
                       if static_proposals is not None
                       else "no eligible candidate improved the incumbent")
-            print(f"[{stamp()}] {reason}; accepted base stays {parent_sha[:10]}",
+            print(f"[{stamp()}] {reason}; parent stays {parent_sha[:10]}",
                   flush=True)
         ctx.store.append_generation(
             round_id, parent_sha=parent_sha,
@@ -419,8 +419,8 @@ def _starting_state(ctx: RunContext, continue_run: bool,
               f"the config to add more rounds.", flush=True)
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         return None
-    parent_sha, last_accepted = _resume_chain(done, baseline_sha)
-    prior_metrics = (last_accepted or {}).get("metrics") or {}
+    parent_sha, last_selected = _resume_chain(done, baseline_sha)
+    prior_metrics = (last_selected or {}).get("metrics") or {}
     print(f"[{stamp()}] --continue: resuming from round {start_round + 1} "
           f"(parent_sha={parent_sha[:10]}, {start_round} round(s) already done)",
           flush=True)
@@ -428,7 +428,7 @@ def _starting_state(ctx: RunContext, continue_run: bool,
     _, baseline_metrics = ctx.execution_backend.eval_baseline(
         baseline_sha=baseline_sha)
     ctx.baseline_metrics = baseline_metrics
-    if last_accepted is None:
+    if last_selected is None:
         prior_metrics = baseline_metrics
     return start_round, parent_sha, prior_metrics
 
@@ -636,7 +636,7 @@ def _select_winner(candidates: list[dict],
 
 def _resume_chain(history: list[dict],
                   baseline_sha: str) -> tuple[str, dict | None]:
-    """Return the last accepted SHA and its record, skipping rejected tails."""
+    """Return the last selected SHA and record, skipping unselected tails."""
     for record in reversed(history):
         selected_sha = record.get("selected_sha")
         if selected_sha:

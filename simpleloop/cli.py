@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> None:
              "are skipped; the loop runs from the next round up to loop.max_rounds "
              "(which becomes the TARGET TOTAL round count -- bump it in the config "
              "before continuing). The commit chain resumes from the last recorded "
-             "round's sha. Baseline eval is re-run for the judger's vs-baseline axis.",
+             "round's sha. Baseline evaluation is re-run for comparison.",
     )
 
     validate = sub.add_parser("validate", help="Validate a config without running.")
@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> None:
 
     plot_parser = sub.add_parser(
         "plot",
-        help="Redraw a run's 3x3 overview image offline. For the nine "
+            help="Redraw a run's 2x3 overview image offline. For the six "
              "single-panel detail images use scripts/plot_details.py.",
     )
     plot_parser.add_argument(
@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> None:
     export_parser.add_argument(
         "--what", choices=("best", "head"), default="best",
         help="best = the harness-selected best candidate (default); "
-             "head = the end of the cumulative accepted chain.",
+                 "head = the end of the cumulative selected chain.",
     )
     export_parser.add_argument(
         "--to-branch",

@@ -1,14 +1,4 @@
-"""Unit-level assertions for the role-boundary + landing-state refactor.
-
-These do NOT spawn the claude agent — they test the pure pieces:
-  - views.for_proposer projects sha/metrics/changed_paths (landing-state signals)
-    while still excluding eval_block
-  - judger._parse handles the four-field contract + the missing-report fallback
-    (LANDED_STATE prefix is a feedback-string convention, not a parsed field)
-  - Store.append persists both feedback fields + changed_paths
-
-Run: python -m pytest tests/   (from SimpleLoop/)
-"""
+"""Unit tests for factual Researcher views, history, and configuration."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -19,30 +9,8 @@ import yaml
 
 from simpleloop import config as config_mod
 from simpleloop.harness import views
-from simpleloop.roles.agent import normalize_free_text
-from simpleloop.roles.judger import Judgment, _parse, _build_prompt, _judger_schema, judge
 from simpleloop.harness import store as store_mod
 from simpleloop.harness.store import Store
-
-def test_normalize_free_text_accepts_limit_without_warning(capsys):
-    value = "x" * 1100
-
-    assert normalize_free_text(
-        value, limit=1100, label="proposer", field="reflection"
-    ) == value
-    assert capsys.readouterr().out == ""
-
-
-def test_normalize_free_text_warns_and_truncates_after_strip(capsys):
-    value = "  " + ("x" * 1101) + "  "
-
-    assert normalize_free_text(
-        value, limit=1100, label="proposer", field="reflection"
-    ) == "x" * 1100
-    assert capsys.readouterr().out == (
-        "[proposer] warning: reflection length 1101 exceeds 1100; "
-        "truncated to 1100\n"
-    )
 
 
 # --- views.for_proposer: projects landing-state signals to the proposer ---
@@ -106,21 +74,19 @@ def _serial_history_record(round_id: int, proposal: str) -> dict:
         "selected_candidate": 0,
         "selected_sha": f"sha-{round_id}",
         "base_sha": f"sha-{round_id}",
-        "reflection": "reflection",
         "candidates": [
             {
                 "candidate": 0,
-                "family": "single",
                 "proposal": proposal,
+                "parent_sha": f"parent-{round_id}",
                 "sha": f"sha-{round_id}",
+                "status": "COMPLETED",
                 "selected": True,
-                "accepted": True,
-                "score": 0.5,
-                "risk": "low",
+                "gate_passed": True,
+                "eligible": True,
+                "gates": {"CORRECTNESS": {"passed": True, "detail": ""}},
                 "metrics": {"SPEED_MS": 500.0 + round_id},
                 "changed_paths": ["src/a.cc"],
-                "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{round_id}\nResult: y{round_id}\nAnalysis: z{round_id}",
-                "feedback_for_proposer": f"short lesson {round_id}",
                 "eval_block": "raw output",
             }
         ],
@@ -134,21 +100,19 @@ def _parallel_history_record(round_id: int, proposals: list[str]) -> dict:
         "selected_candidate": 1,
         "selected_sha": f"candidate-{round_id}-1",
         "base_sha": f"candidate-{round_id}-1",
-        "reflection": "reflection",
         "candidates": [
             {
                 "candidate": candidate_id,
-                "family": f"family-{candidate_id}",
                 "proposal": proposal,
+                "parent_sha": f"parent-{round_id}",
                 "sha": f"candidate-{round_id}-{candidate_id}",
+                "status": "COMPLETED",
                 "selected": candidate_id == 1,
-                "accepted": True,
-                "score": 0.4 + candidate_id / 10,
-                "risk": "low",
+                "gate_passed": True,
+                "eligible": True,
+                "gates": {"CORRECTNESS": {"passed": True, "detail": ""}},
                 "metrics": {"SPEED_MS": 600.0 - candidate_id},
                 "changed_paths": [f"src/c{candidate_id}.cc"],
-                "feedback": f"LANDED_STATE: not-implemented\nImplemented: x{candidate_id}\nResult: y{candidate_id}\nAnalysis: z{candidate_id}",
-                "feedback_for_proposer": f"short candidate lesson {candidate_id}",
                 "eval_block": "raw output",
             }
             for candidate_id, proposal in enumerate(proposals)
@@ -213,191 +177,7 @@ def test_for_proposer_drops_old_generation_and_keeps_recent_candidates():
     assert all("eval_block" not in c for c in recent_candidates)
 
 
-# --- judger._parse: four-field contract + fallback (risk now required) ---
-
-def test_parse_preserves_feedback_for_proposer():
-    jd = _parse({
-        "score": 0.5,
-        "risk": "low",
-        "feedback": "LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z",
-        "feedback_for_proposer": "The mechanism remains inconclusive.",
-    })
-    assert jd.feedback_for_proposer == "The mechanism remains inconclusive."
-
-
-@pytest.mark.parametrize("value", [None, "", "   ", 7])
-def test_parse_rejects_invalid_feedback_for_proposer(value):
-    with pytest.raises(ValueError):
-        _parse({
-            "score": 0.5,
-            "risk": "low",
-            "feedback": "full",
-            "feedback_for_proposer": value,
-        })
-
-
-def test_judger_schema_requires_feedback_for_proposer():
-    schema = _judger_schema()
-    assert schema["required"] == [
-        "score", "risk", "feedback", "feedback_for_proposer",
-    ]
-    assert schema["properties"]["feedback_for_proposer"]["pattern"] == r"\S"
-
-
-def test_parse_four_field_contract():
-    jd = _parse({"score": 0.83, "risk": "low",
-                 "feedback": "LANDED_STATE: not-implemented\nImplemented: precompute sqrt\nResult: 843ms vs 945ms -11%\nAnalysis: cache locality improvement",
-                 "feedback_for_proposer": "Precomputation remains promising."})
-    assert isinstance(jd, Judgment)
-    assert jd.score == 0.83
-    assert jd.risk == "low"
-    assert "LANDED_STATE" in jd.feedback
-
-
-def test_parse_rejects_missing_risk():
-    """risk is required for best selection (high-risk rounds never ship).
-    Older judger output without risk must fail loudly, not silently default."""
-    with pytest.raises(ValueError):
-        _parse({"score": 0.5, "feedback": "short",
-                "feedback_for_proposer": "short lesson"})
-
-
-def test_parse_rejects_bad_risk():
-    with pytest.raises(ValueError):
-        _parse({"score": 0.5, "risk": "maybe", "feedback": "x",
-                "feedback_for_proposer": "short lesson"})
-    with pytest.raises(ValueError):
-        _parse({"score": 0.5, "risk": "", "feedback": "x",
-                "feedback_for_proposer": "short lesson"})
-
-
-def test_parse_rejects_bad_score():
-    with pytest.raises(ValueError):
-        _parse({"score": 1.5, "risk": "low", "feedback": "x",
-                "feedback_for_proposer": "short lesson"})
-    with pytest.raises(ValueError):
-        _parse({"score": "nan", "risk": "low", "feedback": "x",
-                "feedback_for_proposer": "short lesson"})
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        {"score": 0.5, "risk": "low", "feedback": "x",
-         "feedback_for_proposer": "short lesson", "extra": 1},
-        {"score": "0.5", "risk": "low", "feedback": "x",
-         "feedback_for_proposer": "short lesson"},
-        {"score": True, "risk": "low", "feedback": "x",
-         "feedback_for_proposer": "short lesson"},
-        {"score": 0.5, "risk": 1, "feedback": "x",
-         "feedback_for_proposer": "short lesson"},
-    ],
-)
-def test_parse_rejects_values_outside_exact_schema_contract(data):
-    with pytest.raises(ValueError):
-        _parse(data)
-
-
-def test_parse_rejects_empty_feedback():
-    with pytest.raises(ValueError):
-        _parse({"score": 0.5, "risk": "low", "feedback": "   ",
-                "feedback_for_proposer": "short lesson"})
-
-
-def test_judger_schema_keeps_structure_without_text_max_lengths():
-    schema = _judger_schema()
-    assert schema["additionalProperties"] is False
-    assert schema["required"] == [
-        "score", "risk", "feedback", "feedback_for_proposer",
-    ]
-    assert schema["properties"]["score"] == {
-        "type": "number", "minimum": 0.0, "maximum": 1.0,
-    }
-    assert schema["properties"]["risk"]["enum"] == ["low", "medium", "high"]
-    assert "maxLength" not in schema["properties"]["feedback"]
-    assert schema["properties"]["feedback"]["pattern"] == r"\S"
-    assert "maxLength" not in schema["properties"]["feedback_for_proposer"]
-    assert schema["properties"]["feedback_for_proposer"]["pattern"] == r"\S"
-
-
-def test_judge_passes_schema_and_custom_label(tmp_path: Path, capsys):
-    class CapturingAgent:
-        schema = None
-        label = None
-        prompt = None
-
-        def run_json(self, prompt, *, json_schema=None, label=None, **_kwargs):
-            self.prompt = prompt
-            self.schema = json_schema
-            self.label = label
-            return {"score": 0.5, "risk": "low", "feedback": "x" * 1001,
-                    "feedback_for_proposer": "short lesson"}
-
-    agent = CapturingAgent()
-    judgment = judge(
-        agent,
-        goal="g",
-        proposal="p",
-        sha=None,
-        reason="no change",
-        parent_sha="base",
-        workspace=None,
-        eval_block="",
-        cwd=tmp_path,
-        label="judger r1-c0",
-    )
-
-    assert judgment.feedback == "x" * 1000
-    assert agent.schema == _judger_schema()
-    assert "LANDED_STATE:" in agent.prompt
-    assert "LANDING_STATE:" not in agent.prompt
-    assert "`feedback_for_proposer`" in agent.prompt
-    assert agent.label == "judger r1-c0"
-    assert capsys.readouterr().out == (
-        "[judger r1-c0] warning: feedback length 1001 exceeds 1000; "
-        "truncated to 1000\n"
-    )
-
-
-def test_parse_accepts_judger_n_plus_500_without_warning(capsys):
-    judgment = _parse(
-        {
-            "score": 0.5,
-            "risk": "low",
-            "feedback": "f" * 1000,
-            "feedback_for_proposer": "p" * 800,
-        },
-        label="judger r1-c0",
-    )
-
-    assert len(judgment.feedback) == 1000
-    assert len(judgment.feedback_for_proposer) == 800
-    assert capsys.readouterr().out == ""
-
-
-def test_parse_warns_and_truncates_judger_text_with_candidate_label(capsys):
-    judgment = _parse(
-        {
-            "score": 0.5,
-            "risk": "low",
-            "feedback": "f" * 1001,
-            "feedback_for_proposer": "p" * 801,
-        },
-        label="judger r14-c2",
-    )
-
-    assert len(judgment.feedback) == 1000
-    assert len(judgment.feedback_for_proposer) == 800
-    assert capsys.readouterr().out == (
-        "[judger r14-c2] warning: feedback length 1001 exceeds 1000; "
-        "truncated to 1000\n"
-        "[judger r14-c2] warning: feedback_for_proposer length 801 exceeds 800; "
-        "truncated to 800\n"
-    )
-
-
-
-# --- Store: feedback fields remain persisted in history ---
+# --- Store: factual fields remain persisted in history ---
 
 _STORE_SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
                  "gates": [{"key": "CORRECTNESS"}]}
@@ -469,8 +249,8 @@ def test_store_persists_changed_paths(tmp_path: Path):
     store.append_generation(
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha0",
         candidates=[{
-            "candidate": 0, "proposal": "p0", "sha": "sha0", "score": 0.7,
-            "risk": "low", "accepted": True, "feedback": "f",
+            "candidate": 0, "proposal": "p0", "sha": "sha0",
+            "status": "COMPLETED", "gate_passed": True, "eligible": True,
             "changed_paths": ["a.cc", "a.h"],
         }])
     rows = store.history()
@@ -485,8 +265,8 @@ def test_store_persists_candidate_acceptance_and_resulting_base(tmp_path: Path):
     store.append_generation(
         0, parent_sha="baseline", selected_candidate=None, selected_sha=None,
         candidates=[{
-            "candidate": 0, "proposal": "p0", "sha": "candidate0", "score": 0.1,
-            "risk": "low", "accepted": False, "feedback": "correctness failed",
+            "candidate": 0, "proposal": "p0", "sha": "candidate0",
+            "status": "COMPLETED", "gate_passed": False, "eligible": False,
             "metrics": {"CORRECTNESS": False}, "changed_paths": ["a.cc"],
         }])
     row = store.history()[0]
@@ -505,26 +285,11 @@ def test_store_changed_paths_default_empty(tmp_path: Path):
     store.append_generation(
         0, parent_sha="parent", selected_candidate=None, selected_sha=None,
         candidates=[{
-            "candidate": 0, "proposal": "p0", "sha": "sha0", "score": 0.0,
-            "risk": "high", "accepted": False,
-            "feedback": "[loop failure] boom",
+            "candidate": 0, "proposal": "p0", "sha": "sha0",
+            "status": "WORKER_FAILED", "gate_passed": False, "eligible": False,
         }])
     rows = store.history()
     assert rows[0]["candidates"][0]["changed_paths"] == []
-
-
-# --- judger: LANDED_STATE prefix is a feedback convention, not a parsed field ---
-
-def test_parse_accepts_landed_state_prefixed_feedback():
-    """feedback with the LANDED_STATE: prefix (the new contract) parses the same
-    as any other feedback string — the prefix is a convention the proposer reads,
-    not a field _parse extracts."""
-    jd = _parse({"score": 0.05, "risk": "low",
-                 "feedback": "LANDED_STATE: already-implemented empty diff, 459.3ms",
-                 "feedback_for_proposer": "The mechanism was already present."})
-    assert jd.score == 0.05
-    assert jd.risk == "low"
-    assert jd.feedback == "LANDED_STATE: already-implemented empty diff, 459.3ms"
 
 
 def test_resume_chain_skips_rejected_tail_and_uses_last_accepted_metrics():

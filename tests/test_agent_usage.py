@@ -84,7 +84,7 @@ def test_usage_observer_failure_is_nonfatal(capsys):
 
     agent = Agent(runtime=RecordingRuntime(), usage_observer=fail)
 
-    agent._notify_usage({"input_tokens": 1, "output_tokens": 2}, "judger")
+    agent._notify_usage({"input_tokens": 1, "output_tokens": 2}, "researcher")
 
     assert "[telemetry] warning:" in capsys.readouterr().out
 

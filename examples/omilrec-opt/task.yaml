@@ -12,40 +12,25 @@ kind: task
 # The single eval command (scripts/sl_eval.sh) does the whole chain in one shot —
 # source JUNO env, build the lib, run the e2e bit-identical gate, run quick_bench —
 # because SimpleLoop gives each eval command a 600s budget and a fresh worktree
-# (no build artifacts). It prints CORRECTNESS=/SPEED_MS=/EVAL_RESULT= lines the
-# judger reads. Default --evtmax 10 fits the 600s budget.
-#
-# IMPORTANT: v1.0.0's correctness gate is BIT-IDENTICAL (tolerance 0, all 15
-# RecVertex fields vs reference/ref_10evt.root). This is far stricter than
-# v1.11.0's 4mm/7keV gate. Any arithmetic change inside the FCN (log->log1p,
-# pow->cube, Kahan summation, float<->double) breaks it — Minuit amplifies
-# sub-ULP differences into multi-mm vertex drift. Safe optimizations here are
-# bit-identical refactors: hoisting loop-invariant work, caching, SoA data
-# layout, precompute, index partitioning. The FCN is inlined in
-# OMILRECV2/src/OMILRECV2.cc::execute(); likelihood helpers live alongside it.
+# (no build artifacts). It prints CORRECTNESS=/SPEED_MS=/EVAL_RESULT= lines for
+# the harness. Default --evtmax 10 fits the 600s budget.
 
 task:
   goal: >
-    Optimize the speed of the OMILRECV2 reconstruction algorithm under
-    OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the e2e output
-    BIT-IDENTICAL to the frozen baseline (reference/ref_10evt.root, tolerance 0,
-    all 15 RecVertex fields). This is the UNOPTIMIZED v1.0.0 baseline (~514 ms/evt);
-    the FCN is inlined in OMILRECV2.cc::execute() and the likelihood helpers.
-    Prefer bit-identical refactors (hoisting, caching, SoA, precompute, index
-    partitioning) — any arithmetic change breaks the bit-identical gate.
-    Edit only the admitted source files.
+    Minimize reconstruction SPEED_MS while satisfying every configured gate.
+    The current implementation is the starting artifact, not a constraint on
+    the form or scale of a valid solution.
 
 safety:
   editable_paths:
-    - "OMILRECV2/src/**/*.cc"
-    - "OMILRECV2/src/**/*.h"
+    - "OMILRECV2/src/**"
+    - "OMILRECV2/CMakeLists.txt"
   frozen_paths:
     - "tests/**"
     - "scripts/**"
     - "benchmarks/**"
     - "reference/**"          # the bit-identical baseline — must never be touched
     - "CMakeLists.txt"
-    - "OMILRECV2/CMakeLists.txt"
     - "pyproject.toml"
     - "docs/**"
     - "CLAUDE.md"
@@ -69,8 +54,7 @@ eval:
   commands:
     # One self-contained command: env + build + e2e bit-identical gate + speed bench.
     # Prints CORRECTNESS=, SPEED_MS=, EVAL_RESULT= — the harness parses these into
-    # the metrics dict (the judger cites them; it must not read numbers out of the
-    # prose, which hallucinated a baseline number across 12 rounds before).
+    # the authoritative metrics dict.
     - "bash scripts/sl_eval.sh --evtmax 10"
   metrics:
     objective:
@@ -79,9 +63,8 @@ eval:
     gates:
       - key: CORRECTNESS
         description: >
-          10-event reconstructed output bit-identical (tolerance 0, all 15
-          RecVertex fields) to reference/ref_10evt.root — the strict v1.0.0 gate.
-          Any arithmetic change in the FCN shifts the result and fails it.
+          All 15 reconstructed fields for 10 events are bit-identical to
+          reference/ref_10evt.root (tolerance 0).
       - key: EVAL_RESULT
         description: >
           The eval script ran to completion and produced all metrics. Fails on build

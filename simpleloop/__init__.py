@@ -1,6 +1,4 @@
-"""SimpleLoop: a minimal serial LLM optimization loop.
+"""SimpleLoop: an open Researcher driving Executor experiments.
 
-proposer -> executor -> judger, one of each per round, no batch, no parallel,
-no early stop. The orchestrator does only scheduling; the three roles do the
-thinking and the harness does the deterministic work (commit, eval, diff).
+The harness owns commits, evaluation, gates, selection, and factual history.
 """

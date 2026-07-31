@@ -28,7 +28,7 @@ runtime:
   image: apptainer.sif
   binds: []
 
-# The harness runs these after each commit and feeds the stdout to the judger.
+# The harness runs these after each commit and parses their stdout.
 # correctness + drift are hard gates (must pass); bench is the speed signal.
 eval:
   commands:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -9,17 +8,13 @@ import yaml
 from simpleloop import candidate_worker as worker_mod
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
-from simpleloop.harness import memory as memory_mod
 from simpleloop.harness import views
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.roles.executor import ExecResult
 from simpleloop.harness.evals import EvalResult
-from simpleloop.roles.judger import Judgment, _parse as parse_judgment
 from simpleloop.loop import RunContext, _run_candidates, _select_winner
 from simpleloop.roles.proposer import ProposalBatch
-from simpleloop.roles.proposer import _parse_batch
 from simpleloop.roles.proposer import _proposer_schema
-from simpleloop.roles.proposer import propose
 from simpleloop.harness.store import Store
 
 
@@ -104,40 +99,43 @@ def test_omilrec_v100_postv107_gated_example_uses_new_package_only():
     assert "/omilrec-v100/scripts/" not in "\n".join(cfg["eval"]["commands"])
 
 
+@pytest.mark.parametrize("relative_path", [
+    "omilrec-opt/task.yaml",
+    "omilrec-v100-opt/task.yaml",
+    "omilrec-post-v107-opt/task.yaml",
+])
+def test_default_omilrec_tasks_define_outcomes_not_research_methods(
+    relative_path: str,
+):
+    raw = _example_yaml(relative_path)
+    goal = raw["task"]["goal"].lower()
+
+    assert "speed_ms" in goal
+    assert "every configured gate" in goal
+    for prescribed in (
+        "hoisting", "caching", "soa", "safe", "forbidden",
+        "second likelihood",
+    ):
+        assert prescribed not in goal
+    assert "OMILRECV2/src/**" in raw["safety"]["editable_paths"]
+    assert "OMILRECV2/CMakeLists.txt" in raw["safety"]["editable_paths"]
+    assert "OMILRECV2/CMakeLists.txt" not in raw["safety"]["frozen_paths"]
+
+
+def test_runtime_architecture_has_no_judger_module_or_packaged_prompt():
+    root = EXAMPLES.parent
+
+    assert not (root / "simpleloop/roles/judger.py").exists()
+    assert not (root / "simpleloop/prompts/judger.md").exists()
+    for path in (root / "simpleloop").rglob("*.py"):
+        assert "roles.judger" not in path.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("field", ["candidates_per_round", "max_workers"])
 @pytest.mark.parametrize("value", [0, -1, "2"])
 def test_config_parallel_rejects_invalid_values(tmp_path: Path, field: str, value):
     with pytest.raises(config_mod.ConfigError):
         config_mod.load(_write_config(tmp_path, {field: value}))
-
-
-def obsolete_proposer_schema_keeps_structure_without_text_max_lengths():
-    schema = _proposer_schema(3)
-    proposals = schema["properties"]["proposals"]
-    assert proposals["minItems"] == proposals["maxItems"] == 3
-    assert schema["required"] == [
-        "reflection", "insight", "insight_refs", "proposals",
-    ]
-    assert schema["additionalProperties"] is False
-    assert "maxLength" not in schema["properties"]["reflection"]
-    assert "maxLength" not in schema["properties"]["insight"]
-    assert "maxLength" not in schema["properties"]["insight_refs"]["items"]
-    assert schema["properties"]["reflection"]["type"] == "string"
-    assert schema["properties"]["insight"]["type"] == "string"
-    assert schema["properties"]["insight_refs"]["items"]["type"] == "string"
-    proposal_items = proposals["items"]
-    assert proposal_items["additionalProperties"] is False
-    assert proposal_items["required"] == ["family", "decision", "proposal"]
-    item_properties = proposals["items"]["properties"]
-    assert "maxLength" not in item_properties["family"]
-    assert "maxLength" not in item_properties["proposal"]
-    assert item_properties["family"]["type"] == "string"
-    assert item_properties["family"]["minLength"] == 1
-    assert item_properties["proposal"]["type"] == "string"
-    assert item_properties["proposal"]["minLength"] == 1
-    assert item_properties["proposal"]["pattern"] == r"\S"
-    assert item_properties["family"]["pattern"] == r"\S"
-    assert item_properties["decision"]["enum"] == ["continue", "switch"]
 
 
 def test_proposer_schema_uses_batch_shape_when_k_is_one():
@@ -147,264 +145,21 @@ def test_proposer_schema_uses_batch_shape_when_k_is_one():
     assert proposals["maxItems"] == 1
 
 
-def obsolete_parse_batch_rejects_legacy_single_when_k_is_one():
-    with pytest.raises(ValueError, match="only reflection, insight, insight_refs, and proposals"):
-        _parse_batch(
-            {"reflection": "r", "decision": "continue", "proposal": "do one thing"},
-            candidates_per_round=1,
-        )
-
-
-def obsolete_parse_batch_accepts_new_shape():
-    batch = _parse_batch(
-        {
-            "reflection": "r",
-            "insight": "Sparse gathers benefit from packing.",
-            "insight_refs": ["r0c0", "r1c1"],
-            "proposals": [
-                {"family": "layout", "decision": "switch", "proposal": "p0"},
-                {"family": "hoist", "decision": "continue", "proposal": "p1"},
-            ],
-        },
-        candidates_per_round=2,
-    )
-    assert [p.family for p in batch.proposals] == ["layout", "hoist"]
-    assert [p.proposal for p in batch.proposals] == ["p0", "p1"]
-    assert batch.insight == "Sparse gathers benefit from packing."
-    assert batch.insight_refs == ["r0c0", "r1c1"]
-
-
-def obsolete_parse_batch_accepts_n_plus_500_without_warning(capsys):
-    batch = _parse_batch(
-        {
-            "reflection": "r" * 1100,
-            "insight": "i" * 1000,
-            "insight_refs": ["x" * 532],
-            "proposals": [
-                {
-                    "family": "f" * 564,
-                    "decision": "switch",
-                    "proposal": "p" * 1300,
-                },
-            ],
-        },
-        candidates_per_round=1,
-    )
-
-    assert len(batch.reflection) == 1100
-    assert len(batch.insight) == 1000
-    assert len(batch.insight_refs[0]) == 532
-    assert len(batch.proposals[0].family) == 564
-    assert len(batch.proposals[0].proposal) == 1300
-    assert capsys.readouterr().out == ""
-
-
-def obsolete_parse_batch_warns_and_truncates_every_free_text_field(capsys):
-    batch = _parse_batch(
-        {
-            "reflection": "r" * 1131,
-            "insight": "i" * 1001,
-            "insight_refs": ["x" * 533],
-            "proposals": [
-                {
-                    "family": "f" * 565,
-                    "decision": "continue",
-                    "proposal": "p" * 1301,
-                },
-            ],
-        },
-        candidates_per_round=1,
-    )
-
-    assert len(batch.reflection) == 1100
-    assert len(batch.insight) == 1000
-    assert len(batch.insight_refs[0]) == 532
-    assert len(batch.proposals[0].family) == 564
-    assert len(batch.proposals[0].proposal) == 1300
-    output = capsys.readouterr().out
-    assert "reflection length 1131 exceeds 1100" in output
-    assert "insight length 1001 exceeds 1000" in output
-    assert "insight_refs[0] length 533 exceeds 532" in output
-    assert "proposals[0].family length 565 exceeds 564" in output
-    assert "proposals[0].proposal length 1301 exceeds 1300" in output
-
-
-def obsolete_parse_batch_rejects_families_equal_after_truncation():
-    prefix = "x" * 564
-    with pytest.raises(ValueError, match="duplicate family"):
-        _parse_batch(
-            {
-                "reflection": "r",
-                "insight": "",
-                "insight_refs": [],
-                "proposals": [
-                    {
-                        "family": prefix + "a",
-                        "decision": "switch",
-                        "proposal": "p0",
-                    },
-                    {
-                        "family": prefix + "b",
-                        "decision": "continue",
-                        "proposal": "p1",
-                    },
-                ],
-            },
-            candidates_per_round=2,
-        )
-
-
-def obsolete_parse_batch_rejects_legacy_when_k_is_greater_than_one():
-    with pytest.raises(ValueError, match="only reflection, insight, insight_refs, and proposals"):
-        _parse_batch(
-            {"reflection": "r", "decision": "continue", "proposal": "only one"},
-            candidates_per_round=3,
-        )
-
-
-def obsolete_parse_batch_rejects_empty_batch():
-    with pytest.raises(ValueError, match="expected exactly 3"):
-        _parse_batch({"reflection": "r", "insight": "", "insight_refs": [], "proposals": []}, candidates_per_round=3)
-
-
-@pytest.mark.parametrize("count", [1, 2, 4])
-def obsolete_parse_batch_rejects_wrong_candidate_count(count: int):
-    data = {
-        "reflection": "r",
-        "insight": "",
-        "insight_refs": [],
-        "proposals": [
-            {"family": f"family_{i}", "decision": "switch", "proposal": f"p{i}"}
-            for i in range(count)
-        ],
-    }
-    with pytest.raises(ValueError, match="expected exactly 3"):
-        _parse_batch(data, candidates_per_round=3)
-
-
-def obsolete_parse_batch_rejects_duplicate_families():
-    with pytest.raises(ValueError, match="duplicate family"):
-        _parse_batch(
-            {
-                "reflection": "r",
-                "insight": "",
-                "insight_refs": [],
-                "proposals": [
-                    {"family": "Layout", "decision": "switch", "proposal": "p0"},
-                    {"family": " layout ", "decision": "continue", "proposal": "p1"},
-                ],
-            },
-            candidates_per_round=2,
-        )
-
-
-def obsolete_parse_batch_rejects_invalid_decision():
-    with pytest.raises(ValueError, match="decision must be continue or switch"):
-        _parse_batch(
-            {
-                "reflection": "r",
-                "insight": "",
-                "insight_refs": [],
-                "proposals": [
-                    {"family": "layout", "decision": "maybe", "proposal": "p0"},
-                ],
-            },
-            candidates_per_round=1,
-        )
-
-
-@pytest.mark.parametrize(
-    "proposal",
-    [
-        {"family": "", "decision": "switch", "proposal": "p"},
-        {"family": "   ", "decision": "switch", "proposal": "p"},
-        {"family": 7, "decision": "switch", "proposal": "p"},
-        {"family": "f", "decision": "switch", "proposal": ""},
-        {"family": "f", "decision": "switch", "proposal": "   "},
-        {"family": "f", "decision": "switch", "proposal": 7},
-        {"family": "f", "decision": "switch", "proposal": "p", "extra": True},
-        {"family": "f", "decision": "switch"},
-    ],
-)
-def obsolete_parse_batch_rejects_invalid_nested_contract(proposal):
-    with pytest.raises(ValueError):
-        _parse_batch(
-            {
-                "reflection": "r",
-                "insight": "",
-                "insight_refs": [],
-                "proposals": [proposal],
-            },
-            candidates_per_round=1,
-        )
-
-
-def obsolete_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
-    class CapturingAgent:
-        prompt = ""
-        schema = None
-
-        def run_json(self, prompt, json_schema=None, **_kwargs):
-            self.prompt = prompt
-            self.schema = json_schema
-            return {
-                "reflection": "r" * 900,
-                "insight": "",
-                "insight_refs": [],
-                "proposals": [
-                    {"family": "a" * 364, "decision": "switch", "proposal": "p" * 1100},
-                    {"family": "b" * 364, "decision": "switch", "proposal": "q" * 1100},
-                    {"family": "c" * 364, "decision": "switch", "proposal": "s" * 1100},
-                ],
-            }
-
-    agent = CapturingAgent()
-    batch = propose(
-        agent,
-        goal="make it faster",
-        editable=["src/**"],
-        frozen=["tests/**"],
-        history=[],
-        insights=[{
-            "id": "I4",
-            "text": "Hoisting behind cold gates measured as noise.",
-            "refs": ["r0c0", "r3c0"],
-        }],
-        base_sha="base-sha",
-        cwd=tmp_path,
-        candidates_per_round=3,
-    )
-
-    assert agent.schema == _proposer_schema(3)
-    assert len(batch.reflection) == 900
-    assert [len(item.family) for item in batch.proposals] == [364, 364, 364]
-    assert [len(item.proposal) for item in batch.proposals] == [1100, 1100, 1100]
-    prompt = " ".join(agent.prompt.split())
-    assert "Accumulated search insights:" in prompt
-    assert "[I4] Hoisting behind cold gates measured as noise." in prompt
-    assert "Evidence: r0c0, r3c0" in prompt
-    assert "simpleloop memory show <ref>" in prompt
-    assert "You are the PROPOSER" in prompt
-    assert "one connected process" in prompt
-    assert "Runtime context:" in prompt
-    assert "Source access is read-only" in prompt
-    assert "Fixed delivery protocol:" in prompt
-    assert "Do not retry" not in prompt
-
-
-def test_selector_uses_objective_and_filters_gates_and_risk():
+def test_selector_uses_objective_and_filters_ineligible_candidates():
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
         "gates": [{"key": "CORRECTNESS"}, {"key": "EVAL_RESULT"}],
     }
     candidates = [
-        {"candidate": 0, "sha": "slow", "risk": "low", "score": 0.9,
+        {"candidate": 0, "sha": "slow", "gate_passed": True, "eligible": True,
          "metrics": {"SPEED_MS": 700.0, "CORRECTNESS": True, "EVAL_RESULT": True}},
-        {"candidate": 1, "sha": "fast-risky", "risk": "high", "score": 1.0,
+        {"candidate": 1, "sha": "fast-but-rejected", "gate_passed": False,
+         "eligible": False,
          "metrics": {"SPEED_MS": 100.0, "CORRECTNESS": True, "EVAL_RESULT": True}},
-        {"candidate": 2, "sha": "fast-fail", "risk": "low", "score": 0.8,
+        {"candidate": 2, "sha": "fast-fail", "gate_passed": False,
+         "eligible": False,
          "metrics": {"SPEED_MS": 90.0, "CORRECTNESS": False, "EVAL_RESULT": True}},
-        {"candidate": 3, "sha": "winner", "risk": "medium", "score": 0.3,
+        {"candidate": 3, "sha": "winner", "gate_passed": True, "eligible": True,
          "metrics": {"SPEED_MS": 650.0, "CORRECTNESS": True, "EVAL_RESULT": True}},
     ]
     assert _select_winner(candidates, schema)["sha"] == "winner"
@@ -417,10 +172,8 @@ def test_selector_uses_only_eligibility_objective_and_candidate_order():
     }
     candidates = [
         {"candidate": 1, "sha": "b", "gate_passed": True, "eligible": True,
-         "score": 1.0,
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True}},
         {"candidate": 0, "sha": "a", "gate_passed": True, "eligible": True,
-         "score": 0.1,
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True}},
         {"candidate": 2, "sha": "faster-but-rejected",
          "gate_passed": False, "eligible": False,
@@ -449,8 +202,8 @@ def test_selector_keeps_incumbent_when_no_candidate_improves_objective(
         {
             "candidate": i,
             "sha": f"candidate-{i}",
-            "risk": "low",
-            "score": 1.0,
+            "gate_passed": True,
+            "eligible": True,
             "metrics": {"OBJECTIVE": value, "CORRECTNESS": True},
         }
         for i, value in enumerate(candidate_values)
@@ -484,8 +237,8 @@ def test_selector_advances_only_when_best_candidate_improves_objective(
         {
             "candidate": i,
             "sha": f"candidate-{i}",
-            "risk": "low",
-            "score": 0.5,
+            "gate_passed": True,
+            "eligible": True,
             "metrics": {"OBJECTIVE": value, "CORRECTNESS": True},
         }
         for i, value in enumerate(candidate_values)
@@ -507,9 +260,9 @@ def test_selector_uses_best_candidate_when_prior_objective_is_missing():
         "gates": [{"key": "CORRECTNESS"}],
     }
     candidates = [
-        {"candidate": 0, "sha": "slow", "risk": "low", "score": 0.5,
+        {"candidate": 0, "sha": "slow", "gate_passed": True, "eligible": True,
          "metrics": {"OBJECTIVE": 20.0, "CORRECTNESS": True}},
-        {"candidate": 1, "sha": "fast", "risk": "low", "score": 0.5,
+        {"candidate": 1, "sha": "fast", "gate_passed": True, "eligible": True,
          "metrics": {"OBJECTIVE": 10.0, "CORRECTNESS": True}},
     ]
 
@@ -547,61 +300,16 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     assert "feedback" not in projected[0]["candidates"][0]
 
 
-def obsolete_proposer_prompt_uses_only_feedback_for_proposer(tmp_path: Path):
-    class CapturingAgent:
-        prompt = ""
-
-        def run_json(self, prompt, **_kwargs):
-            self.prompt = prompt
-            return {
-                "reflection": "r",
-                "insight": "",
-                "insight_refs": [],
-                "proposals": [
-                    {"family": "layout", "decision": "switch", "proposal": "p"},
-                ],
-            }
-
-    agent = CapturingAgent()
-    propose(
-        agent,
-        goal="g",
-        editable=["src/**"],
-        frozen=[],
-        history=[{
-            "round": 0,
-            "selected_candidate": 0,
-            "selected_sha": "old-sha",
-            "candidates": [{
-                "candidate": 0,
-                "proposal": "old proposal",
-                "sha": "old-sha",
-                "selected": True,
-                "score": 0.5,
-                "feedback": "FULL_TECHNICAL_SENTINEL",
-                "feedback_for_proposer": "SHORT_SEARCH_SENTINEL",
-            }],
-        }],
-        insights=[],
-        base_sha="base",
-        cwd=tmp_path,
-    )
-
-    assert "SHORT_SEARCH_SENTINEL" in agent.prompt
-    assert "FULL_TECHNICAL_SENTINEL" not in agent.prompt
-    assert "feedback_for_proposer=" in agent.prompt
-
-
 def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Path):
     store = Store(tmp_path, metrics_schema={
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
         "gates": [{"key": "CORRECTNESS"}],
     })
     winner = {
-        "candidate": 0, "family": "winner", "proposal": "p0", "sha": "best",
-        "score": 0.8, "risk": "low", "feedback": "improved",
+        "candidate": 0, "proposal": "p0", "sha": "best",
+        "status": "COMPLETED", "gate_passed": True, "eligible": True,
         "metrics": {"SPEED_MS": 100.0, "CORRECTNESS": True},
-        "accepted": True, "selected": True,
+        "selected": True,
     }
     store.append_generation(
         0,
@@ -611,10 +319,10 @@ def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Pat
         candidates=[winner],
     )
     regressed = {
-        "candidate": 0, "family": "regressed", "proposal": "p1", "sha": "slower",
-        "score": 0.2, "risk": "low", "feedback": "regressed",
+        "candidate": 0, "proposal": "p1", "sha": "slower",
+        "status": "COMPLETED", "gate_passed": True, "eligible": True,
         "metrics": {"SPEED_MS": 120.0, "CORRECTNESS": True},
-        "accepted": True, "selected": False,
+        "selected": False,
     }
     store.append_generation(
         1,
@@ -780,10 +488,9 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
             json_schema={"type": "object"},
         )
 
-def _run_insight_integration(
-    monkeypatch, tmp_path, *, insight, refs, existing_insights=None,
-    corrupt_insights=False, proposer_calls=None, prompt_dir=None,
-    max_rounds=2, target_rounds=None,
+def _run_loop_integration(
+    monkeypatch, tmp_path, *, prompt_dir=None, max_rounds=2,
+    target_rounds=None,
 ):
     run_dir = tmp_path / "run"
     seed = Store(run_dir, metrics_schema=_SCHEMA)
@@ -863,8 +570,6 @@ def _run_insight_integration(
     executed = []
 
     def fake_propose(*_args, **kwargs):
-        if proposer_calls is not None:
-            proposer_calls.append(True)
         assert "insights" not in kwargs
         assert [row["round"] for row in kwargs["history"]] == [0]
         assert kwargs["prompt_dir"] == prompt_dir
@@ -902,31 +607,12 @@ def _run_insight_integration(
     return run_dir, executed
 
 
-def obsolete_run_persists_valid_insight_after_generation(monkeypatch, tmp_path):
-    run_dir, executed = _run_insight_integration(
-        monkeypatch,
-        tmp_path,
-        insight="Sparse gathers benefit from packing.",
-        refs=["r0c0"],
-    )
-
-    assert executed == [True]
-    assert json.loads((run_dir / "insights.jsonl").read_text()) == {
-        "id": "I1",
-        "text": "Sparse gathers benefit from packing.",
-        "refs": ["r0c0"],
-    }
-    assert [row["round"] for row in Store(run_dir, metrics_schema=_SCHEMA).history()] == [0, 1]
-
-
 def test_run_injects_active_prompt_directory_into_proposer(
     monkeypatch, tmp_path,
 ):
-    _run_insight_integration(
+    _run_loop_integration(
         monkeypatch,
         tmp_path,
-        insight="",
-        refs=[],
         prompt_dir=tmp_path / "active-prompts",
     )
 
@@ -934,11 +620,9 @@ def test_run_injects_active_prompt_directory_into_proposer(
 def test_segment_progress_reports_global_total_and_next_optimizer(
     monkeypatch, tmp_path, capsys,
 ):
-    _run_insight_integration(
+    _run_loop_integration(
         monkeypatch,
         tmp_path,
-        insight="",
-        refs=[],
         max_rounds=6,
         target_rounds=2,
     )
@@ -946,74 +630,6 @@ def test_segment_progress_reports_global_total_and_next_optimizer(
     output = capsys.readouterr().out
     assert "=== current round 2/6 ===" in output
     assert "Next optimizer will be started after round 2" in output
-
-
-def obsolete_run_skips_invalid_insight_without_skipping_generation(
-    monkeypatch, tmp_path, capsys
-):
-    run_dir, executed = _run_insight_integration(
-        monkeypatch,
-        tmp_path,
-        insight="Unsupported lesson.",
-        refs=["r99c0"],
-    )
-
-    assert executed == [True]
-    assert not (run_dir / "insights.jsonl").exists()
-    assert [row["round"] for row in Store(run_dir, metrics_schema=_SCHEMA).history()] == [0, 1]
-    output = capsys.readouterr().out
-    assert "insight skipped: memory reference not found: r99c0" in output
-
-
-def obsolete_continue_loads_existing_insights(monkeypatch, tmp_path):
-    existing = [{
-        "id": "I0",
-        "text": "The seed established a reusable constraint.",
-        "refs": ["r0c0"],
-    }]
-    run_dir, executed = _run_insight_integration(
-        monkeypatch,
-        tmp_path,
-        insight="",
-        refs=[],
-        existing_insights=existing,
-    )
-
-    assert executed == [True]
-    assert memory_mod.load_insights(run_dir / "insights.jsonl") == existing
-
-
-def obsolete_existing_identical_round_insight_is_idempotent(monkeypatch, tmp_path):
-    existing = [{
-        "id": "I1",
-        "text": "Sparse gathers benefit from packing.",
-        "refs": ["r0c0"],
-    }]
-    run_dir, executed = _run_insight_integration(
-        monkeypatch,
-        tmp_path,
-        insight=existing[0]["text"],
-        refs=existing[0]["refs"],
-        existing_insights=existing,
-    )
-
-    assert executed == [True]
-    assert memory_mod.load_insights(run_dir / "insights.jsonl") == existing
-
-
-def obsolete_corrupt_insights_abort_before_proposer(monkeypatch, tmp_path):
-    proposer_calls = []
-    with pytest.raises(ValueError, match="could not read insight memory"):
-        _run_insight_integration(
-            monkeypatch,
-            tmp_path,
-            insight="",
-            refs=[],
-            corrupt_insights=True,
-            proposer_calls=proposer_calls,
-        )
-
-    assert proposer_calls == []
 
 
 def test_run_aborts_before_executor_when_proposer_contract_fails(

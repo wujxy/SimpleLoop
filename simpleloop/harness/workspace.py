@@ -106,7 +106,7 @@ class Workspace:
         return self._git(wt, "rev-parse", "HEAD")
 
     def diff(self, parent_sha: str, sha: str) -> str:
-        """Unified diff between two commits (the judger's core evidence)."""
+        """Return the unified diff between two commits."""
         return self._git(self.repo, "diff", f"{parent_sha}..{sha}")
 
     # ---- git helper ----

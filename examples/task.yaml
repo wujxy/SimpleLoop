@@ -57,8 +57,7 @@ eval:
   commands:
     - "python -m pytest -q tests/"
   metrics:
-    # metrics (required): the harness owns these numbers — a judger asked to
-    # read numbers out of prose is known to hallucinate them.
+    # metrics (required): the harness owns and parses these numbers.
     # objective: the key=value line to optimize, and its direction (not
     # guessable).
     objective:

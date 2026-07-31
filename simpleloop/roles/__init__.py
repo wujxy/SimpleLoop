@@ -1,6 +1,5 @@
-"""The three LLM roles (proposer, executor, judger) and their claude adapter.
+"""The Researcher and Executor roles, plus their Claude adapter.
 
-Roles think; they never own deterministic ground truth. Commits, eval
-execution, metric parsing, gating, and best selection live in
-simpleloop.harness.
+Agents investigate and implement; deterministic ground truth lives in the
+harness.
 """

@@ -1,6 +1,4 @@
-"""Harness-owned eval execution and metric parsing: the harness (not any LLM
-role) runs the eval commands and parses `KEY=VALUE` metrics, so the judger only
-cites authoritative numbers instead of extracting them from prose."""
+"""Harness-owned eval execution and authoritative `KEY=VALUE` parsing."""
 from __future__ import annotations
 
 import re

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from simpleloop.prompts import load_semantic
-from simpleloop.roles import executor, judger, proposer
+from simpleloop.roles import executor, proposer
 
 
 class CapturingAgent:
@@ -116,26 +116,3 @@ def test_executor_assembles_active_semantics_and_safety(tmp_path: Path):
     assert agent.prompt.startswith("ACTIVE EXECUTOR")
     assert "Direction to implement:\nreplace lookup" in agent.prompt
     assert "bench/**" in agent.prompt
-
-
-def test_judger_assembles_active_semantics_and_landed_state_protocol(tmp_path: Path):
-    prompt_dir = tmp_path / "prompts"
-    prompt_dir.mkdir()
-    (prompt_dir / "judger.md").write_text("ACTIVE JUDGER", encoding="utf-8")
-    agent = CapturingAgent({
-        "score": 0.5,
-        "risk": "low",
-        "feedback": "LANDED_STATE: already-implemented",
-        "feedback_for_proposer": "The source already contained the mechanism.",
-    })
-
-    judger.judge(
-        agent, goal="faster", proposal="replace lookup", sha=None,
-        reason="executor made no changes", parent_sha="abc",
-        workspace=EmptyWorkspace(), eval_block="", cwd=tmp_path,
-        prompt_dir=prompt_dir,
-    )
-
-    assert agent.prompt.startswith("ACTIVE JUDGER")
-    assert "LANDED_STATE:" in agent.prompt
-    assert "LANDING_STATE:" not in agent.prompt
