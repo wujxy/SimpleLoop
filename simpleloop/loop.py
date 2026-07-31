@@ -86,6 +86,7 @@ class RunContext:
     proposer_agent: Agent | None = None
     executor_agent: Agent | None = None
     judger_agent: Agent | None = None
+    prompt_dir: Path | None = None
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
     execution_backend: object | None = None
@@ -167,7 +168,8 @@ def _write_config_snapshot(cfg: dict, config_path: str | Path,
 def run(config_path: str | Path, run_dir: str | Path,
         proposals: str | Path | list[str] | None = None,
         continue_run: bool = False,
-        target_rounds: int | None = None) -> dict:
+        target_rounds: int | None = None,
+        prompt_dir: str | Path | None = None) -> dict:
     """Run the full loop. Returns a summary dict.
 
     `proposals` switches to static-proposal mode; `continue_run` resumes an
@@ -192,6 +194,7 @@ def run(config_path: str | Path, run_dir: str | Path,
         _write_config_snapshot(cfg, config_path, run_dir_path)
         return _run_locked(
             cfg, run_dir_path, proposals, continue_run, target_rounds,
+            Path(prompt_dir).resolve() if prompt_dir is not None else None,
         )
     finally:
         _release_run_lock(lock_fd)
@@ -200,8 +203,11 @@ def run(config_path: str | Path, run_dir: str | Path,
 def _run_locked(cfg: dict, run_dir_path: Path,
                 proposals: str | Path | list[str] | None,
                 continue_run: bool,
-                target_rounds: int | None = None) -> dict:
-    ctx = _build_context(cfg, run_dir_path, resume=continue_run)
+                target_rounds: int | None = None,
+                prompt_dir: Path | None = None) -> dict:
+    ctx = _build_context(
+        cfg, run_dir_path, resume=continue_run, prompt_dir=prompt_dir,
+    )
 
     static_proposals = _load_proposals(proposals)
     if static_proposals is not None and continue_run:
@@ -350,7 +356,13 @@ def _run_locked(cfg: dict, run_dir_path: Path,
     return _summary(ctx, run_dir_path)
 
 
-def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext:
+def _build_context(
+    cfg: dict,
+    run_dir_path: Path,
+    *,
+    resume: bool,
+    prompt_dir: Path | None = None,
+) -> RunContext:
     """Construct the run's fixed fixtures: runtime (with preflight), the three
     role-scoped agents (each restricted to the tools its role needs), workspace,
     store, and telemetry."""
@@ -396,7 +408,7 @@ def _build_context(cfg: dict, run_dir_path: Path, *, resume: bool) -> RunContext
         cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
         store=store, telemetry=telemetry, proposer_agent=proposer_agent,
         executor_agent=executor_agent, judger_agent=judger_agent,
-        gate_lines=gate_lines,
+        prompt_dir=prompt_dir, gate_lines=gate_lines,
     )
     ctx.execution_backend = build_backend(ctx)
     return ctx
@@ -470,7 +482,7 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
             candidates_per_round=cfg.get("candidates_per_round", 1),
             recent_rounds=cfg.get("proposer_recent_rounds", 6),
             gate_block=ctx.gate_lines,
-            prompt_dir=(cfg.get("prompt_self_improvement") or {}).get("prompt_dir"),
+            prompt_dir=ctx.prompt_dir,
         )
     except (AgentError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.
@@ -597,7 +609,8 @@ def _deps_from_ctx(ctx: RunContext) -> candidate_worker.CandidateDeps:
     return candidate_worker.CandidateDeps(
         cfg=ctx.cfg, run_dir=ctx.run_dir, runtime=ctx.runtime,
         workspace=ctx.workspace, executor_agent=ctx.executor_agent,
-        judger_agent=ctx.judger_agent, gate_lines=ctx.gate_lines,
+        judger_agent=ctx.judger_agent, prompt_dir=ctx.prompt_dir,
+        gate_lines=ctx.gate_lines,
     )
 
 
@@ -619,6 +632,7 @@ def _run_one_candidate(ctx: RunContext, candidate_id: int,
             run_dir=str(ctx.run_dir), prior_metrics=prior_metrics,
             baseline_metrics=baseline_metrics or {},
             worktree_path=str(worktree),
+            prompt_dir=str(ctx.prompt_dir or ""),
         )
         return candidate_worker.run_candidate(_deps_from_ctx(ctx), spec)
     finally:

@@ -804,7 +804,7 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
 
 def _run_insight_integration(
     monkeypatch, tmp_path, *, insight, refs, existing_insights=None,
-    corrupt_insights=False, proposer_calls=None,
+    corrupt_insights=False, proposer_calls=None, prompt_dir=None,
 ):
     run_dir = tmp_path / "run"
     seed = Store(run_dir, metrics_schema=_SCHEMA)
@@ -898,6 +898,7 @@ def _run_insight_integration(
             proposer_calls.append(True)
         assert kwargs["insights"] == (existing_insights or [])
         assert [row["round"] for row in kwargs["history"]] == [0]
+        assert kwargs["prompt_dir"] == prompt_dir
         return ProposalBatch(
             reflection="historical result narrows the useful mechanism",
             insight=insight,
@@ -932,7 +933,9 @@ def _run_insight_integration(
     monkeypatch.setattr(loop_mod, "_select_winner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loop_mod, "_refresh_progress_plot", lambda *_args: None)
 
-    loop_mod.run("config.yaml", run_dir, continue_run=True)
+    loop_mod.run(
+        "config.yaml", run_dir, continue_run=True, prompt_dir=prompt_dir,
+    )
     return run_dir, executed
 
 
@@ -951,6 +954,18 @@ def test_run_persists_valid_insight_after_generation(monkeypatch, tmp_path):
         "refs": ["r0c0"],
     }
     assert [row["round"] for row in Store(run_dir, metrics_schema=_SCHEMA).history()] == [0, 1]
+
+
+def test_run_injects_active_prompt_directory_into_proposer(
+    monkeypatch, tmp_path,
+):
+    _run_insight_integration(
+        monkeypatch,
+        tmp_path,
+        insight="",
+        refs=[],
+        prompt_dir=tmp_path / "active-prompts",
+    )
 
 
 def test_run_skips_invalid_insight_without_skipping_generation(

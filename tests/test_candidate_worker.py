@@ -67,26 +67,39 @@ def _judgment() -> Judgment:
 
 
 def test_spec_serialization_round_trip(tmp_path: Path):
-    spec = _spec(tmp_path)
+    spec = _spec(tmp_path, prompt_dir=str(tmp_path / "prompts"))
     again = CandidateSpec.from_dict(json.loads(json.dumps(spec.to_dict())))
     assert again == spec
 
 
 def test_run_candidate_completed(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(worker_mod.executor_mod, "execute",
-                        lambda *a, **k: ExecResult(sha="def456", reason=None,
-                                                   changed_paths=["a.cc"]))
+    seen = {}
+
+    def fake_execute(*_args, **kwargs):
+        seen["executor"] = kwargs["prompt_dir"]
+        return ExecResult(sha="def456", reason=None, changed_paths=["a.cc"])
+
+    def fake_judge(*_args, **kwargs):
+        seen["judger"] = kwargs["prompt_dir"]
+        return _judgment()
+
+    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(worker_mod.evals, "run_eval",
                         lambda *a, **k: EvalResult(
                             "eval", {"SPEED_MS": 100.0, "CORRECTNESS": True},
                             (0,)))
-    monkeypatch.setattr(worker_mod.judger_mod, "judge",
-                        lambda *a, **k: _judgment())
-    result = run_candidate(_deps(tmp_path), _spec(tmp_path))
+    monkeypatch.setattr(worker_mod.judger_mod, "judge", fake_judge)
+    deps = _deps(tmp_path)
+    deps.prompt_dir = tmp_path / "prompts"
+    result = run_candidate(deps, _spec(tmp_path))
     assert result["candidate_status"] == "COMPLETED"
     assert result["sha"] == "def456"
     assert result["accepted"] is True
     assert result["metrics"]["SPEED_MS"] == 100.0
+    assert seen == {
+        "executor": tmp_path / "prompts",
+        "judger": tmp_path / "prompts",
+    }
 
 
 def test_run_candidate_no_change_and_gate_rejected(tmp_path: Path, monkeypatch):
@@ -152,7 +165,8 @@ def test_cli_writes_terminal_result(tmp_path: Path, monkeypatch):
     spec = _spec(tmp_path)
     manifest = _write_manifest(tmp_path, spec)
     monkeypatch.setattr(worker_mod, "build_deps",
-                        lambda cfg, run_dir, usage_observer=None: (
+                        lambda cfg, run_dir, usage_observer=None,
+                        prompt_dir=None: (
                             _deps(tmp_path)))
     monkeypatch.setattr(worker_mod, "run_candidate",
                         lambda deps, spec: {"candidate": spec.candidate_id,
@@ -178,7 +192,8 @@ def test_cli_catch_all_still_finishes(tmp_path: Path, monkeypatch):
     spec = _spec(tmp_path)
     manifest = _write_manifest(tmp_path, spec)
     monkeypatch.setattr(worker_mod, "build_deps",
-                        lambda cfg, run_dir, usage_observer=None: (
+                        lambda cfg, run_dir, usage_observer=None,
+                        prompt_dir=None: (
                             _deps(tmp_path)))
 
     def explode(_deps, _spec):

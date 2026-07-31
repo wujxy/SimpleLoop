@@ -353,6 +353,7 @@ class HEPJobBackend(ExecutionBackend):
             run_dir=str(self.run_dir), prior_metrics=prior_metrics,
             baseline_metrics=baseline_metrics,
             worktree_path=str(worktree), result_dir=str(job.result_dir),
+            prompt_dir=str(self.ctx.prompt_dir or ""),
             attempt=job.attempt,
         )
         (job.result_dir / "manifest.json").write_text(

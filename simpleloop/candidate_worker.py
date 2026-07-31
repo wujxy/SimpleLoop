@@ -56,6 +56,7 @@ class CandidateSpec:
     baseline_metrics: dict = field(default_factory=dict)
     worktree_path: str = ""
     result_dir: str = ""
+    prompt_dir: str = ""
     attempt: int = 1
 
     def to_dict(self) -> dict:
@@ -71,6 +72,7 @@ class CandidateSpec:
             "baseline_metrics": dict(self.baseline_metrics or {}),
             "worktree_path": self.worktree_path,
             "result_dir": self.result_dir,
+            "prompt_dir": self.prompt_dir,
             "attempt": self.attempt,
         }
 
@@ -88,6 +90,7 @@ class CandidateSpec:
             baseline_metrics=dict(data.get("baseline_metrics") or {}),
             worktree_path=str(data.get("worktree_path") or ""),
             result_dir=str(data.get("result_dir") or ""),
+            prompt_dir=str(data.get("prompt_dir") or ""),
             attempt=int(data.get("attempt") or 1),
         )
 
@@ -103,6 +106,7 @@ class CandidateDeps:
     workspace: Workspace
     executor_agent: Agent
     judger_agent: Agent
+    prompt_dir: Path | None = None
     gate_lines: str = ""
 
     @property
@@ -110,8 +114,12 @@ class CandidateDeps:
         return self.cfg.get("metrics")
 
 
-def build_deps(cfg: dict, run_dir: str | Path,
-               usage_observer=None) -> CandidateDeps:
+def build_deps(
+    cfg: dict,
+    run_dir: str | Path,
+    usage_observer=None,
+    prompt_dir: str | Path | None = None,
+) -> CandidateDeps:
     """Rebuild worker dependencies from a resolved config. Does NOT call
     workspace.setup() (no clone) — the frontend owns the shared repo; the
     worker only commits through its given worktree."""
@@ -142,6 +150,7 @@ def build_deps(cfg: dict, run_dir: str | Path,
     return CandidateDeps(
         cfg=cfg, run_dir=run_dir, runtime=runtime, workspace=workspace,
         executor_agent=executor_agent, judger_agent=judger_agent,
+        prompt_dir=Path(prompt_dir) if prompt_dir else None,
         gate_lines=views.gate_block(cfg.get("metrics")),
     )
 
@@ -167,7 +176,7 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
             workspace=deps.workspace, worktree=worktree, round_id=worktree_id,
             gate_block=deps.gate_lines,
-            prompt_dir=(cfg.get("prompt_self_improvement") or {}).get("prompt_dir"),
+            prompt_dir=deps.prompt_dir,
         )
         if result.sha:
             print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
@@ -202,7 +211,7 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             metrics=eval_metrics, prior_metrics=spec.prior_metrics,
             baseline_metrics=spec.baseline_metrics, metrics_schema=metrics_schema,
             label=f"judger r{spec.round_id}-c{spec.candidate_id}",
-            prompt_dir=(cfg.get("prompt_self_improvement") or {}).get("prompt_dir"),
+            prompt_dir=deps.prompt_dir,
         )
         print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
               f"score={judgment.score:.2f} risk={judgment.risk} "
@@ -408,9 +417,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("manifest root must be an object")
         run_dir = Path(spec_dict["run_dir"])
         cfg = config_mod.load_resolved(run_dir)
-        deps = build_deps(cfg, run_dir, usage_observer=usage.append)
-        deps.runtime.preflight()
         spec = CandidateSpec.from_dict(spec_dict)
+        deps = build_deps(
+            cfg, run_dir, usage_observer=usage.append,
+            prompt_dir=spec.prompt_dir or None,
+        )
+        deps.runtime.preflight()
         if args.baseline_only:
             result = _run_baseline_eval(deps, spec, cfg)
         else:

@@ -87,6 +87,7 @@ def _run_locked(
     if completed >= total:
         summary = artifact_runner(
             config_path, run_dir, continue_run=True, target_rounds=total,
+            prompt_dir=history.prompt_dir,
         )
         return _with_self_improvement(summary, history)
 
@@ -94,7 +95,7 @@ def _run_locked(
         target = min(((completed // interval) + 1) * interval, total)
         summary = artifact_runner(
             config_path, run_dir, continue_run=continue_run or completed > 0,
-            target_rounds=target,
+            target_rounds=target, prompt_dir=history.prompt_dir,
         )
         new_completed = _count_rounds(run_dir)
         if new_completed <= completed:

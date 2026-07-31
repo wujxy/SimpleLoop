@@ -308,6 +308,7 @@ def _write_rounds(run_dir: Path, target: int) -> None:
 
 def test_artifact_loop_exposes_target_rounds_override():
     assert "target_rounds" in inspect.signature(loop.run).parameters
+    assert "prompt_dir" in inspect.signature(loop.run).parameters
 
 
 def test_supervisor_stops_each_segment_before_optimizer(tmp_path: Path):
@@ -315,7 +316,10 @@ def test_supervisor_stops_each_segment_before_optimizer(tmp_path: Path):
     run_dir = tmp_path / "run"
     calls = []
 
-    def artifact_runner(_config, _run_dir, *, target_rounds, **_kwargs):
+    def artifact_runner(
+        _config, _run_dir, *, target_rounds, prompt_dir=None, **_kwargs,
+    ):
+        assert Path(prompt_dir) == run_dir / "self_improvement" / "prompts"
         calls.append(("artifact", target_rounds))
         _write_rounds(run_dir, target_rounds)
         return {"rounds": target_rounds}
@@ -382,7 +386,10 @@ def test_supervisor_returns_complete_summary_when_run_is_already_done(
     expected = _summary(run_dir) | {"rounds": 5}
     calls = []
 
-    def artifact_runner(_config, _run_dir, *, target_rounds, continue_run):
+    def artifact_runner(
+        _config, _run_dir, *, target_rounds, continue_run, prompt_dir,
+    ):
+        assert Path(prompt_dir) == run_dir / "self_improvement" / "prompts"
         calls.append((target_rounds, continue_run))
         return expected
 
