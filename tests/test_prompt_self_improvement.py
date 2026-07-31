@@ -52,6 +52,12 @@ def _enabled(**overrides):
     }
 
 
+def _set_max_rounds(task: Path, rounds: int) -> None:
+    raw = yaml.safe_load(task.read_text())
+    raw["loop"]["max_rounds"] = rounds
+    task.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+
 def test_self_improvement_defaults_disabled(tmp_path: Path):
     cfg = config.load(_task_file(tmp_path))
     assert cfg["self_improvement"] is None
@@ -330,6 +336,41 @@ def test_supervisor_stops_each_segment_before_optimizer(tmp_path: Path):
         ("artifact", 5),
     ]
     assert summary["rounds"] == 5
+    assert summary["self_improvement"]["active_version"] == "v000"
+    assert [
+        event["status"] for event in summary["self_improvement"]["events"]
+    ] == ["no_change", "no_change"]
+
+
+def test_supervisor_does_not_optimize_after_final_interval_boundary(
+    tmp_path: Path,
+):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    _set_max_rounds(task, 4)
+    run_dir = tmp_path / "run"
+    calls = []
+
+    def artifact_runner(_config, _run_dir, *, target_rounds, **_kwargs):
+        calls.append(("artifact", target_rounds))
+        _write_rounds(run_dir, target_rounds)
+        return {"rounds": target_rounds}
+
+    class NoChangeOptimizer:
+        def run(self, *, prompt_dir, **_kwargs):
+            calls.append(("optimizer", len(
+                (run_dir / "history.jsonl").read_text().splitlines()
+            )))
+            _write_report(Path(prompt_dir), status="no_change", intent="")
+
+    supervisor.run(
+        task, run_dir, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: NoChangeOptimizer(),
+    )
+
+    assert calls == [
+        ("artifact", 2), ("optimizer", 2),
+        ("artifact", 4),
+    ]
 
 
 def test_supervisor_returns_complete_summary_when_run_is_already_done(
@@ -355,7 +396,9 @@ def test_supervisor_returns_complete_summary_when_run_is_already_done(
     )
 
     assert calls == [(5, True)]
-    assert summary == expected
+    assert summary == expected | {
+        "self_improvement": {"active_version": "v000", "events": []},
+    }
 
 
 def test_supervisor_requires_explicit_continue_for_existing_rounds(
@@ -374,17 +417,17 @@ def test_supervisor_requires_explicit_continue_for_existing_rounds(
             optimizer_factory=lambda **_kwargs: pytest.fail("optimizer created"),
         )
 
-    assert not (tmp_path / "prompt_history").exists()
+    assert not (run_dir / "self_improvement").exists()
 
 
 def test_supervisor_rejects_a_second_active_supervisor(tmp_path: Path):
     task = _task_file(tmp_path, _enabled(interval_rounds=2))
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    lock = (run_dir / ".prompt-self-improvement.lock").open("w")
+    lock = (run_dir / ".self-improvement.lock").open("w")
     fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
-        with pytest.raises(loop.RunLockError, match="prompt supervisor"):
+        with pytest.raises(loop.RunLockError, match="self-improvement supervisor"):
             supervisor.run(
                 task, run_dir,
                 artifact_runner=lambda *_args, **_kwargs: pytest.fail(
@@ -422,7 +465,8 @@ def test_supervisor_snapshots_accepted_prompt_change(tmp_path: Path):
         optimizer_factory=lambda **_kwargs: RewritingOptimizer(),
     )
 
-    history = PromptHistory(tmp_path / "prompts", tmp_path / "prompt_history")
+    root = run_dir / "self_improvement"
+    history = PromptHistory(root / "prompts", root / "prompt_history")
     assert history.state["active_version"] == "v002"
     assert (history.history_dir / "v001/proposer.md").read_text() == "rewritten proposer 1\n"
 
@@ -445,7 +489,8 @@ def test_supervisor_restores_parent_after_optimizer_error(tmp_path: Path):
         optimizer_factory=lambda **_kwargs: BrokenOptimizer(),
     )
 
-    history = PromptHistory(tmp_path / "prompts", tmp_path / "prompt_history")
+    root = run_dir / "self_improvement"
+    history = PromptHistory(root / "prompts", root / "prompt_history")
     assert history.state["active_version"] == "v000"
     assert "You are the PROPOSER" in (history.prompt_dir / "proposer.md").read_text()
     assert [event["status"] for event in history.events()] == ["rejected", "rejected"]
@@ -469,10 +514,53 @@ def test_supervisor_removes_unexpected_files_after_rejection(tmp_path: Path):
         optimizer_factory=lambda **_kwargs: PollutingOptimizer(),
     )
 
-    prompt_dir = tmp_path / "prompts"
+    prompt_dir = run_dir / "self_improvement" / "prompts"
     assert {path.name for path in prompt_dir.iterdir()} == {
         f"{role}.md" for role in PROMPT_NAMES
     }
+
+
+def test_each_run_starts_from_its_own_v000(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    _set_max_rounds(task, 1)
+
+    def artifact_runner(_config, run_dir, *, target_rounds, **_kwargs):
+        _write_rounds(Path(run_dir), target_rounds)
+        return {"rounds": target_rounds}
+
+    class UnusedOptimizer:
+        def run(self, **_kwargs):
+            pytest.fail("optimizer called")
+
+    run_a = tmp_path / "run-a"
+    run_b = tmp_path / "run-b"
+    supervisor.run(
+        task, run_a, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: UnusedOptimizer(),
+    )
+    history_a = PromptHistory(
+        run_a / "self_improvement" / "prompts",
+        run_a / "self_improvement" / "prompt_history",
+    )
+    (history_a.prompt_dir / "proposer.md").write_text("run A prompt")
+    assert history_a.snapshot(1, OptimizerReport(
+        status="changed", diagnosis="run A only", evidence=[], intent="isolate",
+    )) == "v001"
+
+    supervisor.run(
+        task, run_b, artifact_runner=artifact_runner,
+        optimizer_factory=lambda **_kwargs: UnusedOptimizer(),
+    )
+    history_b = PromptHistory(
+        run_b / "self_improvement" / "prompts",
+        run_b / "self_improvement" / "prompt_history",
+    )
+
+    assert history_a.state["active_version"] == "v001"
+    assert history_b.state["active_version"] == "v000"
+    assert "You are the PROPOSER" in (
+        history_b.prompt_dir / "proposer.md"
+    ).read_text()
 
 
 def _summary(run_dir: Path) -> dict:

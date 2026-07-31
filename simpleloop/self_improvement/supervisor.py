@@ -25,14 +25,14 @@ def run(
     run_dir = Path(run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     lock_fd = os.open(
-        run_dir / ".prompt-self-improvement.lock", os.O_RDWR | os.O_CREAT, 0o600,
+        run_dir / ".self-improvement.lock", os.O_RDWR | os.O_CREAT, 0o600,
     )
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         os.close(lock_fd)
         raise loop_mod.RunLockError(
-            f"another prompt supervisor is active for {run_dir}"
+            f"another self-improvement supervisor is active for {run_dir}"
         ) from exc
     try:
         return _run_locked(
@@ -53,9 +53,9 @@ def _run_locked(
     optimizer_factory,
 ) -> dict:
     cfg = config_mod.load(config_path)
-    settings = cfg["prompt_self_improvement"]
-    if not settings.get("enabled"):
-        raise ValueError("prompt self-improvement is not enabled")
+    settings = cfg["self_improvement"]
+    if settings is None:
+        raise ValueError("self-improvement is not enabled")
 
     completed = _count_rounds(run_dir)
     if completed and not continue_run:
@@ -63,12 +63,15 @@ def _run_locked(
             f"run-dir {run_dir} already contains existing rounds; "
             "use --continue to resume"
         )
-    history = PromptHistory(settings["prompt_dir"], settings["history_dir"])
+    state_dir = run_dir / "self_improvement"
+    history = PromptHistory(
+        state_dir / "prompts", state_dir / "prompt_history",
+    )
     history.initialize()
     history.recover_inflight()
-    gate = PromptGate(settings["max_prompt_chars"])
+    gate = PromptGate(30000)
     optimizer = optimizer_factory(
-        command=settings["optimizer_command"],
+        command="claude",
         timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
         max_output_tokens=cfg.get("agent_max_output_tokens", 64000),
     )
@@ -77,14 +80,15 @@ def _run_locked(
     total = cfg["max_rounds"]
     summary: dict = {"rounds": completed}
 
-    if completed and completed % interval == 0:
+    if completed and completed < total and completed % interval == 0:
         _trigger(
             history, gate, optimizer, cfg, run_dir, run_id, completed,
         )
     if completed >= total:
-        return artifact_runner(
+        summary = artifact_runner(
             config_path, run_dir, continue_run=True, target_rounds=total,
         )
+        return _with_self_improvement(summary, history)
 
     while completed < total:
         target = min(((completed // interval) + 1) * interval, total)
@@ -94,13 +98,13 @@ def _run_locked(
         )
         new_completed = _count_rounds(run_dir)
         if new_completed <= completed:
-            return summary
+            return _with_self_improvement(summary, history)
         completed = new_completed
-        if completed % interval == 0:
+        if completed < total and completed % interval == 0:
             _trigger(
                 history, gate, optimizer, cfg, run_dir, run_id, completed,
             )
-    return summary
+    return _with_self_improvement(summary, history)
 
 
 def _trigger(
@@ -117,7 +121,6 @@ def _trigger(
     parent = history.state["active_version"]
     report_path = history.prompt_dir / "optimizer_report.yaml"
     report_path.unlink(missing_ok=True)
-    settings = cfg["prompt_self_improvement"]
     try:
         optimizer.run(
             run_dir=run_dir, prompt_dir=history.prompt_dir,
@@ -138,6 +141,16 @@ def _trigger(
     except Exception as exc:
         history.restore(parent)
         history.finish_trigger("rejected", error=str(exc))
+
+
+def _with_self_improvement(summary: dict, history: PromptHistory) -> dict:
+    return {
+        **summary,
+        "self_improvement": {
+            "active_version": history.state["active_version"],
+            "events": history.events(),
+        },
+    }
 
 
 def _count_rounds(run_dir: Path) -> int:
