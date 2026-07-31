@@ -1,6 +1,6 @@
 """Progress plots across round, active worktime, and processed tokens.
 
-The loop maintains only the 3x3 overview (write_progress_png); the nine
+The loop maintains only the 2x3 overview (write_progress_png); the six
 single-panel detail images are drawn offline by scripts/plot_details.py."""
 from __future__ import annotations
 
@@ -15,13 +15,9 @@ from typing import Callable
 _MPL_CACHE = Path(tempfile.gettempdir()) / "simpleloop-matplotlib"
 os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
 
-_Y_KINDS = ("score", "objective", "ratio")
+_Y_KINDS = ("objective", "ratio")
 _X_KINDS = ("round", "worktime", "tokens")
-_Y_SLUGS = {
-    "score": "score",
-    "objective": "objective",
-    "ratio": "objective-ratio",
-}
+_Y_SLUGS = {"objective": "objective", "ratio": "objective-ratio"}
 
 
 @dataclass
@@ -29,7 +25,6 @@ class Observation:
     round: float
     worktime_hours: float | None
     processed_tokens: int | None
-    score: float | None
     objective: float | None
     ratio: float | None
     selected: bool = False
@@ -45,22 +40,6 @@ class PlotSeries:
     rounds: list[int]
 
     # Convenience views over the observations; exercised by the plot tests.
-    @property
-    def score_points(self) -> list[tuple[int, float]]:
-        return [
-            (int(point.round), point.score)
-            for point in self.candidates
-            if point.score is not None
-        ]
-
-    @property
-    def selected_scores(self) -> list[tuple[int, float]]:
-        return [
-            (int(point.round), point.score)
-            for point in self.candidates
-            if point.selected and point.score is not None
-        ]
-
     @property
     def objective_points(self) -> list[tuple[int, float]]:
         return [
@@ -153,7 +132,6 @@ def _observation(
     *,
     round_number: float,
     telemetry: object,
-    score: object = None,
     objective: object = None,
     baseline_value: float | None = None,
     lower_is_better: bool | None = None,
@@ -169,7 +147,6 @@ def _observation(
         round=round_number,
         worktime_hours=worktime,
         processed_tokens=tokens,
-        score=_number(score),
         objective=objective_value,
         ratio=ratio,
         selected=selected,
@@ -228,7 +205,6 @@ def build_series(
             point = _observation(
                 round_number=round_number,
                 telemetry=attempt.get("telemetry"),
-                score=attempt.get("score"),
                 objective=metrics.get(objective_key),
                 baseline_value=baseline_value,
                 lower_is_better=lower_is_better,
@@ -277,8 +253,6 @@ def _x(point: Observation, kind: str) -> float | int | None:
 
 
 def _y(point: Observation, kind: str) -> float | None:
-    if kind == "score":
-        return point.score
     if kind == "objective":
         return point.objective
     return point.ratio
@@ -317,8 +291,6 @@ def _x_label(kind: str) -> str:
 
 
 def _y_label(series: PlotSeries, kind: str) -> str:
-    if kind == "score":
-        return "Score"
     key = series.objective_key or "Objective"
     if kind == "ratio":
         if series.lower_is_better is True:
@@ -333,7 +305,7 @@ def _render_panel(axis, series: PlotSeries, y_kind: str, x_kind: str) -> None:
         axis.scatter(
             candidate_x,
             candidate_y,
-            color="#9AA3AD" if y_kind == "score" else "#D88932",
+            color="#D88932",
             alpha=0.65,
             s=30,
             label="All candidates",
@@ -343,27 +315,15 @@ def _render_panel(axis, series: PlotSeries, y_kind: str, x_kind: str) -> None:
     selected = [point for point in series.candidates if point.selected]
     selected_x, selected_y = _xy(selected, y_kind, x_kind)
     if selected_x:
-        if y_kind == "score":
-            axis.plot(
-                selected_x,
-                selected_y,
-                color="#147D73",
-                linewidth=2.0,
-                marker="o",
-                markersize=5,
-                label="Selected",
-                zorder=3,
-            )
-        else:
-            axis.scatter(
-                selected_x,
-                selected_y,
-                color="#B43A3A",
-                marker="D",
-                s=42,
-                label="Selected",
-                zorder=4,
-            )
+        axis.scatter(
+            selected_x,
+            selected_y,
+            color="#B43A3A",
+            marker="D",
+            s=42,
+            label="Selected",
+            zorder=4,
+        )
 
     if y_kind in ("objective", "ratio"):
         incumbent_x, incumbent_y = _xy(series.incumbents, y_kind, x_kind)
@@ -418,8 +378,6 @@ def _render_panel(axis, series: PlotSeries, y_kind: str, x_kind: str) -> None:
         title = f"{title} (higher is better)"
     axis.set_title(f"{title} vs {_x_label(x_kind)}")
     axis.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
-    if y_kind == "score":
-        axis.set_ylim(0.0, 1.0)
     if x_kind == "round":
         axis.set_xticks(_round_ticks(series.rounds))
         if series.rounds:
@@ -441,7 +399,9 @@ def _prepare_pyplot():
 
 def _render_progress_png(series: PlotSeries, output: Path) -> None:
     plt = _prepare_pyplot()
-    figure, axes = plt.subplots(3, 3, figsize=(18, 13))
+    figure, axes = plt.subplots(
+        len(_Y_KINDS), len(_X_KINDS), figsize=(16, 9), squeeze=False,
+    )
     figure.patch.set_facecolor("white")
     for row, y_kind in enumerate(_Y_KINDS):
         for column, x_kind in enumerate(_X_KINDS):
@@ -475,7 +435,7 @@ def write_progress_png(
     metrics_schema: dict | None,
     plot_context: dict | None = None,
 ) -> Path | None:
-    """Redraw the 3x3 overview image (the only plot refreshed at run time)."""
+    """Redraw the 2x3 overview image (the only plot refreshed at run time)."""
     run_path = Path(run_dir)
     run_path.mkdir(parents=True, exist_ok=True)
     series = build_series(history, metrics_schema, plot_context)

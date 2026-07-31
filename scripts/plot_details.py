@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Draw a run's nine single-panel detail images offline.
+"""Draw a run's six single-panel detail images offline.
 
-The loop only maintains the 3x3 overview (progress.png); run this script to get
+The loop only maintains the 2x3 overview (progress.png); run this script to get
 the per-panel detail PNGs:
 
     python scripts/plot_details.py --config task.yaml --run-dir ./run-001
@@ -41,7 +41,7 @@ def write_detail_pngs(
     metrics_schema: dict | None,
     plot_context: dict | None = None,
 ) -> list[Path]:
-    """Redraw the nine detail images; each is published independently so one
+    """Redraw the six detail images; each is published independently so one
     failure doesn't block the rest."""
     run_path = Path(run_dir)
     run_path.mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,7 @@ def write_detail_pngs(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Redraw a run's nine detail progress images offline.")
+        description="Redraw a run's six detail progress images offline.")
     parser.add_argument(
         "--config", required=True,
         help="The task config the run used (source of eval.metrics).")

@@ -8,12 +8,11 @@ import pytest
 
 from simpleloop import loop as loop_mod
 from simpleloop.reporting import plot as plot_mod
-from simpleloop.roles.judger import _parse as parse_judgment
 from simpleloop.reporting.plot import build_series
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry
 
-# The nine detail images are drawn by the offline script, not the package.
+# The six detail images are drawn by the offline script, not the package.
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plot_details.py"
 _spec = importlib.util.spec_from_file_location("plot_details", _SCRIPT)
 plot_details = importlib.util.module_from_spec(_spec)
@@ -83,8 +82,8 @@ def test_build_series_tracks_parallel_candidates_selected_and_incumbent():
     series = build_series(history, SCHEMA)
 
     assert series.rounds == [1, 2]
-    assert series.score_points == [(1, 0.4), (1, 0.8), (2, 0.3)]
-    assert series.selected_scores == [(1, 0.8)]
+    assert plot_mod._Y_KINDS == ("objective", "ratio")
+    assert not hasattr(series, "score_points")
     assert series.objective_points == [(1, 120.0), (1, 90.0), (2, 110.0)]
     assert series.selected_objectives == [(1, 90.0)]
     assert series.incumbent_objective == [(1, 90.0), (2, 90.0)]
@@ -107,8 +106,7 @@ def test_build_series_supports_single_candidate_history_and_missing_values():
     series = build_series(history, schema)
 
     assert series.rounds == [1, 2, 3]
-    assert series.score_points == [(1, 0.7)]
-    assert series.selected_scores == [(1, 0.7)]
+    assert not hasattr(series, "selected_scores")
     assert series.objective_points == [(1, 10.0), (3, 12.0)]
     assert series.selected_objectives == [(1, 10.0), (3, 12.0)]
     assert series.incumbent_objective == [(1, 10.0), (2, 10.0), (3, 12.0)]
@@ -134,7 +132,6 @@ def test_build_series_requires_selected_sha_to_advance_parallel_incumbent():
 
     series = build_series(history, SCHEMA)
 
-    assert series.selected_scores == [(1, 0.8)]
     assert series.selected_objectives == [(1, 90.0)]
     assert series.incumbent_objective == []
 
@@ -147,7 +144,6 @@ def test_build_series_skips_non_finite_values():
 
     series = build_series(history, SCHEMA)
 
-    assert series.score_points == []
     assert series.objective_points == []
     assert series.incumbent_objective == []
 
@@ -357,9 +353,6 @@ HISTORY = [{
     ],
 }]
 DETAIL_OUTPUTS = {
-    "progress-score-vs-round.png",
-    "progress-score-vs-worktime.png",
-    "progress-score-vs-tokens.png",
     "progress-objective-vs-round.png",
     "progress-objective-vs-worktime.png",
     "progress-objective-vs-tokens.png",
@@ -376,7 +369,7 @@ def test_build_series_maps_candidate_and_generation_coordinates():
     assert selected.round == 1
     assert selected.worktime_hours == 25.0 / 3600.0
     assert selected.processed_tokens == 250
-    assert selected.score == 0.8
+    assert not hasattr(selected, "score")
     assert selected.objective == 80.0
     # lower_is_better: True inverts the ratio (baseline/objective) so the third row
     # reads as an improvement multiple where higher is better: 100ms/80ms = 1.25x.
@@ -418,7 +411,7 @@ def test_invalid_baseline_omits_ratio_but_keeps_objective(baseline):
     assert series.baseline is None
 
 
-def test_write_detail_pngs_creates_nine_details(tmp_path):
+def test_write_detail_pngs_creates_six_details(tmp_path):
     outputs = write_detail_pngs(tmp_path, HISTORY, SCHEMA, CONTEXT)
 
     assert {path.name for path in outputs} == DETAIL_OUTPUTS
@@ -492,12 +485,12 @@ def test_ratio_panel_keeps_raw_ratio_for_higher_is_better():
 def test_one_detail_failure_preserves_old_file_and_other_outputs(
     monkeypatch, tmp_path,
 ):
-    failed = tmp_path / "progress-score-vs-round.png"
+    failed = tmp_path / "progress-objective-vs-round.png"
     failed.write_bytes(b"previous")
     real_render = plot_details._render_detail
 
     def fail_one(series, y_kind, x_kind, output):
-        if y_kind == "score" and x_kind == "round":
+        if y_kind == "objective" and x_kind == "round":
             raise RuntimeError("boom")
         return real_render(series, y_kind, x_kind, output)
 
@@ -684,7 +677,7 @@ def test_plot_command_redraws_overview_offline(tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.count("Wrote ") == 1
 
-    # the offline script draws the nine detail images on top
+    # the offline script draws the six detail images on top
     plot_details.main([
         "--config", str(config_path), "--run-dir", str(run_dir),
     ])

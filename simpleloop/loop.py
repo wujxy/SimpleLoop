@@ -505,7 +505,7 @@ def _summary(ctx: RunContext, run_dir_path: Path) -> dict:
 
 
 def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> None:
-    """Refresh the 3x3 overview only; detail images are drawn offline via
+    """Refresh the 2x3 overview only; detail images are drawn offline via
     scripts/plot_details.py."""
     try:
         history = store.history()

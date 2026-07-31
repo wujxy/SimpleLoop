@@ -220,20 +220,18 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "baseline eval", {"SPEED_MS": 100.0}
 
-        def run_candidates(self, *, proposals: list[dict], round_id: int,
-                           parent_sha: str, prior_metrics: dict,
-                           baseline_metrics: dict, journal=None) -> list[dict]:
+        def run_candidates(self, *, proposals: list[str], round_id: int,
+                           parent_sha: str, journal=None) -> list[dict]:
             return [{
                 "candidate": 0,
-                "family": "test",
-                "decision": "test",
                 "proposal": "test",
+                "parent_sha": parent_sha,
                 "sha": None,
-                "score": 0.0,
-                "risk": "high",
-                "feedback": "test",
+                "status": "NO_CHANGE",
                 "metrics": {"SPEED_MS": 95.0},
-                "accepted": False,
+                "gates": {},
+                "gate_passed": False,
+                "eligible": False,
                 "telemetry": {"worktime_seconds": 1.0, "processed_tokens": 10},
             }]
 
@@ -249,7 +247,7 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
 
     loop_mod.run("config.yaml", run_dir)
 
-    assert len(observers) == 3
+    assert len(observers) == 2
     assert all(callable(observer) for observer in observers)
     state = json.loads((run_dir / "telemetry.json").read_text())
     assert state["baseline_metrics"] == {"SPEED_MS": 100.0}
