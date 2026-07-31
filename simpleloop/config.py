@@ -199,7 +199,11 @@ def _resolve(
     metrics = _resolve_metrics(eval_block["metrics"])
 
     execution_backend, hepjob = _resolve_execution(raw.get("execution"))
-    self_improvement = _resolve_self_improvement(raw.get("self_improvement"))
+    self_improvement = (
+        _resolve_self_improvement(raw["self_improvement"])
+        if "self_improvement" in raw
+        else None
+    )
 
     return {
         "goal": str(goal),
@@ -228,9 +232,7 @@ def _resolve(
     }
 
 
-def _resolve_self_improvement(raw: object) -> dict | None:
-    if raw is None:
-        return None
+def _resolve_self_improvement(raw: object) -> dict:
     if not isinstance(raw, dict):
         raise ConfigError("self_improvement: must be an object")
     unknown = set(raw) - {"interval_rounds"}

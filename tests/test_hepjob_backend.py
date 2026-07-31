@@ -160,6 +160,17 @@ def _job_json(tmp_path, candidate_id=0) -> dict:
     return json.loads(path.read_text())
 
 
+def test_candidate_manifest_carries_active_prompt_directory(tmp_path):
+    ctx = _Ctx(tmp_path)
+    ctx.prompt_dir = tmp_path / "self_improvement" / "prompts"
+    backend = HEPJobBackend(ctx, _hep_cfg(tmp_path))
+
+    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
+    manifest = json.loads((job.result_dir / "manifest.json").read_text())
+
+    assert manifest["prompt_dir"] == str(ctx.prompt_dir)
+
+
 def test_completed_after_gone_with_finished(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, ["", ""],  # gone (job not in query output)

@@ -307,16 +307,14 @@ Edit the prompt files directly and write optimizer_report.yaml.
 `optimizer_report.yaml` 是固定机器协议，而不是 Harness 提供的诊断框架：
 
 ```yaml
-status: changed  # changed | no_change
 diagnosis: >
   Meta Optimizer 调查后对 Loop 行为的判断。
 evidence:
   - Meta Optimizer 自主选择的文件、round 或历史引用
-intent: >
-  修改希望影响的行为；no_change 时为空字符串。
 ```
 
-实际 changed files 由 Supervisor 比较文件得到，不依赖 agent 自报。
+实际 changed/no_change 和 changed files 都由 Supervisor 比较文件得到，
+不依赖 agent 自报。
 
 ## 7. 外层运行流程
 
@@ -345,12 +343,15 @@ intent: >
 
 ```yaml
 active_version: v003
-last_completed_trigger: 30
-inflight_trigger: 40
-inflight_parent: v003
+inflight:
+  run_id: /path/to/run
+  trigger_round: 40
+  parent: v003
 ```
 
-Supervisor 启动时发现未完成的 `inflight_trigger`：从 parent 恢复 prompts，记录 `interrupted`，清理 inflight 状态，再使用恢复后的 active version 继续。已完成 trigger 通过 state 和 events 去重。
+Supervisor 启动时发现未完成的 `inflight`：从 parent 恢复 prompts，记录
+`interrupted`，清理 inflight 状态，再使用恢复后的 active version 继续。
+已完成 trigger 通过 state 和 events 去重。
 
 ## 9. Prompt History
 
@@ -377,10 +378,12 @@ created_at: 2026-07-30T19:00:00Z
 changed: [proposer.md, executor.md]
 diagnosis: ...
 evidence: [...]
-intent: ...
 ```
 
-`events.jsonl` 的每条记录同时包含当前 `run_id` 和 `trigger_round`，并记录 `accepted`、`no_change`、`rejected` 或 `interrupted`。二者共同构成触发幂等键，避免不同 run 的相同 round 编号冲突。Manifest 和 events 用于调查、审阅、恢复和回滚，不承担自动效果评价。
+`events.jsonl` 的每条记录同时包含当前 `run_id` 和 `trigger_round`，并记录
+`accepted`、`no_change`、`rejected` 或 `interrupted`。二者共同构成触发幂等键。
+每个 run 拥有独立的 prompt lineage；Manifest 和 events 用于调查、审阅、
+恢复和回滚，不承担自动效果评价。
 
 ## 10. Minimal Meta-gate
 

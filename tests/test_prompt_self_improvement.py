@@ -97,6 +97,16 @@ def test_old_prompt_self_improvement_name_is_rejected(tmp_path: Path):
         config.load(task)
 
 
+def test_self_improvement_rejects_explicit_null(tmp_path: Path):
+    task = _task_file(tmp_path)
+    raw = yaml.safe_load(task.read_text())
+    raw["self_improvement"] = None
+    task.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config.ConfigError, match="must be an object"):
+        config.load(task)
+
+
 def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):
     history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
     assert history.initialize() == "v000"
