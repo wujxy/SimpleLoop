@@ -17,6 +17,8 @@ class ExecResult:
     sha: str | None          # None when gate-rejected or no change
     reason: str | None       # None on success; otherwise why there's no SHA
     changed_paths: list[str]
+    path_gate_passed: bool
+    path_gate_violations: list[str]
 
 
 def execute(agent: Agent, *, proposal: str, goal: str, editable: list[str],
@@ -53,12 +55,29 @@ required.
 
     changed = workspace.changed_paths(worktree)
     if not changed:
-        return ExecResult(sha=None, reason="executor made no changes", changed_paths=[])
+        return ExecResult(
+            sha=None,
+            reason="executor made no changes",
+            changed_paths=[],
+            path_gate_passed=True,
+            path_gate_violations=[],
+        )
 
     ok, violations = gate.check_diff(changed, editable, frozen)
     if not ok:
-        return ExecResult(sha=None, reason="gate rejected: " + "; ".join(violations),
-                          changed_paths=changed)
+        return ExecResult(
+            sha=None,
+            reason="gate rejected: " + "; ".join(violations),
+            changed_paths=changed,
+            path_gate_passed=False,
+            path_gate_violations=violations,
+        )
 
     sha = workspace.commit(worktree, round_id, changed)
-    return ExecResult(sha=sha, reason=None, changed_paths=changed)
+    return ExecResult(
+        sha=sha,
+        reason=None,
+        changed_paths=changed,
+        path_gate_passed=True,
+        path_gate_violations=[],
+    )

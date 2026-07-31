@@ -1,5 +1,5 @@
-"""CandidateWorker: one candidate's full business execution — executor ->
-gate/commit -> eval -> judger -> result dict.
+"""CandidateWorker: one candidate's factual execution — executor ->
+path gate/commit -> harness eval/gates -> result dict.
 
 Business only: the worktree lifecycle belongs to the execution backends
 (they create it before, remove it after), and job management belongs to
@@ -11,7 +11,7 @@ HEPJobBackend. The worker is launchable standalone:
 Completion contract for remote execution: result.json (pure business
 result) plus usage.json (telemetry/audit sidecar) are written atomically
 and _FINISHED touched last in result_dir. ANY business-side failure
-(executor/eval/judger error, worker bug) must still produce all of them —
+(executor/eval error, worker bug) must still produce all of them —
 a missing _FINISHED means the process was killed by infrastructure
 (condor_rm/OOM/node death), and only then is a job-level retry meaningful.
 
@@ -25,16 +25,15 @@ import argparse
 import json
 import os
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from . import config as config_mod
 from .container.runtime import ApptainerRuntime
-from .harness import evals, views
+from .harness import evals, gate, views
 from .harness.workspace import Workspace
 from .roles import executor as executor_mod
-from .roles import judger as judger_mod
 from .roles.agent import Agent, AgentError
 
 
@@ -48,12 +47,8 @@ class CandidateSpec:
     round_id: int
     candidate_id: int
     parent_sha: str
-    family: str
-    decision: str
     proposal: str
     run_dir: str = ""
-    prior_metrics: dict = field(default_factory=dict)
-    baseline_metrics: dict = field(default_factory=dict)
     worktree_path: str = ""
     result_dir: str = ""
     prompt_dir: str = ""
@@ -64,12 +59,8 @@ class CandidateSpec:
             "round_id": self.round_id,
             "candidate_id": self.candidate_id,
             "parent_sha": self.parent_sha,
-            "family": self.family,
-            "decision": self.decision,
             "proposal": self.proposal,
             "run_dir": self.run_dir,
-            "prior_metrics": dict(self.prior_metrics or {}),
-            "baseline_metrics": dict(self.baseline_metrics or {}),
             "worktree_path": self.worktree_path,
             "result_dir": self.result_dir,
             "prompt_dir": self.prompt_dir,
@@ -82,12 +73,8 @@ class CandidateSpec:
             round_id=int(data["round_id"]),
             candidate_id=int(data["candidate_id"]),
             parent_sha=str(data["parent_sha"]),
-            family=str(data.get("family") or "single"),
-            decision=str(data.get("decision") or ""),
             proposal=str(data["proposal"]),
             run_dir=str(data.get("run_dir") or ""),
-            prior_metrics=dict(data.get("prior_metrics") or {}),
-            baseline_metrics=dict(data.get("baseline_metrics") or {}),
             worktree_path=str(data.get("worktree_path") or ""),
             result_dir=str(data.get("result_dir") or ""),
             prompt_dir=str(data.get("prompt_dir") or ""),
@@ -105,7 +92,6 @@ class CandidateDeps:
     runtime: ApptainerRuntime
     workspace: Workspace
     executor_agent: Agent
-    judger_agent: Agent
     prompt_dir: Path | None = None
     gate_lines: str = ""
 
@@ -136,11 +122,6 @@ def build_deps(
                            allowed_tools="Read,Edit,Write,Bash",
                            max_output_tokens=max_output_tokens,
                            usage_observer=usage_observer)
-    judger_agent = Agent(runtime=runtime, command="claude",
-                         timeout_seconds=timeout,
-                         allowed_tools="Read,Bash",
-                         max_output_tokens=max_output_tokens,
-                         usage_observer=usage_observer)
     workspace = Workspace(
         run_dir=run_dir,
         repo_path=cfg["repo_path"],
@@ -149,28 +130,22 @@ def build_deps(
     )
     return CandidateDeps(
         cfg=cfg, run_dir=run_dir, runtime=runtime, workspace=workspace,
-        executor_agent=executor_agent, judger_agent=judger_agent,
+        executor_agent=executor_agent,
         prompt_dir=Path(prompt_dir) if prompt_dir else None,
         gate_lines=views.gate_block(cfg.get("metrics")),
     )
 
 
 def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
-    """Executor + eval + judger for one candidate. The worktree at
+    """Execute and evaluate one candidate. The worktree at
     spec.worktree_path must already exist; the caller removes it."""
     cfg = deps.cfg
     metrics_schema = deps.metrics_schema
     worktree = Path(spec.worktree_path)
     worktree_id = f"{spec.round_id}-c{spec.candidate_id}"
-    result = None
-    eval_block = ""
-    eval_metrics: dict = {}
-    accepted = False
-    stage = "executor"
     try:
         print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
-              f"(family={spec.family}, decision={spec.decision}): "
-              f"{spec.proposal[:120]}", flush=True)
+              f"proposal: {spec.proposal[:120]}", flush=True)
         result = executor_mod.execute(
             deps.executor_agent, proposal=spec.proposal, goal=cfg["goal"],
             editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
@@ -178,91 +153,132 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             gate_block=deps.gate_lines,
             prompt_dir=deps.prompt_dir,
         )
-        if result.sha:
-            print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
-                  f"committed: {result.sha} ({len(result.changed_paths)} files)",
-                  flush=True)
-        else:
-            print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
-                  f"no commit: {result.reason}", flush=True)
-        if result.sha:
-            stage = "eval"
-            try:
-                eval_result = evals.run_eval(
-                    cfg["eval_commands"],
-                    cwd=worktree,
-                    runtime=deps.runtime,
-                    metrics_schema=metrics_schema,
-                    timeout_seconds=cfg.get("eval_timeout_seconds", 600),
-                    output_cap=cfg.get("eval_output_cap_chars", 16000),
-                )
-                eval_block = eval_result.text
-                eval_metrics = eval_result.metrics
-            except Exception as exc:
-                eval_block = f"(eval failed to run: {exc})"
-                print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
-                      f"eval error: {exc}", flush=True)
-        accepted = candidate_accepted(result.sha, eval_metrics, metrics_schema)
-        stage = "judger"
-        judgment = judger_mod.judge(
-            deps.judger_agent, goal=cfg["goal"], proposal=spec.proposal,
-            sha=result.sha, reason=result.reason, parent_sha=spec.parent_sha,
-            workspace=deps.workspace, eval_block=eval_block, cwd=worktree,
-            metrics=eval_metrics, prior_metrics=spec.prior_metrics,
-            baseline_metrics=spec.baseline_metrics, metrics_schema=metrics_schema,
-            label=f"judger r{spec.round_id}-c{spec.candidate_id}",
-            prompt_dir=deps.prompt_dir,
-        )
-        print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
-              f"score={judgment.score:.2f} risk={judgment.risk} "
-              f"feedback: {judgment.feedback[:120]}", flush=True)
-        print_objective(eval_metrics, spec.prior_metrics, spec.baseline_metrics,
-                        metrics_schema)
-        return {
-            "candidate": spec.candidate_id,
-            "family": spec.family,
-            "decision": spec.decision,
-            "proposal": spec.proposal,
-            "sha": result.sha,
-            "score": judgment.score,
-            "risk": judgment.risk,
-            "feedback": judgment.feedback,
-            "feedback_for_proposer": judgment.feedback_for_proposer,
-            "eval_block": eval_block,
-            "metrics": eval_metrics,
-            "changed_paths": result.changed_paths,
-            "accepted": accepted,
-            "selected": False,
-            "candidate_status": _status_for(result.sha, result.reason),
-        }
     except (AgentError, ValueError) as exc:
         print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
-              f"failed: {exc}", flush=True)
-        changed_paths = result.changed_paths if result else []
-        sha = result.sha if result else None
+              f"executor failed: {exc}", flush=True)
         return candidate_failure(
             spec.candidate_id, spec, str(exc), spec.parent_sha,
-            sha=sha, eval_block=eval_block, eval_metrics=eval_metrics,
-            changed_paths=changed_paths, accepted=accepted,
-            status=f"{stage.upper()}_FAILED",
+            metrics_schema=metrics_schema, status="EXECUTOR_FAILED",
         )
 
+    if result.path_gate_passed is False:
+        gate_results = gate.build_results(
+            metrics_schema,
+            paths=False,
+            path_detail="; ".join(result.path_gate_violations),
+        )
+        return _candidate_result(
+            spec, result, status="PATH_GATE_REJECTED", gates=gate_results,
+        )
 
-def _status_for(sha: str | None, reason: str | None) -> str:
-    """Business status of a candidate that reached the judger."""
-    if sha:
-        return "COMPLETED"
-    if reason == "executor made no changes":
-        return "NO_CHANGE"
-    if reason and reason.startswith("gate rejected"):
-        return "GATE_REJECTED"
-    return "COMPLETED"
+    if result.sha is None:
+        detail = "not run because Executor produced no change"
+        gate_results = gate.build_results(metrics_schema, paths=True)
+        for name in gate_results:
+            if name != gate.PATHS:
+                gate_results[name] = {"passed": None, "detail": detail}
+        return _candidate_result(
+            spec, result, status="NO_CHANGE", gates=gate_results,
+        )
+
+    print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
+          f"committed: {result.sha} ({len(result.changed_paths)} files)",
+          flush=True)
+    try:
+        eval_result = evals.run_eval(
+            cfg["eval_commands"],
+            cwd=worktree,
+            runtime=deps.runtime,
+            metrics_schema=metrics_schema,
+            timeout_seconds=cfg.get("eval_timeout_seconds", 600),
+            output_cap=cfg.get("eval_output_cap_chars", 16000),
+        )
+    except Exception as exc:
+        eval_block = f"(eval failed to run: {exc})"
+        print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
+              f"eval error: {exc}", flush=True)
+        gate_results = gate.build_results(
+            metrics_schema,
+            paths=True,
+            eval_commands=False,
+            eval_detail=str(exc),
+        )
+        return _candidate_result(
+            spec,
+            result,
+            status="EVAL_FAILED",
+            gates=gate_results,
+            eval_block=eval_block,
+        )
+
+    eval_detail = "" if eval_result.commands_ok else (
+        f"exit codes: {list(eval_result.returncodes)}"
+    )
+    gate_results = gate.build_results(
+        metrics_schema,
+        paths=True,
+        eval_commands=eval_result.commands_ok,
+        eval_detail=eval_detail,
+        metrics=eval_result.metrics,
+    )
+    gate_passed = gate.all_passed(gate_results)
+    eligible = _eligible(result.sha, gate_passed, eval_result.metrics,
+                         metrics_schema)
+    return _candidate_result(
+        spec,
+        result,
+        status="COMPLETED" if gate_passed else "GATE_REJECTED",
+        gates=gate_results,
+        eval_block=eval_result.text,
+        metrics=eval_result.metrics,
+        gate_passed=gate_passed,
+        eligible=eligible,
+    )
+
+
+def _eligible(sha: str | None, gate_passed: bool, metrics: dict,
+              metrics_schema: dict | None) -> bool:
+    if not sha or not gate_passed or not metrics_schema:
+        return False
+    objective_key = metrics_schema["objective"]["key"]
+    objective = metrics.get(objective_key)
+    return (
+        isinstance(objective, (int, float))
+        and not isinstance(objective, bool)
+    )
+
+
+def _candidate_result(
+    spec: CandidateSpec,
+    result: executor_mod.ExecResult,
+    *,
+    status: str,
+    gates: dict,
+    eval_block: str = "",
+    metrics: dict | None = None,
+    gate_passed: bool = False,
+    eligible: bool = False,
+) -> dict:
+    return {
+        "candidate": spec.candidate_id,
+        "proposal": spec.proposal,
+        "parent_sha": spec.parent_sha,
+        "sha": result.sha,
+        "status": status,
+        "eval_block": eval_block,
+        "metrics": metrics or {},
+        "changed_paths": result.changed_paths,
+        "gates": gates,
+        "gate_passed": gate_passed,
+        "eligible": eligible,
+        "selected": False,
+    }
 
 
 def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> dict:
     """Run only the evaluation part for baseline assessment.
 
-    Skips executor/judger and just runs eval commands to get metrics.
+    Skips the Executor and just runs eval commands to get metrics.
     """
     print(f"[{stamp()}] running baseline eval on worktree {spec.worktree_path}", flush=True)
 
@@ -280,24 +296,28 @@ def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> d
     if not result.commands_ok:
         raise ValueError(f"baseline evaluation failed: {result.text[:1000]}")
 
-    # Return a result dict compatible with the worker contract
+    gate_results = gate.build_results(
+        cfg.get("metrics"),
+        paths=True,
+        eval_commands=result.commands_ok,
+        metrics=result.metrics,
+    )
+    gate_passed = gate.all_passed(gate_results)
     return {
         "candidate": spec.candidate_id,
-        "family": spec.family,
-        "decision": spec.decision,
         "proposal": spec.proposal,
-        "sha": spec.parent_sha,  # Baseline just reports the original commit
-        "score": 0.0,
-        "risk": "low",
-        "feedback": "baseline evaluation completed",
-        "feedback_for_proposer": "",
+        "parent_sha": spec.parent_sha,
+        "sha": spec.parent_sha,
+        "status": "BASELINE",
         "eval_block": result.text,
         "metrics": result.metrics,
         "changed_paths": [],
-        "accepted": True,  # Baseline is always accepted
+        "gates": gate_results,
+        "gate_passed": gate_passed,
+        "eligible": _eligible(
+            spec.parent_sha, gate_passed, result.metrics, cfg.get("metrics"),
+        ),
         "selected": False,
-        "base_sha": spec.parent_sha,
-        "candidate_status": "BASELINE",
     }
 
 
@@ -305,73 +325,25 @@ def candidate_failure(candidate_id: int, spec: CandidateSpec,
                       reason: str, parent_sha: str, sha: str | None = None,
                       eval_block: str = "", eval_metrics: dict | None = None,
                       changed_paths: list[str] | None = None,
-                      accepted: bool = False,
+                      gate_results: dict | None = None,
+                      metrics_schema: dict | None = None,
                       status: str = "WORKER_FAILED") -> dict:
-    failure_feedback = f"[loop failure] {reason[:200]}"
-    proposer_failure = (
-        "[loop failure] candidate failed before a usable result was produced"
-    )
     return {
         "candidate": candidate_id,
-        "family": spec.family,
-        "decision": spec.decision,
         "proposal": spec.proposal,
+        "parent_sha": parent_sha,
         "sha": sha,
-        "score": 0.0,
-        "risk": "high",
-        "feedback": failure_feedback,
-        "feedback_for_proposer": proposer_failure,
-        "eval_block": eval_block,
+        "status": status,
+        "eval_block": eval_block or f"[loop failure] {reason[:200]}",
         "metrics": eval_metrics or {},
         "changed_paths": changed_paths or [],
-        "accepted": accepted,
+        "gates": gate_results or gate.build_results(
+            metrics_schema, paths=None,
+        ),
+        "gate_passed": False,
+        "eligible": False,
         "selected": False,
-        "base_sha": parent_sha,
-        "candidate_status": status,
     }
-
-
-def candidate_accepted(candidate_sha: str | None, metrics: dict | None,
-                       metrics_schema: dict | None) -> bool:
-    """Whether a candidate becomes the next cumulative base: every declared
-    gate must be explicitly True (missing/unknown is rejection)."""
-    if not candidate_sha:
-        return False
-    gates = (metrics_schema or {}).get("gates", [])
-    if not gates:
-        return True
-    values = metrics or {}
-    return all(values.get(g["key"]) is True for g in gates)
-
-
-def print_objective(metrics: dict | None, prior: dict | None,
-                    baseline: dict | None, schema: dict | None) -> None:
-    """Print the round's harness-parsed objective value with vs-prior and
-    vs-baseline deltas; silent when there is no measurement this round."""
-    if not schema or not metrics:
-        return
-    obj = schema.get("objective", {})
-    key = obj.get("key")
-    if not key:
-        return
-    val = metrics.get(key)
-    if val is None:
-        return
-    lower_is_better = obj.get("lower_is_better", True)
-    def _fmt_delta(this, other, label):
-        delta = evals.objective_delta(this, other, lower_is_better)
-        if delta is None:
-            return None
-        pct, improved = delta
-        arrow = "↓ better" if improved else ("↑ worse" if pct != 0 else "= same")
-        return f"{label} {other:g} ({pct:+.1f}%, {arrow})"
-    parts = [f"{key}={val:g}"]
-    for other, label in ((prior, "vs prior"), (baseline, "vs baseline")):
-        if other:
-            d = _fmt_delta(val, other.get(key), label)
-            if d:
-                parts.append(d)
-    print(f"[{stamp()}] objective: " + "  |  ".join(parts), flush=True)
 
 
 def write_result(result_dir: str | Path, result: dict,
@@ -404,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job-id", default=None,
                         help="Scheduler job id (recorded in result.execution).")
     parser.add_argument("--baseline-only", action="store_true",
-                        help="Only run eval for baseline, skip executor/judger.")
+                        help="Only run eval for baseline, skip the Executor.")
     args = parser.parse_args(argv)
 
     usage: list = []
@@ -436,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
             int(spec_dict.get("candidate_id") or 0),
             CandidateSpec.from_dict(spec_dict) if spec_dict else CandidateSpec(
                 round_id=0, candidate_id=0, parent_sha="",
-                family="single", decision="", proposal=""),
+                proposal=""),
             f"worker failed: {exc}",
             str(spec_dict.get("parent_sha") or ""),
             status="WORKER_FAILED",

@@ -671,10 +671,6 @@ def _candidate_failure(candidate_id: int, proposal: dict,
         changed_paths=changed_paths, accepted=accepted)
 
 
-_candidate_accepted = candidate_worker.candidate_accepted
-_print_objective = candidate_worker.print_objective
-
-
 def _select_winner(candidates: list[dict],
                    metrics_schema: dict,
                    prior_metrics: dict | None = None) -> dict | None:

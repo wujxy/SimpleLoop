@@ -12,7 +12,6 @@ from simpleloop import candidate_worker as worker_mod
 from simpleloop.candidate_worker import (
     CandidateDeps,
     CandidateSpec,
-    candidate_accepted,
     candidate_failure,
     main,
     run_candidate,
@@ -20,7 +19,6 @@ from simpleloop.candidate_worker import (
 )
 from simpleloop.harness.evals import EvalResult
 from simpleloop.roles.executor import ExecResult
-from simpleloop.roles.judger import Judgment
 
 
 _SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -30,9 +28,7 @@ _SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
 def _spec(tmp_path: Path, **overrides) -> CandidateSpec:
     values = dict(
         round_id=3, candidate_id=7, parent_sha="abc123",
-        family="layout", decision="switch", proposal="do the thing",
-        prior_metrics={"SPEED_MS": 150.0},
-        baseline_metrics={"SPEED_MS": 200.0},
+        proposal="do the thing",
         worktree_path=str(tmp_path / "wt"),
         result_dir=str(tmp_path / "result"),
         attempt=2,
@@ -56,14 +52,8 @@ def _deps(tmp_path: Path, cfg: dict | None = None) -> CandidateDeps:
             "eval_commands": ["eval"], "metrics": _SCHEMA,
         },
         run_dir=tmp_path, runtime=FakeRuntime(), workspace=FakeWorkspace(),
-        executor_agent=object(), judger_agent=object(),
-        gate_lines="",
+        executor_agent=object(), gate_lines="",
     )
-
-
-def _judgment() -> Judgment:
-    return Judgment(score=0.7, risk="low", feedback="f" * 300,
-                    feedback_for_proposer="mechanism plausible")
 
 
 def test_spec_serialization_round_trip(tmp_path: Path):
@@ -72,73 +62,126 @@ def test_spec_serialization_round_trip(tmp_path: Path):
     assert again == spec
 
 
+def test_spec_ignores_legacy_semantic_fields(tmp_path: Path):
+    data = _spec(tmp_path).to_dict()
+    data.update({
+        "family": "layout",
+        "decision": "switch",
+        "prior_metrics": {"SPEED_MS": 150.0},
+        "baseline_metrics": {"SPEED_MS": 200.0},
+    })
+
+    assert CandidateSpec.from_dict(data) == _spec(tmp_path)
+
+
 def test_run_candidate_completed(tmp_path: Path, monkeypatch):
-    seen = {}
-
     def fake_execute(*_args, **kwargs):
-        seen["executor"] = kwargs["prompt_dir"]
-        return ExecResult(sha="def456", reason=None, changed_paths=["a.cc"])
-
-    def fake_judge(*_args, **kwargs):
-        seen["judger"] = kwargs["prompt_dir"]
-        return _judgment()
+        return ExecResult(
+            sha="def456", reason=None, changed_paths=["a.cc"],
+            path_gate_passed=True, path_gate_violations=[],
+        )
 
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(worker_mod.evals, "run_eval",
                         lambda *a, **k: EvalResult(
                             "eval", {"SPEED_MS": 100.0, "CORRECTNESS": True},
                             (0,)))
-    monkeypatch.setattr(worker_mod.judger_mod, "judge", fake_judge)
     deps = _deps(tmp_path)
     deps.prompt_dir = tmp_path / "prompts"
     result = run_candidate(deps, _spec(tmp_path))
-    assert result["candidate_status"] == "COMPLETED"
+    assert result["status"] == "COMPLETED"
     assert result["sha"] == "def456"
-    assert result["accepted"] is True
+    assert result["parent_sha"] == "abc123"
+    assert result["gate_passed"] is True
+    assert result["eligible"] is True
+    assert result["gates"]["EVAL_COMMANDS"]["passed"] is True
     assert result["metrics"]["SPEED_MS"] == 100.0
-    assert seen == {
-        "executor": tmp_path / "prompts",
-        "judger": tmp_path / "prompts",
-    }
+    assert not ({"score", "risk", "feedback", "feedback_for_proposer",
+                 "accepted"} & result.keys())
 
 
-def test_run_candidate_no_change_and_gate_rejected(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(worker_mod.evals, "run_eval",
-                        lambda *a, **k: EvalResult("", {}, ()))
-    monkeypatch.setattr(worker_mod.judger_mod, "judge",
-                        lambda *a, **k: _judgment())
+def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
+    called = False
+
+    def fake_eval(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_eval)
     monkeypatch.setattr(worker_mod.executor_mod, "execute",
                         lambda *a, **k: ExecResult(
                             sha=None, reason="executor made no changes",
-                            changed_paths=[]))
+                            changed_paths=[], path_gate_passed=True,
+                            path_gate_violations=[]))
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
-    assert result["candidate_status"] == "NO_CHANGE"
-    assert result["accepted"] is False
+    assert called is False
+    assert result["status"] == "NO_CHANGE"
+    assert result["eligible"] is False
+    assert result["gates"]["EVAL_COMMANDS"] == {
+        "passed": None,
+        "detail": "not run because Executor produced no change",
+    }
+
+
+def test_path_gate_rejection_is_terminal_and_skips_eval(tmp_path: Path,
+                                                         monkeypatch):
+    called = False
+
+    def fake_eval(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_eval)
 
     monkeypatch.setattr(worker_mod.executor_mod, "execute",
                         lambda *a, **k: ExecResult(
                             sha=None, reason="gate rejected: frozen paths",
-                            changed_paths=["tests/x.py"]))
+                            changed_paths=["tests/x.py"],
+                            path_gate_passed=False,
+                            path_gate_violations=[
+                                "tests/x.py: touches a frozen path",
+                            ]))
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
-    assert result["candidate_status"] == "GATE_REJECTED"
+    assert called is False
+    assert result["status"] == "PATH_GATE_REJECTED"
+    assert result["sha"] is None
+    assert result["gates"]["PATHS"]["passed"] is False
+    assert result["gates"]["CORRECTNESS"]["passed"] is None
 
 
-def test_run_candidate_business_failure_is_stage_tagged(tmp_path: Path,
-                                                        monkeypatch):
-    def boom(*_a, **_k):
-        raise ValueError("judger returned junk")
-
+def test_nonzero_eval_command_is_a_gate_rejection(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(worker_mod.executor_mod, "execute",
-                        lambda *a, **k: ExecResult(sha="def456", reason=None,
-                                                   changed_paths=["a.cc"]))
+                        lambda *a, **k: ExecResult(
+                            sha="def456", reason=None, changed_paths=["a.cc"],
+                            path_gate_passed=True, path_gate_violations=[]))
     monkeypatch.setattr(worker_mod.evals, "run_eval",
-                        lambda *a, **k: EvalResult("eval", {"SPEED_MS": 1.0},
-                                                   (0,)))
-    monkeypatch.setattr(worker_mod.judger_mod, "judge", boom)
+                        lambda *a, **k: EvalResult(
+                            "failed", {"SPEED_MS": 90.0,
+                                       "CORRECTNESS": True}, (7,)))
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
-    assert result["candidate_status"] == "JUDGER_FAILED"
+    assert result["status"] == "GATE_REJECTED"
+    assert result["gates"]["EVAL_COMMANDS"]["passed"] is False
+    assert result["gate_passed"] is False
+    assert result["eligible"] is False
+
+
+def test_eval_exception_retains_sha_and_factual_failure(tmp_path: Path,
+                                                        monkeypatch):
+    monkeypatch.setattr(worker_mod.executor_mod, "execute",
+                        lambda *a, **k: ExecResult(
+                            sha="def456", reason=None, changed_paths=["a.cc"],
+                            path_gate_passed=True, path_gate_violations=[]))
+    monkeypatch.setattr(worker_mod.evals, "run_eval",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("container unavailable")))
+
+    result = run_candidate(_deps(tmp_path), _spec(tmp_path))
+
+    assert result["status"] == "EVAL_FAILED"
     assert result["sha"] == "def456"
-    assert result["score"] == 0.0
+    assert result["gates"]["PATHS"]["passed"] is True
+    assert result["gates"]["EVAL_COMMANDS"]["passed"] is False
+    assert result["gates"]["CORRECTNESS"]["passed"] is None
 
 
 def test_write_result_is_atomic_and_marks_finished(tmp_path: Path):
@@ -170,14 +213,14 @@ def test_cli_writes_terminal_result(tmp_path: Path, monkeypatch):
                             _deps(tmp_path)))
     monkeypatch.setattr(worker_mod, "run_candidate",
                         lambda deps, spec: {"candidate": spec.candidate_id,
-                                            "candidate_status": "COMPLETED"})
+                                            "status": "COMPLETED"})
     rc = main(["--manifest", str(manifest), "--job-id", "123.4"])
     assert rc == 0
     result_dir = Path(spec.result_dir)
     assert (result_dir / "_FINISHED").exists()
     result = json.loads((result_dir / "result.json").read_text())
     # result.json is pure business; telemetry/audit live in the sidecar.
-    assert result == {"candidate": 7, "candidate_status": "COMPLETED"}
+    assert result == {"candidate": 7, "status": "COMPLETED"}
     sidecar = json.loads((result_dir / "usage.json").read_text())
     assert sidecar["execution"]["job_id"] == "123.4"
     assert sidecar["execution"]["attempt"] == 2
@@ -205,8 +248,8 @@ def test_cli_catch_all_still_finishes(tmp_path: Path, monkeypatch):
     result_dir = Path(spec.result_dir)
     assert (result_dir / "_FINISHED").exists()
     result = json.loads((result_dir / "result.json").read_text())
-    assert result["candidate_status"] == "WORKER_FAILED"
-    assert "unexpected bug" in result["feedback"]
+    assert result["status"] == "WORKER_FAILED"
+    assert "unexpected bug" in result["eval_block"]
 
 
 def test_cli_unreadable_manifest_is_infra_failure(tmp_path: Path):
@@ -216,18 +259,9 @@ def test_cli_unreadable_manifest_is_infra_failure(tmp_path: Path):
     assert rc == 2
 
 
-def test_candidate_accepted_gate_semantics():
-    assert candidate_accepted("sha", {"G": True}, {"gates": [{"key": "G"}]})
-    assert not candidate_accepted("sha", {"G": False},
-                                  {"gates": [{"key": "G"}]})
-    assert not candidate_accepted("sha", {}, {"gates": [{"key": "G"}]})
-    assert not candidate_accepted(None, {"G": True},
-                                  {"gates": [{"key": "G"}]})
-
-
 def test_candidate_failure_shape(tmp_path: Path):
     failure = candidate_failure(3, _spec(tmp_path), "boom", "parent")
-    assert failure["candidate_status"] == "WORKER_FAILED"
-    assert failure["risk"] == "high"
-    assert failure["accepted"] is False
-    assert failure["base_sha"] == "parent"
+    assert failure["status"] == "WORKER_FAILED"
+    assert failure["parent_sha"] == "parent"
+    assert failure["gate_passed"] is False
+    assert failure["eligible"] is False
