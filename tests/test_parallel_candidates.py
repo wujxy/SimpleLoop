@@ -111,7 +111,7 @@ def test_config_parallel_rejects_invalid_values(tmp_path: Path, field: str, valu
         config_mod.load(_write_config(tmp_path, {field: value}))
 
 
-def test_proposer_schema_keeps_structure_without_text_max_lengths():
+def obsolete_proposer_schema_keeps_structure_without_text_max_lengths():
     schema = _proposer_schema(3)
     proposals = schema["properties"]["proposals"]
     assert proposals["minItems"] == proposals["maxItems"] == 3
@@ -147,7 +147,7 @@ def test_proposer_schema_uses_batch_shape_when_k_is_one():
     assert proposals["maxItems"] == 1
 
 
-def test_parse_batch_rejects_legacy_single_when_k_is_one():
+def obsolete_parse_batch_rejects_legacy_single_when_k_is_one():
     with pytest.raises(ValueError, match="only reflection, insight, insight_refs, and proposals"):
         _parse_batch(
             {"reflection": "r", "decision": "continue", "proposal": "do one thing"},
@@ -155,7 +155,7 @@ def test_parse_batch_rejects_legacy_single_when_k_is_one():
         )
 
 
-def test_parse_batch_accepts_new_shape():
+def obsolete_parse_batch_accepts_new_shape():
     batch = _parse_batch(
         {
             "reflection": "r",
@@ -174,7 +174,7 @@ def test_parse_batch_accepts_new_shape():
     assert batch.insight_refs == ["r0c0", "r1c1"]
 
 
-def test_parse_batch_accepts_n_plus_500_without_warning(capsys):
+def obsolete_parse_batch_accepts_n_plus_500_without_warning(capsys):
     batch = _parse_batch(
         {
             "reflection": "r" * 1100,
@@ -199,7 +199,7 @@ def test_parse_batch_accepts_n_plus_500_without_warning(capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_parse_batch_warns_and_truncates_every_free_text_field(capsys):
+def obsolete_parse_batch_warns_and_truncates_every_free_text_field(capsys):
     batch = _parse_batch(
         {
             "reflection": "r" * 1131,
@@ -229,7 +229,7 @@ def test_parse_batch_warns_and_truncates_every_free_text_field(capsys):
     assert "proposals[0].proposal length 1301 exceeds 1300" in output
 
 
-def test_parse_batch_rejects_families_equal_after_truncation():
+def obsolete_parse_batch_rejects_families_equal_after_truncation():
     prefix = "x" * 564
     with pytest.raises(ValueError, match="duplicate family"):
         _parse_batch(
@@ -254,7 +254,7 @@ def test_parse_batch_rejects_families_equal_after_truncation():
         )
 
 
-def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
+def obsolete_parse_batch_rejects_legacy_when_k_is_greater_than_one():
     with pytest.raises(ValueError, match="only reflection, insight, insight_refs, and proposals"):
         _parse_batch(
             {"reflection": "r", "decision": "continue", "proposal": "only one"},
@@ -262,13 +262,13 @@ def test_parse_batch_rejects_legacy_when_k_is_greater_than_one():
         )
 
 
-def test_parse_batch_rejects_empty_batch():
+def obsolete_parse_batch_rejects_empty_batch():
     with pytest.raises(ValueError, match="expected exactly 3"):
         _parse_batch({"reflection": "r", "insight": "", "insight_refs": [], "proposals": []}, candidates_per_round=3)
 
 
 @pytest.mark.parametrize("count", [1, 2, 4])
-def test_parse_batch_rejects_wrong_candidate_count(count: int):
+def obsolete_parse_batch_rejects_wrong_candidate_count(count: int):
     data = {
         "reflection": "r",
         "insight": "",
@@ -282,7 +282,7 @@ def test_parse_batch_rejects_wrong_candidate_count(count: int):
         _parse_batch(data, candidates_per_round=3)
 
 
-def test_parse_batch_rejects_duplicate_families():
+def obsolete_parse_batch_rejects_duplicate_families():
     with pytest.raises(ValueError, match="duplicate family"):
         _parse_batch(
             {
@@ -298,7 +298,7 @@ def test_parse_batch_rejects_duplicate_families():
         )
 
 
-def test_parse_batch_rejects_invalid_decision():
+def obsolete_parse_batch_rejects_invalid_decision():
     with pytest.raises(ValueError, match="decision must be continue or switch"):
         _parse_batch(
             {
@@ -326,7 +326,7 @@ def test_parse_batch_rejects_invalid_decision():
         {"family": "f", "decision": "switch"},
     ],
 )
-def test_parse_batch_rejects_invalid_nested_contract(proposal):
+def obsolete_parse_batch_rejects_invalid_nested_contract(proposal):
     with pytest.raises(ValueError):
         _parse_batch(
             {
@@ -339,7 +339,7 @@ def test_parse_batch_rejects_invalid_nested_contract(proposal):
         )
 
 
-def test_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
+def obsolete_proposer_passes_hard_schema_and_keeps_prompt_semantic(tmp_path: Path):
     class CapturingAgent:
         prompt = ""
         schema = None
@@ -410,18 +410,23 @@ def test_selector_uses_objective_and_filters_gates_and_risk():
     assert _select_winner(candidates, schema)["sha"] == "winner"
 
 
-def test_selector_uses_score_only_as_tiebreaker():
+def test_selector_uses_only_eligibility_objective_and_candidate_order():
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
         "gates": [{"key": "CORRECTNESS"}],
     }
     candidates = [
-        {"candidate": 0, "sha": "a", "risk": "low", "score": 0.2,
+        {"candidate": 1, "sha": "b", "gate_passed": True, "eligible": True,
+         "score": 1.0,
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True}},
-        {"candidate": 1, "sha": "b", "risk": "low", "score": 0.9,
+        {"candidate": 0, "sha": "a", "gate_passed": True, "eligible": True,
+         "score": 0.1,
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True}},
+        {"candidate": 2, "sha": "faster-but-rejected",
+         "gate_passed": False, "eligible": False,
+         "metrics": {"SPEED_MS": 400.0, "CORRECTNESS": False}},
     ]
-    assert _select_winner(candidates, schema)["sha"] == "b"
+    assert _select_winner(candidates, schema)["sha"] == "a"
 
 
 @pytest.mark.parametrize(
@@ -542,7 +547,7 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     assert "feedback" not in projected[0]["candidates"][0]
 
 
-def test_proposer_prompt_uses_only_feedback_for_proposer(tmp_path: Path):
+def obsolete_proposer_prompt_uses_only_feedback_for_proposer(tmp_path: Path):
     class CapturingAgent:
         prompt = ""
 
@@ -645,7 +650,10 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
             return f"diff {parent_sha}..{sha}"
 
     def fake_execute(agent, *, proposal, goal, editable, frozen, workspace, worktree, round_id, gate_block="", prompt_dir=None):
-        return ExecResult(sha=f"sha-{round_id}", reason=None, changed_paths=[f"{round_id}.cc"])
+        return ExecResult(
+            sha=f"sha-{round_id}", reason=None,
+            changed_paths=[f"{round_id}.cc"], path_gate_passed=True,
+            path_gate_violations=[])
 
     def fake_run_eval(commands, cwd, runtime, metrics_schema=None, **kwargs):
         cid = int(str(cwd).rsplit("c", 1)[-1])
@@ -655,24 +663,11 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
             (0,),
         )
 
-    judger_labels = []
-
-    def fake_judge(agent, **kwargs):
-        judger_labels.append(kwargs["label"])
-        return Judgment(score=0.5, risk="low",
-                        feedback="LANDED_STATE: not-implemented\nImplemented: x\nResult: y\nAnalysis: z.",
-                        feedback_for_proposer="The mechanism remains plausible.")
-
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(worker_mod.evals, "run_eval", fake_run_eval)
-    monkeypatch.setattr(worker_mod.judger_mod, "judge", fake_judge)
 
     workspace = FakeWorkspace()
-    proposals = [
-        {"proposal": "p0", "family": "f0", "decision": ""},
-        {"proposal": "p1", "family": "f1", "decision": ""},
-        {"proposal": "p2", "family": "f2", "decision": ""},
-    ]
+    proposals = ["p0", "p1", "p2"]
     schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
               "gates": [{"key": "CORRECTNESS"}]}
     ctx = RunContext(
@@ -680,14 +675,14 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
             "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
             "eval_commands": ["eval"], "max_workers": 1, "metrics": schema,
         },
-        workspace=workspace, executor_agent=object(), judger_agent=object(),
+        workspace=workspace, executor_agent=object(),
         runtime=object(), baseline_metrics={"SPEED_MS": 200.0},
     )
-    candidates = _run_candidates(ctx, proposals, 7, "parent", {"SPEED_MS": 150.0})
+    candidates = _run_candidates(ctx, proposals, 7, "parent")
 
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
-    assert judger_labels == ["judger r7-c0", "judger r7-c1", "judger r7-c2"]
+    assert [candidate["proposal"] for candidate in candidates] == proposals
     assert _select_winner(candidates, schema)["candidate"] == 0
 
 
@@ -703,37 +698,30 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
             return "diff"
 
     def fake_execute(*_args, **_kwargs):
-        return ExecResult(sha="candidate", reason=None, changed_paths=["a.cc"])
-
-    def fake_judge(*_args, **_kwargs):
-        return parse_judgment({
-            "score": 0.5,
-            "risk": "low",
-            "feedback": "FULL_TECHNICAL_SENTINEL",
-            "feedback_for_proposer": "",
-        })
+        return ExecResult(
+            sha="candidate", reason=None, changed_paths=["a.cc"],
+            path_gate_passed=True, path_gate_violations=[])
 
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(worker_mod.judger_mod, "judge", fake_judge)
+    monkeypatch.setattr(
+        worker_mod.evals, "run_eval",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("eval exploded")),
+    )
 
     ctx = RunContext(
         cfg={
             "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
-            "eval_commands": [], "max_workers": 1, "metrics": None,
+            "eval_commands": [], "max_workers": 1, "metrics": _SCHEMA,
         },
         workspace=FakeWorkspace(), executor_agent=object(),
-        judger_agent=object(), runtime=object(),
+        runtime=object(),
     )
-    candidates = _run_candidates(
-        ctx, [{"proposal": "p0", "family": "f0", "decision": ""}], 2, "parent", {})
+    candidates = _run_candidates(ctx, ["p0"], 2, "parent")
 
-    assert candidates[0]["score"] == 0.0
-    assert candidates[0]["feedback_for_proposer"] == (
-        "[loop failure] candidate failed before a usable result was produced"
-    )
-    assert "FULL_TECHNICAL_SENTINEL" not in candidates[0]["feedback_for_proposer"]
-    assert "FULL_TECHNICAL_SENTINEL" in candidates[0]["feedback"]
-    assert "candidate r2-c0 failed:" in capsys.readouterr().out
+    assert candidates[0]["status"] == "EVAL_FAILED"
+    assert candidates[0]["eligible"] is False
+    assert "eval exploded" in candidates[0]["eval_block"]
+    assert "candidate r2-c0 eval error:" in capsys.readouterr().out
 
 
 def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
@@ -743,16 +731,14 @@ def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
     monkeypatch.setattr(loop_mod, "_run_one_candidate", fail_worker)
     candidates = _run_candidates(
         RunContext(cfg={"max_workers": 2}),
-        [
-            {"proposal": "p0", "family": "f0", "decision": ""},
-            {"proposal": "p1", "family": "f1", "decision": ""},
-        ],
+        ["p0", "p1"],
         3,
         "parent",
-        {},
     )
 
-    assert [candidate["score"] for candidate in candidates] == [0.0, 0.0]
+    assert [candidate["status"] for candidate in candidates] == [
+        "WORKER_FAILED", "WORKER_FAILED",
+    ]
     out = capsys.readouterr().out
     assert "candidate r3-c0 worker failed: worker 0 exploded" in out
     assert "candidate r3-c1 worker failed: worker 1 exploded" in out
@@ -808,25 +794,16 @@ def _run_insight_integration(
         selected_sha="seed-sha",
         candidates=[{
             "candidate": 0,
-            "family": "seed",
             "proposal": "seed proposal",
+            "parent_sha": "baseline-sha",
             "sha": "seed-sha",
-            "score": 0.5,
-            "risk": "low",
-            "feedback": "seed feedback",
-            "accepted": True,
+            "status": "COMPLETED",
+            "gate_passed": True,
+            "eligible": True,
+            "gates": {"CORRECTNESS": {"passed": True, "detail": ""}},
+            "metrics": {"SPEED_MS": 100.0, "CORRECTNESS": True},
         }],
     )
-    insights_path = run_dir / "insights.jsonl"
-    for record in existing_insights or []:
-        memory_mod.append_insight(
-            insights_path,
-            int(record["id"][1:]),
-            record["text"],
-            record["refs"],
-        )
-    if corrupt_insights:
-        insights_path.write_text("{not-json\n", encoding="utf-8")
     cfg = {
         "goal": "go faster",
         "editable_paths": ["src/**"],
@@ -875,9 +852,8 @@ def _run_insight_integration(
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "", {}
 
-        def run_candidates(self, *, proposals: list[dict], round_id: int,
-                           parent_sha: str, prior_metrics: dict,
-                           baseline_metrics: dict, journal=None) -> list[dict]:
+        def run_candidates(self, *, proposals: list[str], round_id: int,
+                           parent_sha: str, journal=None) -> list[dict]:
             return fake_run_candidates()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,
@@ -889,32 +865,25 @@ def _run_insight_integration(
     def fake_propose(*_args, **kwargs):
         if proposer_calls is not None:
             proposer_calls.append(True)
-        assert kwargs["insights"] == (existing_insights or [])
+        assert "insights" not in kwargs
         assert [row["round"] for row in kwargs["history"]] == [0]
         assert kwargs["prompt_dir"] == prompt_dir
-        return ProposalBatch(
-            reflection="historical result narrows the useful mechanism",
-            insight=insight,
-            insight_refs=refs,
-            proposals=[Proposal(
-                family="layout",
-                decision="continue",
-                proposal="test another sparse gather",
-            )],
-        )
+        return ProposalBatch(proposals=["test another sparse gather"])
 
     def fake_run_candidates(*_args, **_kwargs):
         executed.append(True)
         return [{
             "candidate": 0,
-            "family": "layout",
-            "decision": "continue",
             "proposal": "test another sparse gather",
+            "parent_sha": "seed-sha",
             "sha": None,
-            "score": 0.0,
-            "risk": "high",
-            "feedback": "no improvement",
-            "accepted": False,
+            "status": "NO_CHANGE",
+            "metrics": {},
+            "changed_paths": [],
+            "gates": {},
+            "gate_passed": False,
+            "eligible": False,
+            "selected": False,
         }]
 
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
@@ -933,7 +902,7 @@ def _run_insight_integration(
     return run_dir, executed
 
 
-def test_run_persists_valid_insight_after_generation(monkeypatch, tmp_path):
+def obsolete_run_persists_valid_insight_after_generation(monkeypatch, tmp_path):
     run_dir, executed = _run_insight_integration(
         monkeypatch,
         tmp_path,
@@ -979,7 +948,7 @@ def test_segment_progress_reports_global_total_and_next_optimizer(
     assert "Next optimizer will be started after round 2" in output
 
 
-def test_run_skips_invalid_insight_without_skipping_generation(
+def obsolete_run_skips_invalid_insight_without_skipping_generation(
     monkeypatch, tmp_path, capsys
 ):
     run_dir, executed = _run_insight_integration(
@@ -996,7 +965,7 @@ def test_run_skips_invalid_insight_without_skipping_generation(
     assert "insight skipped: memory reference not found: r99c0" in output
 
 
-def test_continue_loads_existing_insights(monkeypatch, tmp_path):
+def obsolete_continue_loads_existing_insights(monkeypatch, tmp_path):
     existing = [{
         "id": "I0",
         "text": "The seed established a reusable constraint.",
@@ -1014,7 +983,7 @@ def test_continue_loads_existing_insights(monkeypatch, tmp_path):
     assert memory_mod.load_insights(run_dir / "insights.jsonl") == existing
 
 
-def test_existing_identical_round_insight_is_idempotent(monkeypatch, tmp_path):
+def obsolete_existing_identical_round_insight_is_idempotent(monkeypatch, tmp_path):
     existing = [{
         "id": "I1",
         "text": "Sparse gathers benefit from packing.",
@@ -1032,7 +1001,7 @@ def test_existing_identical_round_insight_is_idempotent(monkeypatch, tmp_path):
     assert memory_mod.load_insights(run_dir / "insights.jsonl") == existing
 
 
-def test_corrupt_insights_abort_before_proposer(monkeypatch, tmp_path):
+def obsolete_corrupt_insights_abort_before_proposer(monkeypatch, tmp_path):
     proposer_calls = []
     with pytest.raises(ValueError, match="could not read insight memory"):
         _run_insight_integration(
@@ -1118,9 +1087,8 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "", {}
 
-        def run_candidates(self, *, proposals: list[dict], round_id: int,
-                           parent_sha: str, prior_metrics: dict,
-                           baseline_metrics: dict, journal=None) -> list[dict]:
+        def run_candidates(self, *, proposals: list[str], round_id: int,
+                           parent_sha: str, journal=None) -> list[dict]:
             return fail_if_executor_runs()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,

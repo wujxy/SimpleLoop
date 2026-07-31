@@ -9,10 +9,8 @@ never reach the proposer's history as proposal failures.
 A backend's only job is "proposals in -> candidate results out". It does NOT
 own round-level harness state:
 
-  - proposals are plain dicts ({"family", "decision", "proposal"}) so the
-    execution layer never imports the proposer role;
-  - prior/baseline metrics arrive as explicit parameters (the judger's
-    vs-prior / vs-baseline axes), never via a shared context object;
+  - proposals are plain strings so the execution layer never imports the
+    Researcher role;
   - in-flight persistence goes through a RoundJournal supplied by the loop,
     which owns the file, the round meta, and the clear-on-success decision.
 """
@@ -41,9 +39,8 @@ class RoundJournal:
 
 
 class ExecutionBackend:
-    def run_candidates(self, *, proposals: list[dict], round_id: int,
-                       parent_sha: str, prior_metrics: dict,
-                       baseline_metrics: dict,
+    def run_candidates(self, *, proposals: list[str], round_id: int,
+                       parent_sha: str,
                        journal: "RoundJournal | None" = None) -> list[dict]:
         raise NotImplementedError
 

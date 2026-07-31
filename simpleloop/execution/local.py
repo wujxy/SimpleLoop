@@ -13,13 +13,11 @@ class LocalBackend(ExecutionBackend):
     def __init__(self, ctx):
         self.ctx = ctx
 
-    def run_candidates(self, *, proposals: list[dict], round_id: int,
-                       parent_sha: str, prior_metrics: dict,
-                       baseline_metrics: dict, journal=None) -> list[dict]:
+    def run_candidates(self, *, proposals: list[str], round_id: int,
+                       parent_sha: str, journal=None) -> list[dict]:
         from .. import loop as loop_mod
         return loop_mod._run_candidates(
-            self.ctx, proposals, round_id, parent_sha, prior_metrics,
-            baseline_metrics)
+            self.ctx, proposals, round_id, parent_sha)
 
     def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
         """Run the baseline eval locally on the baseline worktree.
@@ -35,8 +33,8 @@ class LocalBackend(ExecutionBackend):
         from ..loop import stamp
         import subprocess
 
-        print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]}) for the judger's "
-              f"vs-baseline axis...", flush=True)
+        print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]})...",
+              flush=True)
         wt = None
         try:
             wt = workspace.add_worktree("baseline", baseline_sha)

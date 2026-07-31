@@ -58,7 +58,7 @@ WORKER_META_NAME = "usage.json"
 @dataclass
 class _Job:
     """One candidate's scheduler-side lifecycle state (distinct from the
-    business candidate_status the worker writes into result.json)."""
+    business status the worker writes into result.json)."""
     candidate_id: int
     worktree_id: str
     result_dir: Path
@@ -105,12 +105,8 @@ class HEPJobBackend(ExecutionBackend):
             spec = candidate_worker.CandidateSpec(
                 round_id=-1, candidate_id=-1,  # Special IDs for baseline
                 parent_sha=baseline_sha,
-                family="baseline",
-                decision="baseline",
                 proposal="baseline evaluation",
                 run_dir=str(self.run_dir),
-                prior_metrics={},
-                baseline_metrics={},
                 worktree_path=str(worktree),
                 result_dir=str(result_dir),
                 attempt=1,
@@ -179,9 +175,8 @@ class HEPJobBackend(ExecutionBackend):
                 except Exception:
                     pass
 
-    def run_candidates(self, *, proposals: list[dict], round_id: int,
-                       parent_sha: str, prior_metrics: dict,
-                       baseline_metrics: dict,
+    def run_candidates(self, *, proposals: list[str], round_id: int,
+                       parent_sha: str,
                        journal: RoundJournal | None = None) -> list[dict]:
         self._round_id = round_id
         self._parent_sha = parent_sha
@@ -189,8 +184,7 @@ class HEPJobBackend(ExecutionBackend):
         self._ensure_job_env()
         jobs = []
         for i, proposal in enumerate(proposals):
-            job = self._prepare(i, proposal, round_id, parent_sha,
-                                prior_metrics, baseline_metrics)
+            job = self._prepare(i, proposal, round_id, parent_sha)
             self._submit(job)
             jobs.append(job)
         self._save(jobs)
@@ -329,9 +323,8 @@ class HEPJobBackend(ExecutionBackend):
         # Return success to indicate completion
         return {}
 
-    def _prepare(self, candidate_id: int, proposal: dict,
-                 round_id: int, parent_sha: str, prior_metrics: dict,
-                 baseline_metrics: dict) -> _Job:
+    def _prepare(self, candidate_id: int, proposal: str,
+                 round_id: int, parent_sha: str) -> _Job:
         worktree_id = f"{round_id}-c{candidate_id}"
         result_dir = (self.run_dir / "rounds" / f"r{round_id}"
                       / "candidates" / f"c{candidate_id}")
@@ -339,19 +332,15 @@ class HEPJobBackend(ExecutionBackend):
         worktree = self.ctx.workspace.add_worktree(worktree_id, parent_sha)
         job = _Job(candidate_id=candidate_id,
                    worktree_id=worktree_id, result_dir=result_dir)
-        self._write_manifest(job, proposal, round_id, parent_sha,
-                             prior_metrics, baseline_metrics, worktree)
+        self._write_manifest(job, proposal, round_id, parent_sha, worktree)
         return job
 
-    def _write_manifest(self, job: _Job, proposal: dict, round_id: int,
-                        parent_sha: str, prior_metrics: dict,
-                        baseline_metrics: dict, worktree: Path) -> None:
+    def _write_manifest(self, job: _Job, proposal: str, round_id: int,
+                        parent_sha: str, worktree: Path) -> None:
         spec = candidate_worker.CandidateSpec(
             round_id=round_id, candidate_id=job.candidate_id,
-            parent_sha=parent_sha, family=proposal["family"],
-            decision=proposal["decision"], proposal=proposal["proposal"],
-            run_dir=str(self.run_dir), prior_metrics=prior_metrics,
-            baseline_metrics=baseline_metrics,
+            parent_sha=parent_sha, proposal=proposal,
+            run_dir=str(self.run_dir),
             worktree_path=str(worktree), result_dir=str(job.result_dir),
             prompt_dir=str(getattr(self.ctx, "prompt_dir", None) or ""),
             attempt=job.attempt,
@@ -555,7 +544,7 @@ class HEPJobBackend(ExecutionBackend):
                 candidates.append(result)
                 print(f"[{stamp()}] candidate r{round_id}"
                       f"-c{job.candidate_id} collected "
-                      f"(status={result.get('candidate_status')}, "
+                      f"(status={result.get('status')}, "
                       f"host={execution.get('host')})",
                       flush=True)
             else:
@@ -695,7 +684,11 @@ class HEPJobBackend(ExecutionBackend):
                 (job.result_dir / "result.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"{exc}") from exc
-        if not isinstance(result, dict) or "candidate_status" not in result:
+        if not isinstance(result, dict):
+            raise ValueError("result.json is not a candidate result object")
+        if "status" not in result and isinstance(result.get("candidate_status"), str):
+            result["status"] = result.pop("candidate_status")
+        if not isinstance(result.get("status"), str):
             raise ValueError("result.json is not a candidate result object")
         return result
 

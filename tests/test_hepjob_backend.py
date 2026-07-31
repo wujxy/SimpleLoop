@@ -27,11 +27,8 @@ from simpleloop.loop import INFLIGHT_NAME, _InflightJournal
 # condor JobStatus codes
 IDLE, RUNNING, HELD = 1, 2, 5
 
-_BASELINE = {"SPEED_MS": 200.0}
-
-
-def _fake_proposal(text="p") -> dict:
-    return {"proposal": text, "family": "layout", "decision": "switch"}
+def _fake_proposal(text="p") -> str:
+    return text
 
 
 def _journal(tmp_path, round_id=0, parent_sha="p") -> _InflightJournal:
@@ -39,7 +36,6 @@ def _journal(tmp_path, round_id=0, parent_sha="p") -> _InflightJournal:
     return _InflightJournal(
         tmp_path / INFLIGHT_NAME,
         meta={"round_id": round_id, "parent_sha": parent_sha,
-              "reflection": "refl", "insight": None,
               "proposals": [_fake_proposal()]})
 
 
@@ -149,8 +145,7 @@ def _drive(tmp_path, monkeypatch, query_lines, *, proposals=None,
         seed_fn(result_dir)
     cands = backend.run_candidates(
         proposals=proposals or [_fake_proposal()],
-        round_id=0, parent_sha="p", prior_metrics={},
-        baseline_metrics=_BASELINE, journal=_journal(tmp_path))
+        round_id=0, parent_sha="p", journal=_journal(tmp_path))
     return backend, ctx, cands
 
 
@@ -165,17 +160,20 @@ def test_candidate_manifest_carries_active_prompt_directory(tmp_path):
     ctx.prompt_dir = tmp_path / "self_improvement" / "prompts"
     backend = HEPJobBackend(ctx, _hep_cfg(tmp_path))
 
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
+    job = backend._prepare(0, _fake_proposal(), 0, "p")
     manifest = json.loads((job.result_dir / "manifest.json").read_text())
 
     assert manifest["prompt_dir"] == str(ctx.prompt_dir)
+    assert manifest["proposal"] == "p"
+    assert not ({"family", "decision", "prior_metrics", "baseline_metrics"}
+                & manifest.keys())
 
 
 def test_completed_after_gone_with_finished(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, ["", ""],  # gone (job not in query output)
         seed_fn=lambda rd: _seed_result(rd))
-    assert cands[0]["candidate_status"] == "COMPLETED"
+    assert cands[0]["status"] == "COMPLETED"
     # The usage sidecar is handed to the loop (which owns telemetry); the
     # backend itself records nothing.
     assert cands[0]["usage"] == [{"input_tokens": 100, "output_tokens": 10}]
@@ -187,7 +185,7 @@ def test_completed_after_running_then_gone(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, [f"100 0 {RUNNING}", ""],
         seed_fn=lambda rd: _seed_result(rd))
-    assert cands[0]["candidate_status"] == "COMPLETED"
+    assert cands[0]["status"] == "COMPLETED"
 
 
 def test_held_retry_then_success(tmp_path, monkeypatch):
@@ -195,7 +193,7 @@ def test_held_retry_then_success(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, [f"100 0 {HELD}", ""],
         seed_fn=lambda rd: _seed_result(rd, attempt=2, host="node2"))
-    assert cands[0]["candidate_status"] == "COMPLETED"
+    assert cands[0]["status"] == "COMPLETED"
     assert _job_json(tmp_path)["attempt"] == 2
     # Held triggered a worktree rebuild (remove + re-add from parent_sha) before
     # the final collect's own cleanup; the dirty worktree was never reused.
@@ -214,7 +212,6 @@ def test_held_exhausts_attempts(tmp_path, monkeypatch):
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
             proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-            prior_metrics={}, baseline_metrics=_BASELINE,
             journal=_journal(tmp_path))
     assert (tmp_path / INFLIGHT_NAME).exists()  # retained for --continue
 
@@ -231,7 +228,6 @@ def test_running_timeout(tmp_path, monkeypatch):
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
             proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-            prior_metrics={}, baseline_metrics=_BASELINE,
             journal=_journal(tmp_path))
 
 
@@ -256,9 +252,8 @@ def test_lost_then_retry_then_success(tmp_path, monkeypatch):
     backend = HEPJobBackend(ctx, _hep_cfg(tmp_path))
     cands = backend.run_candidates(
         proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-        prior_metrics={}, baseline_metrics=_BASELINE,
         journal=_journal(tmp_path))
-    assert cands[0]["candidate_status"] == "COMPLETED"
+    assert cands[0]["status"] == "COMPLETED"
     assert _job_json(tmp_path)["attempt"] == 2
 
 
@@ -278,7 +273,6 @@ def test_malformed_result_is_infra(tmp_path, monkeypatch):
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
             proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-            prior_metrics={}, baseline_metrics=_BASELINE,
             journal=_journal(tmp_path))
 
 
@@ -288,7 +282,7 @@ def test_query_failure_does_not_kill_job(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, ["", ""],
         seed_fn=lambda rd: _seed_result(rd))
-    assert cands[0]["candidate_status"] == "COMPLETED"
+    assert cands[0]["status"] == "COMPLETED"
 
 
 def test_resume_from_inflight(tmp_path, monkeypatch):
@@ -302,7 +296,7 @@ def test_resume_from_inflight(tmp_path, monkeypatch):
     backend._round_id = 0
     backend._parent_sha = "p"
     backend._journal = journal
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
+    job = backend._prepare(0, _fake_proposal(), 0, "p")
     backend._submit(job)
     backend._save([job])
     assert (tmp_path / INFLIGHT_NAME).exists()
@@ -314,7 +308,6 @@ def test_resume_from_inflight(tmp_path, monkeypatch):
     inflight = json.loads((tmp_path / INFLIGHT_NAME).read_text())
     # The round meta survives in the loop-owned file; the backend only gets
     # the jobs table back.
-    assert inflight["reflection"] == "refl"
     assert inflight["proposals"] == [_fake_proposal()]
     journal2 = _InflightJournal(
         tmp_path / INFLIGHT_NAME,
@@ -323,7 +316,7 @@ def test_resume_from_inflight(tmp_path, monkeypatch):
     cands = backend2.resume_round(
         inflight["jobs"], round_id=inflight["round_id"],
         parent_sha=inflight["parent_sha"], journal=journal2)
-    assert cands[0]["candidate_status"] == "COMPLETED"
+    assert cands[0]["status"] == "COMPLETED"
     assert (tmp_path / INFLIGHT_NAME).exists() is False
 
 
@@ -346,7 +339,7 @@ def test_ihep_real_group_derived_from_accounting_group(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
+    job = backend._prepare(0, _fake_proposal(), 0, "p")
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     # accounting_group "JUNO.juno.default" -> +IHEP_RealGroup = "juno"
@@ -361,7 +354,7 @@ def test_explicit_ihep_group_overrides_derivation(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, ihep_group="customgrp"))
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
+    job = backend._prepare(0, _fake_proposal(), 0, "p")
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert '+IHEP_RealGroup = "customgrp"' in sub
@@ -374,7 +367,7 @@ def test_cpu_model_emits_requirements(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, cpu_model="zen4"))
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
+    job = backend._prepare(0, _fake_proposal(), 0, "p")
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert "Requirements = CpuFamily==25 && CpuModelNumber==17" in sub
@@ -387,7 +380,7 @@ def test_no_cpu_model_omits_requirements(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
-    job = backend._prepare(0, _fake_proposal(), 0, "p", {}, _BASELINE)
+    job = backend._prepare(0, _fake_proposal(), 0, "p")
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert "Requirements" not in sub
@@ -404,5 +397,4 @@ def test_collect_filters_infra_keeps_business(tmp_path, monkeypatch):
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
             proposals=[_fake_proposal("p0"), _fake_proposal("p1")],
-            round_id=0, parent_sha="p", prior_metrics={},
-            baseline_metrics=_BASELINE, journal=_journal(tmp_path))
+            round_id=0, parent_sha="p", journal=_journal(tmp_path))
