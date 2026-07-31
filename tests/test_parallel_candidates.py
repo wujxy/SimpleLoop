@@ -16,7 +16,7 @@ from simpleloop.roles.executor import ExecResult
 from simpleloop.harness.evals import EvalResult
 from simpleloop.roles.judger import Judgment, _parse as parse_judgment
 from simpleloop.loop import RunContext, _run_candidates, _select_winner
-from simpleloop.roles.proposer import Proposal, ProposalBatch
+from simpleloop.roles.proposer import ProposalBatch
 from simpleloop.roles.proposer import _parse_batch
 from simpleloop.roles.proposer import _proposer_schema
 from simpleloop.roles.proposer import propose
