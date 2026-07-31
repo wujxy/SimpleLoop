@@ -69,6 +69,8 @@ artifact boundary, and resource budget are the constraints.
   not recommended research techniques.
 - Update prompt self-improvement to evolve only Researcher, Executor, and Meta
   Optimizer prompts.
+- Remove Judger score from summaries and reporting; simplify progress reporting
+  from a 3x3 score/objective/ratio grid to a 2x3 objective/ratio grid.
 - Preserve local and HEPJob execution, parallel candidates, resumption,
   telemetry, plotting, export, and static-proposal mode.
 
@@ -348,7 +350,19 @@ schemas, Goal, Gates, run facts, or task source.
   preserving the current remote completion contract.
 - A round with no selected candidate preserves the incumbent parent.
 
-## 11. Testing Strategy
+## 11. Reporting
+
+The run summary no longer exposes `best_score`. It continues to expose best
+SHA, round, candidate, objective, baseline objective, final chain SHA, and run
+provenance.
+
+Progress reporting removes the Judger score dimension. `progress.png` becomes a
+2x3 overview: objective and objective ratio, each plotted against round,
+cumulative worktime, and processed tokens. Offline detail plotting produces the
+same six panels. Legacy history rows may contain score values, but new reporting
+ignores them.
+
+## 12. Testing Strategy
 
 Implementation follows test-driven development. Required coverage includes:
 
@@ -371,13 +385,15 @@ Implementation follows test-driven development. Required coverage includes:
 10. Local and HEPJob candidate workers produce the same business result schema.
 11. Prompt self-improvement operates with the three remaining prompt files and
     rejects a reintroduced Judger prompt.
-12. README and active task examples describe the open Researcher architecture.
+12. Summary and plotting omit score and retain objective/ratio progress across
+    round, worktime, and token axes.
+13. README and active task examples describe the open Researcher architecture.
 
 The known pre-existing baseline mismatch remains outside this feature:
 `examples/tiny_algo_opt/task.yaml` configures two parallel candidates while
 `tests/test_parallel_candidates.py` expects three.
 
-## 12. Acceptance Criteria
+## 13. Acceptance Criteria
 
 The refactor is complete when:
 
