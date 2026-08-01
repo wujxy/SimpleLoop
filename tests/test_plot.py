@@ -12,6 +12,29 @@ from simpleloop.reporting.plot import build_series
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry
 
+
+_RESEARCHER = {
+    "model": "gpt-5.5", "base_url": "https://example.invalid",
+    "max_steps": 5, "command_timeout_seconds": 2,
+    "command_output_cap_chars": 1000,
+}
+
+
+class _FakeModel:
+    @classmethod
+    def from_config(cls, _config):
+        return object()
+
+
+class _FakeProposer:
+    def __init__(self, **_kwargs):
+        pass
+
+
+def _patch_researcher(monkeypatch) -> None:
+    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", _FakeModel)
+    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", _FakeProposer)
+
 # The six detail images are drawn by the offline script, not the package.
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plot_details.py"
 _spec = importlib.util.spec_from_file_location("plot_details", _SCRIPT)
@@ -260,6 +283,7 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
+        "researcher": _RESEARCHER,
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "editable_paths": ["src/**"],
@@ -293,6 +317,7 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    _patch_researcher(monkeypatch)
 
     summary = loop_mod.run("config.yaml", run_dir, continue_run=True)
 
@@ -564,6 +589,7 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
+        "researcher": _RESEARCHER,
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "editable_paths": ["src/**"],
@@ -598,6 +624,7 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    _patch_researcher(monkeypatch)
     monkeypatch.setattr(
         loop_mod,
         "_refresh_progress_plot",

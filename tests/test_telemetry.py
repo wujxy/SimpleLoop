@@ -175,6 +175,11 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
+        "researcher": {
+            "model": "gpt-5.5", "base_url": "https://example.invalid",
+            "max_steps": 5, "command_timeout_seconds": 2,
+            "command_output_cap_chars": 1000,
+        },
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "editable_paths": ["src/**"],
@@ -200,6 +205,15 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
             pass
 
     class FakeAgent:
+        def __init__(self, **kwargs):
+            observers.append(kwargs.get("usage_observer"))
+
+    class FakeModel:
+        @classmethod
+        def from_config(cls, _config):
+            return object()
+
+    class FakeProposer:
         def __init__(self, **kwargs):
             observers.append(kwargs.get("usage_observer"))
 
@@ -242,6 +256,8 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
+    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FakeProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 

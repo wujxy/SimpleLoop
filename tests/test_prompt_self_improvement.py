@@ -162,7 +162,9 @@ def test_history_records_idempotent_trigger_and_recovers_inflight(tmp_path: Path
 
     recovered = history.recover_inflight()
     assert recovered == {"run_id": "run-a", "trigger_round": 2, "parent": "v000"}
-    assert "You are the RESEARCHER" in (history.prompt_dir / "proposer.md").read_text()
+    assert (history.prompt_dir / "proposer.md").read_text() == (
+        load_semantic("proposer") + "\n"
+    )
     assert history.events()[-1]["status"] == "interrupted"
 
 
@@ -182,7 +184,9 @@ def test_history_rolls_back_snapshot_created_by_interrupted_trigger(
 
     assert history.state["active_version"] == "v000"
     assert not (history.history_dir / "v001").exists()
-    assert "You are the RESEARCHER" in (history.prompt_dir / "proposer.md").read_text()
+    assert (history.prompt_dir / "proposer.md").read_text() == (
+        load_semantic("proposer") + "\n"
+    )
 
 
 def test_history_preserves_completed_trigger_with_stale_inflight(tmp_path: Path):
@@ -561,7 +565,9 @@ def test_supervisor_restores_parent_after_optimizer_error(tmp_path: Path):
     root = run_dir / "self_improvement"
     history = PromptHistory(root / "prompts", root / "prompt_history")
     assert history.state["active_version"] == "v000"
-    assert "You are the RESEARCHER" in (history.prompt_dir / "proposer.md").read_text()
+    assert (history.prompt_dir / "proposer.md").read_text() == (
+        load_semantic("proposer") + "\n"
+    )
     assert [event["status"] for event in history.events()] == ["rejected", "rejected"]
 
 
@@ -627,9 +633,9 @@ def test_each_run_starts_from_its_own_v000(tmp_path: Path):
 
     assert history_a.state["active_version"] == "v001"
     assert history_b.state["active_version"] == "v000"
-    assert "You are the RESEARCHER" in (
-        history_b.prompt_dir / "proposer.md"
-    ).read_text()
+    assert (history_b.prompt_dir / "proposer.md").read_text() == (
+        load_semantic("proposer") + "\n"
+    )
 
 
 def _summary(run_dir: Path) -> dict:
