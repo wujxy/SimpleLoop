@@ -894,6 +894,15 @@ def test_run_preflights_before_agent_or_workspace(
             events.append("agent")
             self.runtime = runtime
 
+    class FakeModel:
+        @classmethod
+        def from_config(cls, _config):
+            return object()
+
+    class FakeProposer:
+        def __init__(self, **_kwargs):
+            events.append("agent")
+
     class FakeWorkspace:
         def __init__(self, *, run_dir, **kwargs):
             self.repo = Path(run_dir) / "repo"
@@ -929,6 +938,11 @@ def test_run_preflights_before_agent_or_workspace(
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 60,
+        "researcher": {
+            "model": "gpt-5.5", "base_url": "https://example.invalid",
+            "max_steps": 5, "command_timeout_seconds": 2,
+            "command_output_cap_chars": 1000,
+        },
         "runtime_image": str(tmp_path / "runtime.sif"),
         "runtime_binds": [],
         "eval_commands": ["run-eval"],
@@ -940,6 +954,8 @@ def test_run_preflights_before_agent_or_workspace(
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
+    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FakeProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 
