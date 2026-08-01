@@ -215,7 +215,9 @@ def test_agent_injects_recent_facts_all_insights_and_immutable_protocol(
     call = model.calls[0]
     assert call["system"].startswith("ACTIVE SCIENTIST")
     assert "run_research_command" in call["system"]
+    assert "Inspect the accepted source" in call["system"]
     assert "cannot call the Executor" in call["system"]
+    assert "No action is mandatory" not in call["system"]
     context = call["messages"][0]["content"]
     assert '"round": 1' in context
     facts = context.split("Recent factual outcomes:", 1)[1].split(

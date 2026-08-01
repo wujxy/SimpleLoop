@@ -10,9 +10,11 @@ import pytest
 from simpleloop.roles.research_tools import (
     Insight,
     InsightStore,
+    RESEARCH_TOOL_SPECS,
     ResearchCommandRunner,
     ResearchTools,
     render_insights,
+    render_research_tool_prompt,
     search_history,
 )
 
@@ -164,6 +166,20 @@ def test_render_insights_keeps_all_records_compact():
     ]
 
     assert json.loads(render_insights(records)) == records
+
+
+def test_research_tool_prompt_is_composed_from_tool_specs():
+    prompt = render_research_tool_prompt()
+
+    assert {spec.action for spec in RESEARCH_TOOL_SPECS} == {
+        "run_research_command",
+        "search_history",
+        "inspect_episode",
+        "write_insight",
+    }
+    for spec in RESEARCH_TOOL_SPECS:
+        assert spec.schema in prompt
+        assert spec.description in prompt
 
 
 def _runner(tmp_path, *, cap=100, timeout=12):

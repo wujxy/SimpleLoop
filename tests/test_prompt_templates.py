@@ -34,9 +34,13 @@ class EmptyWorkspace:
 
 def test_load_semantic_uses_identity_internalized_v000():
     text = load_semantic("proposer")
-    assert text.startswith("You are the lead scientific RESEARCHER")
+    normalized = " ".join(text.split())
+    assert text.startswith("You are the Scientist responsible")
+    assert "experimental opportunity" in normalized
+    assert "Executor is implementation capacity" in normalized
     assert "Harness" in text
-    assert "hypoth" in text.lower()
+    assert '"action"' not in text
+    assert "run_research_command" not in text
 
 
 def test_load_semantic_uses_active_prompt_directory(tmp_path: Path):

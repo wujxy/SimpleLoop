@@ -8,7 +8,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .model import ChatModel
-from .research_tools import Insight, ResearchTools, render_insights
+from .research_tools import (
+    Insight,
+    ResearchTools,
+    render_insights,
+    render_research_tool_prompt,
+)
 from ..container.runtime import ApptainerRuntime
 from ..harness import views
 from ..prompts import load_semantic
@@ -25,23 +30,33 @@ class ProposerResult:
     usage: object = None
 
 
-_RUNTIME_PROTOCOL = """
-Runtime contract (immutable):
-- Return exactly one JSON object per response, with no prose outside it.
-- Available non-terminal actions:
-  {"action":"run_research_command","command":"...","cwd":"source|scratch"}
-  {"action":"search_history","query":"..."}
-  {"action":"inspect_episode","ref":"r<round>c<candidate>"}
-  {"action":"write_insight","text":"1..500 chars","refs":["r0c0"]}
-- Terminal action:
-  {"action":"submit_proposals","proposals":["executable instruction"]}
+_PROTOCOL_ENVELOPE = (
+    "Runtime contract (immutable):\n"
+    "Return exactly one JSON object per response, with no prose outside it."
+)
+
+_TERMINAL_ACTION_PROMPT = (
+    "Terminal action:\n"
+    '- {"action":"submit_proposals",'
+    '"proposals":["executable instruction"]}'
+)
+
+_RUNTIME_BOUNDARIES = """Runtime boundaries:
 - /source is the accepted revision, /repo is its read-only Git repository,
   /history.jsonl and /rounds are persisted run evidence when present, and
   /scratch is temporary writable space.
 - You cannot call the Executor or Harness, edit candidates, choose a parent,
   or declare evaluation and Gate facts. Only Harness records are authoritative.
-- Choose research actions and their order adaptively. No action is mandatory.
 """.strip()
+
+
+def _runtime_protocol() -> str:
+    return "\n\n".join((
+        _PROTOCOL_ENVELOPE,
+        "Research tools:\n" + render_research_tool_prompt(),
+        _TERMINAL_ACTION_PROMPT,
+        _RUNTIME_BOUNDARIES,
+    ))
 
 _MAX_PROTOCOL_REPAIRS = 2
 
@@ -121,7 +136,7 @@ class ProposerAgent:
     ) -> ProposerResult:
         system_prompt = (
             f"{load_semantic('proposer', prompt_dir).rstrip()}\n\n"
-            f"{_RUNTIME_PROTOCOL}"
+            f"{_runtime_protocol()}"
         )
         messages = [{
             "role": "user",

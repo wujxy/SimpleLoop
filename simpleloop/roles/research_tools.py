@@ -13,6 +13,64 @@ from threading import Thread
 from ..harness.memory import resolve_episode
 
 
+@dataclass(frozen=True)
+class ResearchToolSpec:
+    """Prompt description owned by the research tool boundary."""
+
+    action: str
+    schema: str
+    description: str
+
+
+RESEARCH_TOOL_SPECS = (
+    ResearchToolSpec(
+        action="run_research_command",
+        schema=(
+            '{"action":"run_research_command","command":"...",'
+            '"cwd":"source|scratch"}'
+        ),
+        description=(
+            "Inspect the accepted source, Git state, or run evidence with a "
+            "bounded shell command. Source is read-only; scratch is writable."
+        ),
+    ),
+    ResearchToolSpec(
+        action="search_history",
+        schema='{"action":"search_history","query":"..."}',
+        description=(
+            "Search all factual candidate history and return compact matches "
+            "without full evaluation output."
+        ),
+    ),
+    ResearchToolSpec(
+        action="inspect_episode",
+        schema='{"action":"inspect_episode","ref":"r<round>c<candidate>"}',
+        description=(
+            "Resolve one factual candidate episode, including its bounded "
+            "Harness evaluation output."
+        ),
+    ),
+    ResearchToolSpec(
+        action="write_insight",
+        schema=(
+            '{"action":"write_insight","text":"1..500 chars",'
+            '"refs":["r0c0"]}'
+        ),
+        description=(
+            "Preserve a durable, revisable interpretation indexed by factual "
+            "episode references. A later insight in the same run replaces it."
+        ),
+    ),
+)
+
+
+def render_research_tool_prompt() -> str:
+    return "\n".join(
+        f"- {spec.schema}\n  {spec.description}"
+        for spec in RESEARCH_TOOL_SPECS
+    )
+
+
 def search_history(
     history: list[dict], query: str, *, limit: int = 20,
 ) -> list[dict]:
