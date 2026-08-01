@@ -62,16 +62,12 @@ def test_spec_serialization_round_trip(tmp_path: Path):
     assert again == spec
 
 
-def test_spec_ignores_legacy_semantic_fields(tmp_path: Path):
+def test_spec_rejects_unknown_manifest_fields(tmp_path: Path):
     data = _spec(tmp_path).to_dict()
-    data.update({
-        "family": "layout",
-        "decision": "switch",
-        "prior_metrics": {"SPEED_MS": 150.0},
-        "baseline_metrics": {"SPEED_MS": 200.0},
-    })
+    data["decision"] = "old semantic field"
 
-    assert CandidateSpec.from_dict(data) == _spec(tmp_path)
+    with pytest.raises(ValueError, match="unknown candidate manifest fields"):
+        CandidateSpec.from_dict(data)
 
 
 def test_run_candidate_completed(tmp_path: Path, monkeypatch):
@@ -199,13 +195,11 @@ def test_write_result_is_atomic_and_marks_finished(tmp_path: Path):
     assert not (out / "result.json.tmp").exists()
 
 
-def _write_manifest(tmp_path: Path, spec: CandidateSpec,
-                    extra: dict | None = None) -> Path:
+def _write_manifest(tmp_path: Path, spec: CandidateSpec) -> Path:
     run_dir = tmp_path / "run"
     run_dir.mkdir(exist_ok=True)
     (run_dir / "config.resolved.json").write_text("{}", encoding="utf-8")
-    manifest = {"run_id": "run_001", **spec.to_dict(),
-                "run_dir": str(run_dir), **(extra or {})}
+    manifest = {**spec.to_dict(), "run_dir": str(run_dir)}
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
     return path

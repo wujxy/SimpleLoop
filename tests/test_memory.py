@@ -48,6 +48,17 @@ def _parallel_history() -> list[dict]:
     }]
 
 
+def test_read_history_rejects_records_without_current_candidate_facts(tmp_path):
+    path = tmp_path / "history.jsonl"
+    path.write_text(json.dumps({
+        "round": 0,
+        "candidates": [{"candidate": 0, "candidate_status": "COMPLETED"}],
+    }) + "\n")
+
+    with pytest.raises(ValueError, match="current candidate schema"):
+        memory.read_history(path)
+
+
 def test_resolve_parallel_episode_returns_only_factual_fields():
     episode = memory.resolve_episode(_parallel_history(), "r2c1")
 

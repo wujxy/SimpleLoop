@@ -11,7 +11,7 @@ import yaml
 from simpleloop import cli, config
 from simpleloop import loop
 from simpleloop.self_improvement.gate import (
-    OptimizerReport, PromptGate, identity_core,
+    OptimizerReport, PromptGate,
 )
 from simpleloop.self_improvement.history import PromptHistory
 from simpleloop.self_improvement.optimizer import MetaOptimizer
@@ -121,40 +121,6 @@ def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):
 
 def test_prompt_names_exclude_judger():
     assert PROMPT_NAMES == ("proposer", "executor", "meta_optimizer")
-
-
-def test_existing_lineage_migrates_only_the_active_prompt_set(tmp_path: Path):
-    history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
-    history.prompt_dir.mkdir(parents=True)
-    snapshot = history.history_dir / "v000"
-    snapshot.mkdir(parents=True)
-    legacy_meta = load_semantic("meta_optimizer").replace(
-        "Researcher, Executor, and Harness",
-        "Proposer, Executor, Judger, and Harness",
-        1,
-    )
-    for name, value in {
-        "proposer": load_semantic("proposer"),
-        "executor": load_semantic("executor"),
-        "judger": "legacy judger",
-        "meta_optimizer": legacy_meta,
-    }.items():
-        (history.prompt_dir / f"{name}.md").write_text(value, encoding="utf-8")
-        (snapshot / f"{name}.md").write_text(value, encoding="utf-8")
-    (snapshot / "manifest.yaml").write_text("version: v000\n", encoding="utf-8")
-    history._write_state({"active_version": "v000", "inflight": None})
-
-    assert history.initialize() == "v000"
-    assert not (history.prompt_dir / "judger.md").exists()
-    assert (snapshot / "judger.md").read_text(encoding="utf-8") == "legacy judger"
-    assert identity_core(
-        (history.prompt_dir / "meta_optimizer.md").read_text(encoding="utf-8")
-    ) == identity_core(load_semantic("meta_optimizer"))
-    assert PromptGate().check(history.prompt_dir) == []
-
-    history.restore("v000")
-    assert not (history.prompt_dir / "judger.md").exists()
-    assert PromptGate().check(history.prompt_dir) == []
 
 
 def test_history_initialization_replaces_orphan_v000(tmp_path: Path):
@@ -417,6 +383,29 @@ def test_supervisor_stops_each_segment_before_optimizer(tmp_path: Path):
     assert [
         event["status"] for event in summary["self_improvement"]["events"]
     ] == ["no_change", "no_change"]
+
+
+def test_supervisor_rejects_noncurrent_active_prompt_set(tmp_path: Path):
+    task = _task_file(tmp_path, _enabled(interval_rounds=2))
+    run_dir = tmp_path / "run"
+    history = PromptHistory(
+        run_dir / "self_improvement" / "prompts",
+        run_dir / "self_improvement" / "prompt_history",
+    )
+    history.initialize()
+    (history.prompt_dir / "judger.md").write_text("obsolete role")
+
+    with pytest.raises(ValueError, match="active prompt set"):
+        supervisor.run(
+            task,
+            run_dir,
+            artifact_runner=lambda *_args, **_kwargs: pytest.fail(
+                "artifact loop called"
+            ),
+            optimizer_factory=lambda **_kwargs: pytest.fail(
+                "optimizer created"
+            ),
+        )
 
 
 def test_supervisor_does_not_optimize_after_final_interval_boundary(

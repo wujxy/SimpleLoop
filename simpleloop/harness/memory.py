@@ -21,9 +21,24 @@ def read_history(path: Path) -> list[dict]:
         return []
     try:
         with path.open(encoding="utf-8") as stream:
-            return [json.loads(line) for line in stream if line.strip()]
+            rows = [json.loads(line) for line in stream if line.strip()]
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not read history memory {path}: {exc}") from exc
+    required = {"status", "gate_passed", "eligible"}
+    if any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("candidates"), list)
+        or any(
+            not isinstance(candidate, dict)
+            or not required <= candidate.keys()
+            for candidate in row["candidates"]
+        )
+        for row in rows
+    ):
+        raise ValueError(
+            f"history memory {path} does not use the current candidate schema"
+        )
+    return rows
 
 
 def _parse_episode_ref(ref: str) -> tuple[int, int]:
@@ -61,11 +76,9 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
         "proposal": candidate.get("proposal") or "",
         "parent_sha": candidate.get("parent_sha") or record.get("parent_sha"),
         "candidate_sha": candidate.get("sha"),
-        "status": candidate.get("status") or candidate.get("candidate_status"),
+        "status": candidate.get("status"),
         "selected": bool(candidate.get("selected")),
-        "gate_passed": candidate.get(
-            "gate_passed", candidate.get("accepted"),
-        ),
+        "gate_passed": candidate.get("gate_passed"),
         "eligible": candidate.get("eligible"),
         "gates": candidate.get("gates") or {},
         "metrics": candidate.get("metrics") or {},

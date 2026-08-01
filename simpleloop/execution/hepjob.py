@@ -686,9 +686,12 @@ class HEPJobBackend(ExecutionBackend):
             raise ValueError(f"{exc}") from exc
         if not isinstance(result, dict):
             raise ValueError("result.json is not a candidate result object")
-        if "status" not in result and isinstance(result.get("candidate_status"), str):
-            result["status"] = result.pop("candidate_status")
-        if not isinstance(result.get("status"), str):
+        if (
+            not isinstance(result.get("status"), str)
+            or not isinstance(result.get("gates"), dict)
+            or not isinstance(result.get("gate_passed"), bool)
+            or not isinstance(result.get("eligible"), bool)
+        ):
             raise ValueError("result.json is not a candidate result object")
         return result
 

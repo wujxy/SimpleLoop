@@ -8,7 +8,7 @@ from pathlib import Path
 from . import memory as memory_mod
 
 def eligible(candidate: dict, metrics_schema: dict) -> bool:
-    """Return whether a new or legacy candidate may enter selection."""
+    """Return whether a candidate may enter objective selection."""
     if not candidate.get("sha"):
         return False
     metrics = candidate.get("metrics") or {}
@@ -18,26 +18,18 @@ def eligible(candidate: dict, metrics_schema: dict) -> bool:
         and not isinstance(objective, bool)
         and math.isfinite(objective)
     )
-    if "eligible" in candidate:
-        return (
-            candidate.get("eligible") is True
-            and candidate.get("gate_passed") is True
-            and numeric
-        )
-    if str(candidate.get("risk", "")).lower() == "high":
-        return False
-    gates_pass = all(
-        metrics.get(item["key"]) is True
-        for item in metrics_schema.get("gates", [])
+    return (
+        candidate.get("eligible") is True
+        and candidate.get("gate_passed") is True
+        and numeric
     )
-    return gates_pass and numeric
 
 
 def best_candidate(rounds: list[dict], metrics_schema: dict) -> dict | None:
     """The eligible candidate with the best objective over a full history.
 
     Returns the first candidate at the best objective (with its round attached)
-    or None. Used by both Store best tracking and ``simpleloop export``.
+    or None.
     """
     obj = metrics_schema["objective"]
     obj_key = obj["key"]
@@ -65,9 +57,6 @@ class Store:
         self.metrics_schema = metrics_schema
         # Cap evaluator output stored per candidate so history stays bounded.
         self.history_eval_cap = history_eval_cap
-        self.best_sha: str | None = None        # harness-selected best commit
-        self.best_round: int | None = None
-        self.best_candidate: int | None = None
 
     def history(self) -> list[dict]:
         """Read all rounds back (for the proposer's prompt)."""
@@ -86,12 +75,12 @@ class Store:
                 "proposal": c.get("proposal") or "",
                 "parent_sha": c.get("parent_sha") or parent_sha,
                 "sha": c.get("sha"),
-                "status": c.get("status") or c.get("candidate_status"),
+                "status": c.get("status"),
                 "eval_block": (c.get("eval_block") or "")[:self.history_eval_cap],
                 "metrics": c.get("metrics") or {},
                 "changed_paths": c.get("changed_paths") or [],
                 "gates": c.get("gates") or {},
-                "gate_passed": c.get("gate_passed", c.get("accepted")),
+                "gate_passed": c.get("gate_passed"),
                 "eligible": eligible(c, self.metrics_schema),
                 "selected": c.get("candidate", i) == selected_candidate,
                 "telemetry": dict(c.get("telemetry") or {}),
@@ -111,17 +100,6 @@ class Store:
         }
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._recompute_best()
-
-    def _recompute_best(self) -> None:
-        """Recompute the metric-based best over the full history (from scratch
-        each append, so a rule change never leaves stale best state)."""
-        best = best_candidate(self.history(), self.metrics_schema)
-        if best is None:
-            return
-        self.best_sha = best["sha"]
-        self.best_round = best["round"]
-        self.best_candidate = best.get("candidate")
 
 
 

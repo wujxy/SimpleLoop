@@ -15,7 +15,7 @@ from simpleloop.harness.evals import EvalResult
 from simpleloop.loop import RunContext, _run_candidates, _select_winner
 from simpleloop.roles.proposer import ProposalBatch
 from simpleloop.roles.proposer import _proposer_schema
-from simpleloop.harness.store import Store
+from simpleloop.harness.store import Store, best_candidate
 
 
 EXAMPLES = Path(__file__).parents[1] / "examples"
@@ -60,11 +60,11 @@ def test_config_parallel_defaults(tmp_path: Path):
     assert cfg["max_workers"] == 1
 
 
-def test_tiny_example_uses_parallel_objective_selection():
+def test_tiny_example_uses_configured_parallel_fanout():
     raw = _example_yaml("tiny_algo_opt/task.yaml")
 
-    assert raw["loop"]["candidates_per_round"] == 3
-    assert raw["loop"]["max_workers"] == 3
+    assert raw["loop"]["candidates_per_round"] == 2
+    assert raw["loop"]["max_workers"] == 2
     gates = raw["eval"]["metrics"]["gates"]
     assert [g["key"] for g in gates] == ["CORRECTNESS", "DRIFT"]
     assert all("description" in g for g in gates), "every gate declares a description"
@@ -269,6 +269,35 @@ def test_selector_uses_best_candidate_when_prior_objective_is_missing():
     assert _select_winner(candidates, schema, prior_metrics={})["sha"] == "fast"
 
 
+def test_round_performance_reports_best_eligible_value_and_relative_improvement(
+    capsys,
+):
+    schema = {
+        "objective": {"key": "OBJECTIVE", "lower_is_better": True},
+        "gates": [{"key": "CORRECTNESS"}],
+    }
+    candidates = [
+        {"candidate": 0, "sha": "valid", "gate_passed": True,
+         "eligible": True,
+         "metrics": {"OBJECTIVE": 110.0, "CORRECTNESS": True}},
+        {"candidate": 1, "sha": "rejected", "gate_passed": False,
+         "eligible": False,
+         "metrics": {"OBJECTIVE": 50.0, "CORRECTNESS": False}},
+    ]
+
+    loop_mod._print_round_performance(
+        round_id=2,
+        candidates=candidates,
+        metrics_schema=schema,
+        prior_metrics={"OBJECTIVE": 100.0},
+    )
+
+    output = capsys.readouterr().out
+    assert "harness performance round 3: OBJECTIVE=110" in output
+    assert "relative improvement=-10.00%" in output
+    assert "OBJECTIVE=50" not in output
+
+
 def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     store = Store(tmp_path, metrics_schema={
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -292,7 +321,7 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
     assert rows[0]["selected_sha"] == "b"
     assert rows[0]["candidates"][1]["selected"] is True
     assert rows[0]["candidates"][0]["gates"]["CORRECTNESS"]["passed"] is True
-    assert store.best_sha == "b"
+    assert best_candidate(rows, store.metrics_schema)["sha"] == "b"
 
     projected = views.for_proposer(rows)
     assert projected[0]["selected_sha"] == "b"
@@ -338,7 +367,9 @@ def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Pat
     assert generation["base_sha"] == "best"
     assert generation["candidates"][0]["sha"] == "slower"
     assert generation["candidates"][0]["selected"] is False
-    assert store.best_sha == "best"
+    assert best_candidate(
+        store.history(), store.metrics_schema,
+    )["sha"] == "best"
 
 
 def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path: Path):
@@ -473,7 +504,7 @@ def test_run_candidates_normalizes_serial_worker_failure(monkeypatch, capsys):
 
 def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):
     agent = Agent(runtime=object())
-    expected = {"reflection": "", "proposals": []}
+    expected = {"proposals": []}
 
     def fake_run(*_args, **_kwargs):
         return AgentResult(text="ignored", data=expected)
@@ -493,7 +524,7 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
 
     def fake_run(*_args, **_kwargs):
         return AgentResult(
-            text='explanation before {"reflection":"","proposals":[]}',
+            text='explanation before {"proposals":[]}',
             data={},
         )
 

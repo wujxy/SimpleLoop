@@ -18,11 +18,9 @@ def for_proposer(history: list[dict], *, recent_rounds: int = _PROPOSER_RECENT_R
                     "proposal": c.get("proposal") or "",
                     "parent_sha": c.get("parent_sha") or r.get("parent_sha"),
                     "sha": c.get("sha") or None,
-                    "status": c.get("status") or c.get("candidate_status"),
+                    "status": c.get("status"),
                     "selected": bool(c.get("selected")),
-                    "gate_passed": c.get(
-                        "gate_passed", c.get("accepted"),
-                    ),
+                    "gate_passed": c.get("gate_passed"),
                     "eligible": c.get("eligible"),
                     "gates": c.get("gates") or {},
                     "metrics": c.get("metrics") or {},
@@ -46,4 +44,3 @@ def gate_block(metrics_schema: dict | None) -> str:
     if not described:
         return ""
     return "\n".join(f"- {g['key']}: {g['description']}" for g in described)
-

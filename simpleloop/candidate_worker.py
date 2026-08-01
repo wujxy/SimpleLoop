@@ -70,6 +70,11 @@ class CandidateSpec:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CandidateSpec":
+        unknown = set(data) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ValueError(
+                f"unknown candidate manifest fields: {sorted(unknown)}"
+            )
         return cls(
             round_id=int(data["round_id"]),
             candidate_id=int(data["candidate_id"]),
@@ -408,9 +413,12 @@ def main(argv: list[str] | None = None) -> int:
               flush=True)
         result = candidate_failure(
             int(spec_dict.get("candidate_id") or 0),
-            CandidateSpec.from_dict(spec_dict) if spec_dict else CandidateSpec(
-                round_id=0, candidate_id=0, parent_sha="",
-                proposal=""),
+            CandidateSpec(
+                round_id=int(spec_dict.get("round_id") or 0),
+                candidate_id=int(spec_dict.get("candidate_id") or 0),
+                parent_sha=str(spec_dict.get("parent_sha") or ""),
+                proposal=str(spec_dict.get("proposal") or ""),
+            ),
             f"worker failed: {exc}",
             str(spec_dict.get("parent_sha") or ""),
             status="WORKER_FAILED",

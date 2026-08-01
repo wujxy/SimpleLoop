@@ -20,17 +20,16 @@ _spec.loader.exec_module(plot_details)
 write_detail_pngs = plot_details.write_detail_pngs
 
 
-def _single_candidate_record(round_id: int, *, score, metrics,
-                             accepted: bool = True,
+def _single_candidate_record(round_id: int, *, metrics,
+                             selected: bool = True,
                              telemetry: dict | None = None) -> dict:
     """A one-candidate generation record (the only shape the loop writes)."""
     record = {
         "round": round_id,
-        "selected_candidate": 0 if accepted else None,
-        "selected_sha": f"sha-{round_id}" if accepted else None,
+        "selected_candidate": 0 if selected else None,
+        "selected_sha": f"sha-{round_id}" if selected else None,
         "candidates": [{
             "candidate": 0,
-            "score": score,
             "metrics": metrics,
         }],
     }
@@ -55,12 +54,10 @@ def test_build_series_tracks_parallel_candidates_selected_and_incumbent():
             "candidates": [
                 {
                     "candidate": 0,
-                    "score": 0.4,
                     "metrics": {"SPEED_MS": 120.0},
                 },
                 {
                     "candidate": 1,
-                    "score": 0.8,
                     "metrics": {"SPEED_MS": 90.0},
                 },
             ],
@@ -72,7 +69,6 @@ def test_build_series_tracks_parallel_candidates_selected_and_incumbent():
             "candidates": [
                 {
                     "candidate": 0,
-                    "score": 0.3,
                     "metrics": {"SPEED_MS": 110.0},
                 },
             ],
@@ -93,10 +89,10 @@ def test_build_series_tracks_parallel_candidates_selected_and_incumbent():
 
 def test_build_series_supports_single_candidate_history_and_missing_values():
     history = [
-        _single_candidate_record(0, score=0.7, metrics={"QUALITY": 10.0}),
+        _single_candidate_record(0, metrics={"QUALITY": 10.0}),
         _single_candidate_record(
-            1, score=None, metrics={"QUALITY": "unknown"}, accepted=False),
-        _single_candidate_record(2, score=True, metrics={"QUALITY": 12}),
+            1, metrics={"QUALITY": "unknown"}, selected=False),
+        _single_candidate_record(2, metrics={"QUALITY": 12}),
     ]
     schema = {
         "objective": {"key": "QUALITY", "lower_is_better": False},
@@ -123,7 +119,6 @@ def test_build_series_requires_selected_sha_to_advance_parallel_incumbent():
             "candidates": [
                 {
                     "candidate": 0,
-                    "score": 0.8,
                     "metrics": {"SPEED_MS": 90.0},
                 },
             ],
@@ -139,7 +134,7 @@ def test_build_series_requires_selected_sha_to_advance_parallel_incumbent():
 def test_build_series_skips_non_finite_values():
     history = [
         _single_candidate_record(
-            0, score=math.nan, metrics={"SPEED_MS": math.inf}),
+            0, metrics={"SPEED_MS": math.inf}),
     ]
 
     series = build_series(history, SCHEMA)
@@ -157,12 +152,10 @@ def test_write_progress_png_creates_valid_png(tmp_path):
             "candidates": [
                 {
                     "candidate": 0,
-                    "score": 0.8,
                     "metrics": {"SPEED_MS": 90.0},
                 },
                 {
                     "candidate": 1,
-                    "score": 0.4,
                     "metrics": {"SPEED_MS": 120.0},
                 },
             ],
@@ -213,8 +206,8 @@ def test_refresh_progress_plot_uses_persisted_history(monkeypatch, tmp_path):
     store.append_generation(
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
-            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
-            "risk": "low", "accepted": True, "feedback": "feedback",
+            "candidate": 0, "proposal": "proposal", "sha": "sha",
+            "status": "COMPLETED", "gate_passed": True, "eligible": True,
             "metrics": {"SPEED_MS": 90.0, "CORRECTNESS": True},
         }])
     captured = {}
@@ -257,8 +250,8 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     store.append_generation(
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
-            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
-            "risk": "low", "accepted": True, "feedback": "feedback",
+            "candidate": 0, "proposal": "proposal", "sha": "sha",
+            "status": "COMPLETED", "gate_passed": True, "eligible": True,
             "metrics": {"SPEED_MS": 90.0, "CORRECTNESS": True},
         }])
     config = {
@@ -334,7 +327,6 @@ HISTORY = [{
     "candidates": [
         {
             "candidate": 0,
-            "score": 0.4,
             "metrics": {"SPEED_MS": 120.0},
             "telemetry": {
                 "worktime_seconds": 20.0,
@@ -343,7 +335,6 @@ HISTORY = [{
         },
         {
             "candidate": 1,
-            "score": 0.8,
             "metrics": {"SPEED_MS": 80.0},
             "telemetry": {
                 "worktime_seconds": 25.0,
@@ -369,7 +360,6 @@ def test_build_series_maps_candidate_and_generation_coordinates():
     assert selected.round == 1
     assert selected.worktime_hours == 25.0 / 3600.0
     assert selected.processed_tokens == 250
-    assert not hasattr(selected, "score")
     assert selected.objective == 80.0
     # lower_is_better: True inverts the ratio (baseline/objective) so the third row
     # reads as an improvement multiple where higher is better: 100ms/80ms = 1.25x.
@@ -466,7 +456,7 @@ def test_ratio_panel_keeps_raw_ratio_for_higher_is_better():
         "selected_candidate": 0,
         "selected_sha": "winner",
         "candidates": [
-            {"candidate": 0, "score": 0.8, "metrics": {"QUALITY": 12.0}},
+            {"candidate": 0, "metrics": {"QUALITY": 12.0}},
         ],
     }]
     plt = plot_mod._prepare_pyplot()
@@ -519,8 +509,8 @@ def test_refresh_progress_plot_passes_persisted_context(
     store.append_generation(
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
-            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
-            "risk": "low", "accepted": True, "feedback": "feedback",
+            "candidate": 0, "proposal": "proposal", "sha": "sha",
+            "status": "COMPLETED", "gate_passed": True, "eligible": True,
             "metrics": {"SPEED_MS": 90.0},
         }])
     context = {
@@ -561,8 +551,8 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
     store.append_generation(
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
-            "candidate": 0, "proposal": "proposal", "sha": "sha", "score": 0.8,
-            "risk": "low", "accepted": True, "feedback": "feedback",
+            "candidate": 0, "proposal": "proposal", "sha": "sha",
+            "status": "COMPLETED", "gate_passed": True, "eligible": True,
             "metrics": {"SPEED_MS": 90.0},
         }])
     telemetry = RunTelemetry(run_dir)

@@ -309,6 +309,9 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 ctx.metrics_schema,
                 prior_metrics=prior_metrics,
             )
+        _print_round_performance(
+            round_id, candidates, ctx.metrics_schema, prior_metrics,
+        )
         selected_candidate = winner.get("candidate") if winner else None
         selected_sha = winner.get("sha") if winner else None
         for candidate in candidates:
@@ -333,9 +336,10 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         parent_sha = next_base_sha
 
-    print(f"\n[{stamp()}] done. best={ctx.store.best_sha}", flush=True)
+    summary = _summary(ctx, run_dir_path)
+    print(f"\n[{stamp()}] done. best={summary['best_sha']}", flush=True)
     print(f"[{stamp()}] working repo (for tracing): {ctx.workspace.repo}", flush=True)
-    return _summary(ctx, run_dir_path)
+    return summary
 
 
 def _build_context(
@@ -656,6 +660,35 @@ def _select_winner(candidates: list[dict],
         if not improved:
             return None
     return winner
+
+
+def _print_round_performance(
+    round_id: int,
+    candidates: list[dict],
+    metrics_schema: dict,
+    prior_metrics: dict | None,
+) -> None:
+    """Print the best gate-passing harness result against the round parent."""
+    obj = metrics_schema["objective"]
+    key = obj["key"]
+    best = _select_winner(candidates, metrics_schema)
+    if best is None:
+        result = f"{key}=unavailable (no eligible candidate)"
+    else:
+        value = best["metrics"][key]
+        delta = evals.objective_delta(
+            value, (prior_metrics or {}).get(key), obj["lower_is_better"],
+        )
+        relative = "unavailable"
+        if delta is not None:
+            pct_change, _ = delta
+            improvement = -pct_change if obj["lower_is_better"] else pct_change
+            relative = f"{improvement:+.2f}%"
+        result = f"{key}={value:g}, relative improvement={relative}"
+    print(
+        f"[{stamp()}] harness performance round {round_id + 1}: {result}",
+        flush=True,
+    )
 
 
 def _resume_chain(history: list[dict],

@@ -177,7 +177,7 @@ def test_rename_from_frozen_to_editable_exposes_both_paths(tmp_path: Path):
     ) == (False, ["frozen.txt: touches a frozen path"])
 
 
-def _seed_run(tmp_path: Path, *, risk: str = "low"):
+def _seed_run(tmp_path: Path):
     """A real one-round run_dir: cloned repo, one committed candidate, history,
     and a resolved-config snapshot."""
     src = _make_source(tmp_path)
@@ -196,9 +196,10 @@ def _seed_run(tmp_path: Path, *, risk: str = "low"):
         0, parent_sha=baseline, selected_candidate=0, selected_sha=sha,
         candidates=[{
             "candidate": 0, "proposal": "speed it up", "sha": sha,
-            "score": 0.8, "risk": risk,
+            "status": "COMPLETED",
             "metrics": {"SPEED_MS": 90.0, "CORRECTNESS": True},
-            "accepted": True, "selected": True,
+            "gates": {"CORRECTNESS": {"passed": True, "detail": ""}},
+            "gate_passed": True, "eligible": True, "selected": True,
         }])
     cfg = {"metrics": SCHEMA, "baseline_ref": "HEAD", "repo_path": str(src)}
     loop_mod._write_config_snapshot(cfg, tmp_path / "absent.yaml", run_dir)
@@ -275,8 +276,9 @@ def test_export_head_and_best_reject_empty_runs(tmp_path: Path):
     store.append_generation(
         0, parent_sha=baseline, selected_candidate=None, selected_sha=None,
         candidates=[{"candidate": 0, "proposal": "p", "sha": None,
-                     "score": 0.0, "risk": "high", "metrics": {},
-                     "accepted": False, "selected": False}])
+                     "status": "NO_CHANGE", "metrics": {},
+                     "gate_passed": False, "eligible": False,
+                     "selected": False}])
     loop_mod._write_config_snapshot(
         {"metrics": SCHEMA, "baseline_ref": "HEAD", "repo_path": str(src)},
         tmp_path / "absent.yaml", run_dir)

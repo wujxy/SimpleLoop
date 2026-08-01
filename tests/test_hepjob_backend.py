@@ -117,9 +117,12 @@ def _seed_result(result_dir, *, attempt=1, status="COMPLETED", host="node1"):
     result_dir.mkdir(parents=True, exist_ok=True)
     result = {
         "candidate": 0,
-        "candidate_status": status,
+        "status": status,
         "sha": f"sha-a{attempt}",
-        "score": 0.7, "risk": "low", "feedback": "f", "metrics": {},
+        "gates": {},
+        "gate_passed": status == "COMPLETED",
+        "eligible": status == "COMPLETED",
+        "metrics": {},
     }
     sidecar = {
         "usage": [{"input_tokens": 100, "output_tokens": 10}],
@@ -153,6 +156,30 @@ def _job_json(tmp_path, candidate_id=0) -> dict:
     path = (tmp_path / "rounds" / "r0" / "candidates"
             / f"c{candidate_id}" / "job.json")
     return json.loads(path.read_text())
+
+
+def test_read_result_requires_current_status_field(tmp_path):
+    backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
+    job = backend._prepare(0, _fake_proposal(), 0, "parent")
+    (job.result_dir / "result.json").write_text(
+        json.dumps({"candidate": 0, "candidate_status": "COMPLETED"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="candidate result object"):
+        backend._read_result(job)
+
+
+def test_read_result_requires_current_gate_facts(tmp_path):
+    backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
+    job = backend._prepare(0, _fake_proposal(), 0, "parent")
+    (job.result_dir / "result.json").write_text(
+        json.dumps({"candidate": 0, "status": "COMPLETED"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="candidate result object"):
+        backend._read_result(job)
 
 
 def test_candidate_manifest_carries_active_prompt_directory(tmp_path):

@@ -70,6 +70,9 @@ def _run_locked(
     history.initialize()
     history.recover_inflight()
     gate = PromptGate()
+    errors = gate.check(history.prompt_dir)
+    if errors:
+        raise ValueError(f"active prompt set rejected: {'; '.join(errors)}")
     optimizer = optimizer_factory(
         timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
         max_output_tokens=cfg.get("agent_max_output_tokens", 64000),

@@ -314,10 +314,8 @@ def test_finalize_candidates_ingests_usage_and_stamps_snapshots():
     tracker = SnapshotTracker()
     ctx = RunContext(cfg={}, telemetry=tracker)
     candidates = [
-        {"candidate": 0, "score": 0.5,
-         "usage": [{"input_tokens": 3, "output_tokens": 1}]},
-        {"candidate": 1, "score": 0.4,
-         "usage": [{"input_tokens": 5, "output_tokens": 2}]},
+        {"candidate": 0, "usage": [{"input_tokens": 3, "output_tokens": 1}]},
+        {"candidate": 1, "usage": [{"input_tokens": 5, "output_tokens": 2}]},
     ]
 
     _finalize_candidates(ctx, candidates)

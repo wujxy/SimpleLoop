@@ -52,7 +52,7 @@ class FinishedProcess:
 def test_decode_output_extracts_structured_result_and_usage():
     result = _decode_output(json.dumps({
         "result": "fallback",
-        "structured_output": {"score": 0.8},
+        "structured_output": {"proposals": ["try A"]},
         "usage": {
             "input_tokens": 10,
             "output_tokens": 2,
@@ -61,7 +61,7 @@ def test_decode_output_extracts_structured_result_and_usage():
     }))
 
     assert result.text == "fallback"
-    assert result.data == {"score": 0.8}
+    assert result.data == {"proposals": ["try A"]}
     assert result.usage == {
         "input_tokens": 10,
         "output_tokens": 2,

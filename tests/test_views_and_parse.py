@@ -35,8 +35,6 @@ def test_for_proposer_projects_only_factual_candidate_state():
             "metrics": {"SPEED_MS": 90.0},
             "changed_paths": ["src/kernel.cc"],
             "eval_block": "raw evaluator output",
-            "feedback": "legacy narrative",
-            "score": 0.9,
         }],
     }]
 
@@ -219,14 +217,13 @@ def test_store_persists_only_factual_candidate_fields(tmp_path: Path):
                 & row["candidates"][0].keys())
 
 
-def test_legacy_high_risk_candidate_stays_ineligible():
-    legacy = {
+def test_candidate_without_current_gate_facts_is_ineligible():
+    incomplete = {
         "sha": "old",
-        "risk": "high",
         "metrics": {"SPEED_MS": 80.0, "CORRECTNESS": True},
     }
 
-    assert store_mod.eligible(legacy, _STORE_SCHEMA) is False
+    assert store_mod.eligible(incomplete, _STORE_SCHEMA) is False
 
 
 def test_new_candidate_cannot_override_failed_gate_with_eligible_flag():
