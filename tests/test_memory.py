@@ -28,7 +28,7 @@ def _parallel_history() -> list[dict]:
                 "gates": {"PATHS": {"passed": True, "detail": ""}},
                 "metrics": {"SPEED_MS": 120.0},
                 "changed_paths": ["src/a.cc"],
-                "eval_block": "must not be returned",
+                "eval_block": "objective=120\nphysics_gate=1",
             },
             {
                 "candidate": 1,
@@ -42,7 +42,7 @@ def _parallel_history() -> list[dict]:
                 "gates": {"PATHS": {"passed": True, "detail": ""}},
                 "metrics": {"SPEED_MS": 90.0},
                 "changed_paths": ["src/b.cc"],
-                "eval_block": "must not be returned",
+                "eval_block": "objective=90\nphysics_gate=1",
             },
         ],
     }]
@@ -59,7 +59,7 @@ def test_read_history_rejects_records_without_current_candidate_facts(tmp_path):
         memory.read_history(path)
 
 
-def test_resolve_parallel_episode_returns_only_factual_fields():
+def test_resolve_parallel_episode_returns_complete_bounded_facts():
     episode = memory.resolve_episode(_parallel_history(), "r2c1")
 
     assert episode == {
@@ -74,8 +74,8 @@ def test_resolve_parallel_episode_returns_only_factual_fields():
         "gates": {"PATHS": {"passed": True, "detail": ""}},
         "metrics": {"SPEED_MS": 90.0},
         "changed_paths": ["src/b.cc"],
+        "eval_block": "objective=90\nphysics_gate=1",
     }
-    assert "eval_block" not in episode
 
 
 @pytest.mark.parametrize("ref", ["r2", "2c1", "r-1c0", "r2c-1", "r2c9"])
@@ -99,7 +99,7 @@ def test_memory_show_cli_resolves_from_explicit_run_dir(
     assert output["candidate_sha"] == "sha-1"
     assert output["gates"]["PATHS"]["passed"] is True
     assert "feedback" not in output
-    assert "eval_block" not in output
+    assert output["eval_block"] == "objective=90\nphysics_gate=1"
 
 
 def test_memory_show_cli_discovers_run_from_repo_cwd(

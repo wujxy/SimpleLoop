@@ -1,8 +1,8 @@
 """Per-run Search Memory primitives.
 
-`history.jsonl` remains the complete episodic record.  This module gives those
-records stable `r<round>c<candidate>` references and returns a compact,
-Proposer-facing view of one referenced candidate.
+`history.jsonl` remains the complete episodic record. This module gives those
+records stable `r<round>c<candidate>` references and resolves one complete,
+bounded factual candidate episode.
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def _parse_episode_ref(ref: str) -> tuple[int, int]:
 
 
 def resolve_episode(history: list[dict], ref: str) -> dict:
-    """Resolve one candidate reference without exposing noisy raw eval output."""
+    """Resolve one candidate reference, including its bounded eval output."""
     round_id, candidate_id = _parse_episode_ref(ref)
     record = next(
         (item for item in history if item.get("round") == round_id),
@@ -83,4 +83,5 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
         "gates": candidate.get("gates") or {},
         "metrics": candidate.get("metrics") or {},
         "changed_paths": candidate.get("changed_paths") or [],
+        "eval_block": candidate.get("eval_block") or "",
     }
