@@ -9,6 +9,7 @@ from simpleloop.roles.research_tools import (
     Insight,
     InsightStore,
     ResearchCommandRunner,
+    ResearchTools,
     render_insights,
     search_history,
 )
@@ -245,3 +246,76 @@ def test_research_command_rejects_invalid_input(tmp_path, command, cwd):
     runner, _runtime = _runner(tmp_path)
     with pytest.raises(ValueError):
         runner.run(command, cwd=cwd)
+
+
+def test_research_tools_search_inspect_and_replace_pending_insight(tmp_path):
+    runner, runtime = _runner(tmp_path)
+    tools = ResearchTools(
+        runtime=runtime, source=runner.source, repo=runner.repo,
+        history_dir=runner.history_dir, scratch=runner.scratch,
+        history=_history(), command_timeout_seconds=12,
+        command_output_cap_chars=100,
+    )
+
+    search = tools.execute(
+        {"action": "search_history", "query": "cache"}, deadline=1000,
+    )
+    episode = tools.execute(
+        {"action": "inspect_episode", "ref": "r2c0"}, deadline=1000,
+    )
+    tools.execute({
+        "action": "write_insight", "text": "First", "refs": ["r1c0"],
+    }, deadline=1000)
+    tools.execute({
+        "action": "write_insight", "text": "Second", "refs": ["r2c0"],
+    }, deadline=1000)
+
+    assert search["ok"] and search["result"][0]["ref"] == "r2c0"
+    assert episode["result"]["eval_block"] == "SPEED_MS=98"
+    assert tools.pending_insight == Insight("Second", ("r2c0",))
+
+
+def test_research_tools_invalid_insight_is_rewriteable_observation(tmp_path):
+    runner, runtime = _runner(tmp_path)
+    tools = ResearchTools(
+        runtime=runtime, source=runner.source, repo=runner.repo,
+        history_dir=runner.history_dir, scratch=runner.scratch,
+        history=_history(), command_timeout_seconds=12,
+        command_output_cap_chars=100,
+    )
+
+    bad_ref = tools.execute({
+        "action": "write_insight", "text": "Unsupported", "refs": ["r9c0"],
+    }, deadline=1000)
+    too_long = tools.execute({
+        "action": "write_insight", "text": "x" * 501, "refs": ["r2c0"],
+    }, deadline=1000)
+
+    assert bad_ref["ok"] is False and "not found" in bad_ref["error"]
+    assert too_long["ok"] is False and "500" in too_long["error"]
+    assert tools.pending_insight is None
+
+
+def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
+    runner, runtime = _runner(tmp_path)
+    tools = ResearchTools(
+        runtime=runtime, source=runner.source, repo=runner.repo,
+        history_dir=runner.history_dir, scratch=runner.scratch,
+        history=_history(), command_timeout_seconds=12,
+        command_output_cap_chars=100,
+    )
+    calls = []
+    tools.command_runner.run = lambda command, **kwargs: (
+        calls.append((command, kwargs)) or {"ok": True}
+    )
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.time.monotonic", lambda: 90,
+    )
+
+    result = tools.execute({
+        "action": "run_research_command", "command": "rg cache",
+        "cwd": "source",
+    }, deadline=100)
+
+    assert result["ok"] is True
+    assert calls == [("rg cache", {"cwd": "source", "timeout_seconds": 10})]

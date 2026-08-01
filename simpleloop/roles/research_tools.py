@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -158,7 +159,13 @@ class ResearchCommandRunner:
         self.timeout_seconds = timeout_seconds
         self.output_cap_chars = output_cap_chars
 
-    def run(self, command: str, *, cwd: str = "source") -> dict:
+    def run(
+        self,
+        command: str,
+        *,
+        cwd: str = "source",
+        timeout_seconds: float | None = None,
+    ) -> dict:
         if not isinstance(command, str) or not command.strip():
             raise ValueError("research command must be non-empty")
         if cwd not in {"source", "scratch"}:
@@ -190,9 +197,14 @@ class ResearchCommandRunner:
             start_new_session=True,
         )
         timed_out = False
+        timeout = (
+            self.timeout_seconds
+            if timeout_seconds is None
+            else min(self.timeout_seconds, timeout_seconds)
+        )
         try:
             stdout, stderr = process.communicate(
-                timeout=self.timeout_seconds,
+                timeout=timeout,
             )
             returncode = process.returncode
         except subprocess.TimeoutExpired:
@@ -212,3 +224,68 @@ class ResearchCommandRunner:
             "truncated": truncated,
             "output": output,
         }
+
+
+class ResearchTools:
+    """Dispatch the Proposer's four non-terminal research actions."""
+
+    def __init__(
+        self,
+        *,
+        runtime,
+        source: Path,
+        repo: Path,
+        history_dir: Path,
+        scratch: Path,
+        history: list[dict],
+        command_timeout_seconds: int,
+        command_output_cap_chars: int,
+    ):
+        self.history = history
+        self.command_timeout_seconds = command_timeout_seconds
+        self.pending_insight: Insight | None = None
+        self.command_runner = ResearchCommandRunner(
+            runtime=runtime,
+            source=source,
+            repo=repo,
+            history_dir=history_dir,
+            scratch=scratch,
+            timeout_seconds=command_timeout_seconds,
+            output_cap_chars=command_output_cap_chars,
+        )
+
+    def execute(self, action: dict, *, deadline: float) -> dict:
+        name = action["action"]
+        try:
+            if name == "run_research_command":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {"ok": False, "error": "proposer deadline exceeded"}
+                return self.command_runner.run(
+                    action["command"],
+                    cwd=action["cwd"],
+                    timeout_seconds=min(
+                        self.command_timeout_seconds, remaining,
+                    ),
+                )
+            if name == "search_history":
+                return {
+                    "ok": True,
+                    "result": search_history(self.history, action["query"]),
+                }
+            if name == "inspect_episode":
+                return {
+                    "ok": True,
+                    "result": resolve_episode(self.history, action["ref"]),
+                }
+            if name == "write_insight":
+                insight = Insight.from_dict({
+                    "text": action["text"], "refs": action["refs"],
+                })
+                for ref in insight.refs:
+                    resolve_episode(self.history, ref)
+                self.pending_insight = insight
+                return {"ok": True, "result": "insight pending"}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        raise ValueError(f"unsupported research action: {name}")
