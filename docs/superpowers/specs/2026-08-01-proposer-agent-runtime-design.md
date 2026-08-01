@@ -1,7 +1,7 @@
 # Lightweight Proposer Agent Runtime
 
 Date: 2026-08-01
-Status: pending written-spec review
+Status: approved
 
 ## Objective
 
