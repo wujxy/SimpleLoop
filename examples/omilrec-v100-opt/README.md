@@ -15,6 +15,7 @@ The older OMILREC task directory and its runs are retained untouched but have
 an invalid gate and must not be used as evidence or as a new-run configuration.
 
 ```bash
+export HEPAI_API_KEY='<your-key>'
 simpleloop validate --config examples/omilrec-v100-opt/task.yaml
 simpleloop run --config examples/omilrec-v100-opt/task.yaml \
   --run-dir ./runs/omilrec-v100-001

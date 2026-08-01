@@ -21,13 +21,15 @@ what to investigate, but cannot decide what is true.
 
 ```bash
 pip install -e .
+export HEPAI_API_KEY='<your-key>'
 simpleloop init --config examples/task.yaml
 simpleloop run --config examples/task.yaml --run-dir ./runs/001
 ```
 
-The host needs Apptainer. Claude Code and task dependencies run inside the
-configured image. Each run clones the source repository into its own run
-directory; the source repository remains untouched.
+The host needs Apptainer. The Proposer model is called through HEPAI from the
+frontend; Claude Code (the Executor), research commands, and task dependencies
+run inside the configured image. Each run clones the source repository into its
+own run directory; the source repository remains untouched.
 
 Useful commands:
 
@@ -58,6 +60,13 @@ loop:
   max_rounds: 10
   candidates_per_round: 1
   max_workers: 1
+researcher:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  max_steps: 20
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
 runtime:
   image: /path/to/runtime.sif
   binds: []
@@ -80,6 +89,23 @@ source:
 The Goal states the outcome, not a menu of implementation techniques.
 `editable_paths` defines the artifact surface the Researcher may redesign;
 tests, evaluators, references, and thresholds normally remain frozen.
+
+## Scientific Proposer runtime
+
+The macro loop remains Proposer → Executor → Harness. Within its turn, the
+Proposer may inspect the accepted code, Git diffs, recent full experiment facts,
+all compact Insights, and older factual episodes on demand. It may propose a
+small edit, broad refactor, or replacement implementation, but it cannot modify
+a candidate, invoke the Executor, run the authoritative evaluation, or decide
+whether a claim is true. Research Bash is read-only, offline, time/output
+bounded, and uses temporary scratch space.
+
+An Insight is one short Proposer-written hypothesis/index per completed round;
+it points back to factual candidate records and never overrides Harness facts.
+The Executor implements proposals. The Harness alone checks changed paths,
+commits valid edits, runs evaluation and physical/correctness gates, and decides
+eligibility and the next parent. Static `--proposals` mode bypasses HEPAI and
+Insight generation entirely.
 
 ## Gates and selection
 

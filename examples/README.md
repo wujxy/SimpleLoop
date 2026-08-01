@@ -84,6 +84,7 @@ correctness contract. See `omilrec-post-v107-opt/README.md`.
 
 ```bash
 # from the SimpleLoop checkout (cwd = SimpleLoop/)
+export HEPAI_API_KEY='<your-key>'
 simpleloop init --config examples/<folder>/task.yaml
 simpleloop run --config examples/<folder>/task.yaml --run-dir ./runs/<name>-001
 ```
@@ -94,7 +95,9 @@ same-name `.def` inferred from `runtime.image`), and skips a usable existing
 image. Pass `--force` to rebuild the configured image. `runtime.binds` remains
 optional and is needed only for external directories.
 
-SimpleLoop always launches Claude and evaluation inside the configured SIF.
-The OMILRECV2 YAMLs bind `/cvmfs`, `/data/juno`, and project storage at their
-existing paths; the eval wrapper then sources its selected JUNO release inside
-the container. See each folder's README for its exact build command and binds.
+The HEPAI Proposer call runs from the frontend. Its research shell, the Claude
+Executor, and evaluation run inside the configured SIF. The OMILRECV2 YAMLs bind
+`/cvmfs`, `/data/juno`, and project storage at their existing paths; the eval
+wrapper then sources its selected JUNO release inside the container. See each
+folder's README for its exact build command and binds. Static `--proposals`
+runs do not require `HEPAI_API_KEY`.

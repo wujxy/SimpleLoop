@@ -7,6 +7,7 @@ Only candidates passing `CORRECTNESS` and `DRIFT` are eligible for
 objective-based selection.
 
 ```bash
+export HEPAI_API_KEY='<your-key>'
 simpleloop init --config examples/tiny_algo_opt/task.yaml
 simpleloop run --config examples/tiny_algo_opt/task.yaml \
   --run-dir ./runs/tiny-001

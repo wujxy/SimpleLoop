@@ -11,6 +11,7 @@ descriptions state observable tolerances and deliberately do not prescribe a
 research method.
 
 ```bash
+export HEPAI_API_KEY='<your-key>'
 simpleloop validate --config examples/omilrec-post-v107-opt/task.yaml
 simpleloop run --config examples/omilrec-post-v107-opt/task.yaml \
   --run-dir ./runs/omilrec-postv107-001

@@ -10,12 +10,15 @@ every attempt and selects the lowest eligible `SPEED_MS`; rejected attempts do
 not advance the parent chain.
 
 ```bash
+export HEPAI_API_KEY='<your-key>'
 simpleloop validate --config examples/omilrec-opt/task.yaml
 simpleloop run --config examples/omilrec-opt/task.yaml \
   --run-dir ./runs/omilrec-opt-001
 ```
 
 For a controlled replay instead of live Researcher proposals:
+
+`HEPAI_API_KEY` is not required for this static mode.
 
 ```bash
 simpleloop run --config examples/omilrec-opt/task.yaml \
