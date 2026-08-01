@@ -2,25 +2,9 @@ kind: task
 
 task:
   goal: >
-    Optimize the OMILREC v1.0.0 production reconstruction under OMILRECV2/src
-    by minimizing probe-free SPEED_MS. OMILREC v1.0.0 is the sole source of
-    algorithm and numerical truth, and a candidate is usable only when
-    CONTRACT, FCN, CONSISTENCY, and EVAL_RESULT all pass. Explore structural
-    improvements such as invariant-work hoisting, repeated-value caching, SoA
-    or other data-layout changes, allocation reduction, precomputation, index
-    partitioning, and removal of demonstrably unused work. These suggestions
-    are not exhaustive: inspect the production code and propose new
-    code-grounded directions when justified.
-
-    Treat the FCN path as rounding-sensitive. Reordering or reassociating
-    reductions, changing floating-point types or casts, substituting nominally
-    equivalent mathematical expressions, or folding constants may change the
-    tested likelihood values. Prefer changes to fetching, layout, caching, and
-    invariant work that preserve the tested production results, but do not
-    assume the listed techniques are the only safe or useful directions.
-    Arithmetic changes elsewhere remain possible when every gate passes. Do
-    not weaken, regenerate, bypass, or replace the evaluator, fixtures,
-    references, thresholds, or build wiring. Edit only the admitted source files.
+    Minimize reconstruction SPEED_MS while satisfying every configured gate.
+    The current implementation is the starting artifact, not a constraint on
+    the form or scale of a valid solution.
 
 safety:
   editable_paths:
@@ -41,10 +25,10 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 10
+  max_rounds: 20
   candidates_per_round: 3
   max_workers: 3
-  agent_timeout_seconds: 4500
+  agent_timeout_seconds: 7200
   proposer_recent_rounds: 2
 
 researcher:
@@ -70,7 +54,7 @@ eval:
     # defaults to OMILRECV2_TEST_RECMAP inside sl_eval_v100.sh, so one var
     # covers both the pytest gates and the benchmark. The path is visible
     # inside the container because /lustrefs/juno26/users/lidian is bound.
-    - "OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash scripts/sl_eval_v100.sh --evtmax 10"
+    - "OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash scripts/sl_eval_v100.sh --evtmax 100"
   metrics:
     objective:
       key: SPEED_MS
@@ -78,34 +62,21 @@ eval:
     gates:
       - key: CONTRACT
         description: >
-          Protects the measuring system itself: the FCN test must remain linked
-          directly to the production member, and the frozen numerical assets,
-          thresholds, and complete evaluator structure must remain intact.
-          Modifying, reducing, bypassing, or replacing any check, including
-          introducing a second likelihood implementation for testing, fails
-          this gate.
+          The production FCN remains directly exercised and all frozen evaluator
+          assets, thresholds, and checks remain intact.
       - key: FCN
         description: >
-          Evaluates the real production OMILRECV2::Calculate_EVLikelihood at
-          QMLE, TMLE, QTMLE, and ENERGY for four fixed events. It requires
-          exactly 16 finite unique results, each with relative error strictly
-          below 1e-13 against frozen v1.0.0 truth. Reordering or reassociating
-          reductions, changing floating-point types or casts, replacing
-          mathematical expressions with nominally equivalent forms, or folding
-          constants can change rounding and fail this gate.
+          Production OMILRECV2::Calculate_EVLikelihood produces exactly 16
+          finite unique results with relative error below 1e-13 against the
+          frozen v1.0.0 values.
       - key: CONSISTENCY
         description: >
-          Requires all 18 reconstructed events to be finite and within the
-          v1.0.0 end-to-end limits: Euclidean 3D position <= 4 mm, energy
-          <= 7 keV, t0 <= 10 ps, and peSum <= 0.1 PE. Arithmetic and structural
-          changes are allowed only when every reconstructed result remains
-          within every limit.
+          All 18 reconstructed events are finite and remain within 4 mm position,
+          7 keV energy, 10 ps t0, and 0.1 PE peSum of the v1.0.0 references.
       - key: EVAL_RESULT
         description: >
-          Requires the complete evaluator to finish successfully: the
-          probe-enabled build and tests, the probe-free production rebuild, and
-          the benchmark. A build or test failure, crash, timeout, missing metric,
-          or incomplete evaluator execution fails this gate.
+          The complete evaluator, including both builds, tests, and benchmark,
+          finishes successfully and emits every required metric.
 
 source:
   path: ../../../omilrec-v100-opt-pkg 
@@ -120,4 +91,4 @@ execution:
     memory_mb: 6000
     poll_seconds: 15
     max_attempts: 2
-    run_timeout_seconds: 5400
+    run_timeout_seconds: 7200

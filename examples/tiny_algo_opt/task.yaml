@@ -17,12 +17,12 @@ safety:
     - "pyproject.toml"
 
 loop:
-  max_rounds: 6
+  max_rounds: 4
   candidates_per_round: 2
   max_workers: 2
 
 self_improvement:
-  interval_rounds: 2
+  interval_rounds: 6
 
 researcher:
   api: hepai
