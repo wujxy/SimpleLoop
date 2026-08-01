@@ -13,8 +13,8 @@ from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.roles.executor import ExecResult
 from simpleloop.harness.evals import EvalResult
 from simpleloop.loop import RunContext, _run_candidates, _select_winner
-from simpleloop.roles.proposer import ProposalBatch
-from simpleloop.roles.proposer import _proposer_schema
+from simpleloop.roles.proposer import ProposerResult
+from simpleloop.roles.research_tools import Insight, InsightStore
 from simpleloop.harness.store import Store, best_candidate
 
 
@@ -136,13 +136,6 @@ def test_runtime_architecture_has_no_judger_module_or_packaged_prompt():
 def test_config_parallel_rejects_invalid_values(tmp_path: Path, field: str, value):
     with pytest.raises(config_mod.ConfigError):
         config_mod.load(_write_config(tmp_path, {field: value}))
-
-
-def test_proposer_schema_uses_batch_shape_when_k_is_one():
-    schema = _proposer_schema(1)
-    proposals = schema["properties"]["proposals"]
-    assert proposals["minItems"] == 1
-    assert proposals["maxItems"] == 1
 
 
 def test_selector_uses_objective_and_filters_ineligible_candidates():
@@ -538,6 +531,127 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
             json_schema={"type": "object"},
         )
 
+
+def test_next_proposals_uses_readonly_parent_snapshot_and_all_insights(tmp_path):
+    history = [{"round": 0, "candidates": []}]
+    insight_store = InsightStore(tmp_path / "insights.jsonl")
+    insight_store.append(0, Insight("Evidence", ("r0c0",)))
+
+    class FakeWorkspace:
+        repo = tmp_path / "repo"
+        calls = []
+
+        def add_worktree(self, worktree_id, parent_sha):
+            self.calls.append(("add", worktree_id, parent_sha))
+            path = tmp_path / "snapshot"
+            path.mkdir()
+            return path
+
+        def remove_worktree(self, worktree_id):
+            self.calls.append(("remove", worktree_id))
+
+    class FakeStore:
+        def history(self):
+            return history
+
+    class FakeProposer:
+        kwargs = None
+
+        def run(self, **kwargs):
+            self.kwargs = kwargs
+            return ProposerResult(["try cache"], None)
+
+    proposer = FakeProposer()
+    ctx = RunContext(
+        cfg={
+            "goal": "faster", "editable_paths": ["src/**"],
+            "frozen_paths": [], "candidates_per_round": 1,
+            "proposer_recent_rounds": 1,
+        },
+        run_dir=tmp_path,
+        workspace=FakeWorkspace(),
+        store=FakeStore(),
+        proposer_agent=proposer,
+        insight_store=insight_store,
+    )
+
+    result = loop_mod._next_proposals(ctx, None, 1, "parent-sha")
+
+    assert result.proposals == ["try cache"]
+    assert proposer.kwargs["history"] is history
+    assert proposer.kwargs["insights"][0]["id"] == "I0"
+    assert proposer.kwargs["source_path"] == tmp_path / "snapshot"
+    assert ctx.workspace.calls == [
+        ("add", "proposer-1", "parent-sha"),
+        ("remove", "proposer-1"),
+    ]
+
+
+def test_next_proposals_removes_snapshot_when_proposer_fails(tmp_path):
+    removed = []
+
+    class FakeWorkspace:
+        repo = tmp_path / "repo"
+
+        def add_worktree(self, worktree_id, _parent_sha):
+            path = tmp_path / "snapshot"
+            path.mkdir()
+            return path
+
+        def remove_worktree(self, worktree_id):
+            removed.append(worktree_id)
+
+    class FailingProposer:
+        def run(self, **_kwargs):
+            raise ValueError("bad proposal")
+
+    ctx = RunContext(
+        cfg={"goal": "faster", "editable_paths": [], "frozen_paths": []},
+        run_dir=tmp_path, workspace=FakeWorkspace(),
+        store=type("Store", (), {"history": lambda self: []})(),
+        proposer_agent=FailingProposer(),
+        insight_store=InsightStore(tmp_path / "insights.jsonl"),
+    )
+
+    with pytest.raises(ValueError, match="bad proposal"):
+        loop_mod._next_proposals(ctx, None, 2, "parent")
+
+    assert removed == ["proposer-2"]
+
+
+def test_next_proposals_static_mode_has_no_insight(tmp_path):
+    result = loop_mod._next_proposals(
+        RunContext(cfg={}), ["fixed"], 0, "parent",
+    )
+
+    assert result == ProposerResult(["fixed"], None)
+
+
+def test_continue_reconciles_completed_inflight_insight(tmp_path):
+    store = Store(tmp_path, metrics_schema=_SCHEMA)
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=None, selected_sha=None,
+        candidates=[],
+    )
+    insight_store = InsightStore(tmp_path / "insights.jsonl")
+    journal = loop_mod._InflightJournal(
+        tmp_path / loop_mod.INFLIGHT_NAME,
+        meta={
+            "round_id": 0, "parent_sha": "parent", "proposals": ["p"],
+            "insight": {"text": "Learned fact", "refs": ["r0c0"]},
+        },
+    )
+    journal.save([{"state": "COMPLETED"}])
+    ctx = RunContext(
+        cfg={}, run_dir=tmp_path, store=store,
+        insight_store=insight_store,
+    )
+
+    loop_mod._reconcile_completed_inflight(ctx, store.history())
+
+    assert insight_store.load()[0]["id"] == "I0"
+    assert (tmp_path / loop_mod.INFLIGHT_NAME).exists() is False
+
 def _run_loop_integration(
     monkeypatch, tmp_path, *, prompt_dir=None, max_rounds=2,
     target_rounds=None,
@@ -575,6 +689,11 @@ def _run_loop_integration(
         "eval_commands": [],
         "runtime_image": tmp_path / "runtime.sif",
         "runtime_binds": [],
+        "researcher": {
+            "model": "gpt-5.5", "base_url": "https://example.invalid",
+            "max_steps": 5, "command_timeout_seconds": 2,
+            "command_output_cap_chars": 1000,
+        },
     }
 
     class FakeRuntime:
@@ -591,6 +710,24 @@ def _run_loop_integration(
         def __init__(self, **_kwargs):
             self.runtime = object()
 
+    class FakeModel:
+        @classmethod
+        def from_config(cls, _config):
+            return object()
+
+    class FakeProposer:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **kwargs):
+            assert [row["round"] for row in kwargs["history"]] == [0]
+            assert kwargs["insights"] == []
+            assert kwargs["prompt_dir"] == prompt_dir
+            return ProposerResult(
+                ["test another sparse gather"],
+                Insight("Sparse gather remains expensive.", ("r0c0",)),
+            )
+
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
             self.run_dir = run_dir
@@ -602,6 +739,14 @@ def _run_loop_integration(
         def baseline_sha(self):
             return "baseline-sha"
 
+        def add_worktree(self, worktree_id, _parent_sha):
+            worktree = self.run_dir / "worktrees" / f"r{worktree_id}"
+            worktree.mkdir(parents=True, exist_ok=True)
+            return worktree
+
+        def remove_worktree(self, _worktree_id):
+            pass
+
     class FakeBackend:
         def __init__(self, ctx):
             pass
@@ -611,6 +756,11 @@ def _run_loop_integration(
 
         def run_candidates(self, *, proposals: list[str], round_id: int,
                            parent_sha: str, journal=None) -> list[dict]:
+            assert proposals == ["test another sparse gather"]
+            assert journal.meta["insight"] == {
+                "text": "Sparse gather remains expensive.",
+                "refs": ["r0c0"],
+            }
             return fake_run_candidates()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,
@@ -618,12 +768,6 @@ def _run_loop_integration(
             return []
 
     executed = []
-
-    def fake_propose(*_args, **kwargs):
-        assert "insights" not in kwargs
-        assert [row["round"] for row in kwargs["history"]] == [0]
-        assert kwargs["prompt_dir"] == prompt_dir
-        return ProposalBatch(proposals=["test another sparse gather"])
 
     def fake_run_candidates(*_args, **_kwargs):
         executed.append(True)
@@ -644,9 +788,10 @@ def _run_loop_integration(
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
+    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FakeProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
-    monkeypatch.setattr(loop_mod.proposer_mod, "propose", fake_propose)
     monkeypatch.setattr(loop_mod, "_select_winner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loop_mod, "_refresh_progress_plot", lambda *_args: None)
 
@@ -660,11 +805,16 @@ def _run_loop_integration(
 def test_run_injects_active_prompt_directory_into_proposer(
     monkeypatch, tmp_path,
 ):
-    _run_loop_integration(
+    run_dir, _ = _run_loop_integration(
         monkeypatch,
         tmp_path,
         prompt_dir=tmp_path / "active-prompts",
     )
+    insights = InsightStore(run_dir / "insights.jsonl").load()
+    assert insights == [{
+        "id": "I1", "round": 1,
+        "text": "Sparse gather remains expensive.", "refs": ["r0c0"],
+    }]
 
 
 def test_segment_progress_reports_global_total_and_next_optimizer(
@@ -699,6 +849,11 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         "eval_commands": [],
         "runtime_image": tmp_path / "runtime.sif",
         "runtime_binds": [],
+        "researcher": {
+            "model": "gpt-5.5", "base_url": "https://example.invalid",
+            "max_steps": 5, "command_timeout_seconds": 2,
+            "command_output_cap_chars": 1000,
+        },
     }
 
     class FakeRuntime:
@@ -715,6 +870,18 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         def __init__(self, **_kwargs):
             pass
 
+    class FakeModel:
+        @classmethod
+        def from_config(cls, _config):
+            return object()
+
+    class FailingProposer:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            raise ValueError("invalid proposer batch")
+
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
             self.run_dir = run_dir
@@ -725,6 +892,14 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
 
         def baseline_sha(self):
             return "baseline-sha"
+
+        def add_worktree(self, worktree_id, _parent_sha):
+            worktree = self.run_dir / "worktrees" / f"r{worktree_id}"
+            worktree.mkdir(parents=True, exist_ok=True)
+            return worktree
+
+        def remove_worktree(self, _worktree_id):
+            pass
 
     class FakeStore:
         def __init__(self, *_args, **_kwargs):
@@ -737,9 +912,6 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
             raise AssertionError("proposer failure must not be written as a round")
 
     executor_called = False
-
-    def fail_proposer(*_args, **_kwargs):
-        raise ValueError("invalid proposer batch")
 
     def fail_if_executor_runs(*_args, **_kwargs):
         nonlocal executor_called
@@ -764,10 +936,11 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
+    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
+    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FailingProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "Store", FakeStore)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
-    monkeypatch.setattr(loop_mod.proposer_mod, "propose", fail_proposer)
 
     with pytest.raises(ValueError, match="invalid proposer batch"):
         loop_mod.run("config.yaml", tmp_path / "run")

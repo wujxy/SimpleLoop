@@ -36,7 +36,7 @@ def _journal(tmp_path, round_id=0, parent_sha="p") -> _InflightJournal:
     return _InflightJournal(
         tmp_path / INFLIGHT_NAME,
         meta={"round_id": round_id, "parent_sha": parent_sha,
-              "proposals": [_fake_proposal()]})
+              "proposals": [_fake_proposal()], "insight": None})
 
 
 class _FakeWorkspace:
@@ -204,7 +204,7 @@ def test_completed_after_gone_with_finished(tmp_path, monkeypatch):
     # The usage sidecar is handed to the loop (which owns telemetry); the
     # backend itself records nothing.
     assert cands[0]["usage"] == [{"input_tokens": 100, "output_tokens": 10}]
-    assert (tmp_path / INFLIGHT_NAME).exists() is False
+    assert (tmp_path / INFLIGHT_NAME).exists() is True
 
 
 def test_completed_after_running_then_gone(tmp_path, monkeypatch):
@@ -344,16 +344,18 @@ def test_resume_from_inflight(tmp_path, monkeypatch):
         inflight["jobs"], round_id=inflight["round_id"],
         parent_sha=inflight["parent_sha"], journal=journal2)
     assert cands[0]["status"] == "COMPLETED"
-    assert (tmp_path / INFLIGHT_NAME).exists() is False
+    assert (tmp_path / INFLIGHT_NAME).exists() is True
 
 
 def test_job_env_sh_materializes_payload_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("HEPAI_API_KEY", "frontend-only")
     monkeypatch.setenv("UNRELATED_VAR", "x")
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
     path = backend._ensure_job_env()
     text = path.read_text()
     assert "ANTHROPIC_API_KEY=sk-test" in text
+    assert "HEPAI_API_KEY" not in text
     assert "UNRELATED_VAR" not in text
     assert "PYTHONPATH=" in text
     assert oct(path.stat().st_mode)[-3:] == "600"

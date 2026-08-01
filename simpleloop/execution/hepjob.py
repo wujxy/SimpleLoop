@@ -564,8 +564,6 @@ class HEPJobBackend(ExecutionBackend):
                 "not recorded. Fix the infrastructure issue, then either "
                 "re-run with --continue or delete the run's inflight file "
                 "to re-propose the round.")
-        if self._journal is not None:
-            self._journal.clear()
         return candidates
 
     # ---- condor wrappers (the only places that touch condor_*) ----

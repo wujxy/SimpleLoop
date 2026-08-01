@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from simpleloop import loop as loop_mod
+import pytest
 SCHEMA = {
     "objective": {"key": "SPEED_MS", "lower_is_better": True},
     "gates": [{"key": "CORRECTNESS"}],
@@ -50,3 +51,41 @@ def test_static_mode_rejects_continue_combination(monkeypatch, tmp_path):
         assert "--continue" in str(exc)
     else:
         raise AssertionError("expected ValueError for --continue + --proposals")
+
+
+def test_agent_mode_requires_researcher_before_context(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        loop_mod, "_build_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("context must not be built")
+        ),
+    )
+
+    with pytest.raises(loop_mod.config_mod.ConfigError, match="researcher"):
+        loop_mod._run_locked(
+            _config(tmp_path), tmp_path / "run", proposals=None,
+            continue_run=False,
+        )
+
+
+def test_static_mode_builds_context_with_researcher_disabled(
+    monkeypatch, tmp_path,
+):
+    class StopAfterBuild(Exception):
+        pass
+
+    seen = []
+
+    def fake_build(*_args, **kwargs):
+        seen.append(kwargs["enable_researcher"])
+        raise StopAfterBuild
+
+    monkeypatch.setattr(loop_mod, "_build_context", fake_build)
+
+    with pytest.raises(StopAfterBuild):
+        loop_mod._run_locked(
+            _config(tmp_path), tmp_path / "run", proposals=["p0"],
+            continue_run=False,
+        )
+
+    assert seen == [False]

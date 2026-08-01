@@ -13,7 +13,8 @@ from pathlib import Path
 
 import yaml
 
-from .roles.agent import Agent, AgentError
+from .roles.agent import Agent
+from .roles import model as model_mod
 from . import candidate_worker
 from . import config as config_mod
 from .execution import build_backend
@@ -21,6 +22,7 @@ from .execution.base import InfraRoundError, RoundJournal
 from .harness import evals
 from .reporting import plot as plot_mod
 from .roles import proposer as proposer_mod
+from .roles.research_tools import Insight, InsightStore
 from .harness import views
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
@@ -74,8 +76,9 @@ class RunContext:
     workspace: Workspace | None = None
     store: Store | None = None
     telemetry: RunTelemetry | None = None
-    proposer_agent: Agent | None = None
+    proposer_agent: proposer_mod.ProposerAgent | None = None
     executor_agent: Agent | None = None
+    insight_store: InsightStore | None = None
     prompt_dir: Path | None = None
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
@@ -190,14 +193,10 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 continue_run: bool,
                 target_rounds: int | None = None,
                 prompt_dir: Path | None = None) -> dict:
-    ctx = _build_context(
-        cfg, run_dir_path, resume=continue_run, prompt_dir=prompt_dir,
-    )
-
     static_proposals = _load_proposals(proposals)
     if static_proposals is not None and continue_run:
         raise ValueError("--continue cannot be combined with --proposals: continue "
-                         "resumes a claude-proposer run from its history, but "
+                         "resumes a researcher run from its history, but "
                          "--proposals drives rounds from a fixed batch.")
     if static_proposals is not None:
         if target_rounds is not None:
@@ -208,6 +207,10 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         print(f"[{stamp()}] STATIC-PROPOSAL mode: {n_rounds} round(s) from the "
               f"supplied batch (config max_rounds={cfg['max_rounds']} ignored)", flush=True)
     else:
+        if cfg.get("researcher") is None:
+            raise config_mod.ConfigError(
+                "researcher: required for agent-driven runs"
+            )
         if target_rounds is None:
             n_rounds = cfg["max_rounds"]
         elif (
@@ -220,6 +223,14 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             )
         else:
             n_rounds = target_rounds
+
+    ctx = _build_context(
+        cfg,
+        run_dir_path,
+        resume=continue_run,
+        prompt_dir=prompt_dir,
+        enable_researcher=static_proposals is None,
+    )
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
     ctx.workspace.setup()
@@ -263,6 +274,10 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             journal = _InflightJournal(
                 ctx.run_dir / INFLIGHT_NAME,
                 meta={k: v for k, v in inflight.items() if k != "jobs"})
+            round_insight = (
+                Insight.from_dict(inflight["insight"])
+                if inflight.get("insight") is not None else None
+            )
             try:
                 candidates = ctx.execution_backend.resume_round(
                     inflight.get("jobs") or [], round_id=round_id,
@@ -274,14 +289,20 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                       "--continue again.", flush=True)
                 return _summary(ctx, run_dir_path)
         else:
-            proposals_batch = _next_proposals(
+            proposal_result = _next_proposals(
                 ctx, static_proposals, round_id, parent_sha)
+            proposals_batch = proposal_result.proposals
+            round_insight = proposal_result.insight
             journal = _InflightJournal(
                 ctx.run_dir / INFLIGHT_NAME,
                 meta={
                     "round_id": round_id,
                     "parent_sha": parent_sha,
                     "proposals": proposals_batch,
+                    "insight": (
+                        round_insight.to_dict()
+                        if round_insight is not None else None
+                    ),
                 })
             try:
                 candidates = ctx.execution_backend.run_candidates(
@@ -333,6 +354,9 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             candidates=candidates,
             telemetry=ctx.telemetry.snapshot(persist=True),
         )
+        if round_insight is not None:
+            ctx.insight_store.append(round_id, round_insight)
+        journal.clear()
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         parent_sha = next_base_sha
 
@@ -348,6 +372,7 @@ def _build_context(
     *,
     resume: bool,
     prompt_dir: Path | None = None,
+    enable_researcher: bool = True,
 ) -> RunContext:
     """Construct the run's fixed fixtures: runtime, two agents, workspace,
     role-scoped agents (each restricted to the tools its role needs), workspace,
@@ -365,11 +390,20 @@ def _build_context(
 
     timeout = cfg.get("agent_timeout_seconds", 3600)
     max_output_tokens = cfg.get("agent_max_output_tokens", 64000)
-    proposer_agent = Agent(runtime=runtime, command="claude",
-                           timeout_seconds=timeout,
-                           allowed_tools="Read,Bash",
-                           max_output_tokens=max_output_tokens,
-                           usage_observer=telemetry.record_usage)
+    proposer_agent = None
+    if enable_researcher:
+        researcher = cfg["researcher"]
+        proposer_agent = proposer_mod.ProposerAgent(
+            model=model_mod.HepAIChatModel.from_config(researcher),
+            runtime=runtime,
+            timeout_seconds=timeout,
+            max_steps=researcher["max_steps"],
+            command_timeout_seconds=researcher["command_timeout_seconds"],
+            command_output_cap_chars=researcher[
+                "command_output_cap_chars"
+            ],
+            usage_observer=telemetry.record_usage,
+        )
     executor_agent = Agent(runtime=runtime, command="claude",
                            timeout_seconds=timeout,
                            allowed_tools="Read,Edit,Write,Bash",
@@ -383,11 +417,13 @@ def _build_context(
     )
     store = Store(run_dir_path, metrics_schema=cfg["metrics"],
                   history_eval_cap=cfg.get("eval_history_cap_chars", 6000))
+    insight_store = InsightStore(run_dir_path / "insights.jsonl")
     # Same gate bullet lines go into both the proposer's and executor's prompt.
     gate_lines = views.gate_block(cfg.get("metrics"))
     ctx = RunContext(
         cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
         store=store, telemetry=telemetry, proposer_agent=proposer_agent,
+        insight_store=insight_store,
         executor_agent=executor_agent,
         prompt_dir=prompt_dir, gate_lines=gate_lines,
     )
@@ -416,6 +452,7 @@ def _starting_state(ctx: RunContext, continue_run: bool,
             f"--continue: run-dir {ctx.run_dir} has no history.jsonl rounds; "
             "drop --continue and start a fresh run."
         )
+    _reconcile_completed_inflight(ctx, done)
     start_round = len(done)
     if start_round >= n_rounds:
         print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
@@ -437,37 +474,59 @@ def _starting_state(ctx: RunContext, continue_run: bool,
     return start_round, parent_sha, prior_metrics
 
 
+def _reconcile_completed_inflight(ctx: RunContext, history: list[dict]) -> None:
+    """Finish an interrupted history -> insight -> journal commit."""
+    inflight = _load_inflight(ctx.run_dir)
+    if inflight is None:
+        return
+    round_id = inflight.get("round_id")
+    if not any(record.get("round") == round_id for record in history):
+        return
+    raw_insight = inflight.get("insight")
+    if raw_insight is not None:
+        ctx.insight_store.append(round_id, Insight.from_dict(raw_insight))
+    _InflightJournal(ctx.run_dir / INFLIGHT_NAME, meta={}).clear()
+
+
 def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
                     round_id: int, parent_sha: str,
-                    ) -> list[str]:
+                    ) -> proposer_mod.ProposerResult:
     """Return one round's executable experiment instructions.
 
-    Normal mode calls the claude proposer against the per-run repo (read-only);
+    Normal mode calls the Proposer Agent against a parent snapshot (read-only);
     static mode takes the proposal verbatim as a one-candidate generation."""
     if static_proposals is not None:
         proposal_text = static_proposals[round_id]
         print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
-        return [proposal_text]
+        return proposer_mod.ProposerResult([proposal_text], None)
 
     cfg = ctx.cfg
     history = ctx.store.history()
+    worktree_id = f"proposer-{round_id}"
+    source_path = ctx.workspace.add_worktree(worktree_id, parent_sha)
     try:
-        proposal_obj = proposer_mod.propose(
-            ctx.proposer_agent, goal=cfg["goal"], editable=cfg["editable_paths"],
+        proposal_obj = ctx.proposer_agent.run(
+            goal=cfg["goal"], editable=cfg["editable_paths"],
             frozen=cfg["frozen_paths"], history=history,
-            base_sha=parent_sha, cwd=ctx.workspace.repo,
+            insights=ctx.insight_store.load(),
+            base_sha=parent_sha,
+            source_path=source_path,
+            repo_path=ctx.workspace.repo,
+            run_dir=ctx.run_dir,
             candidates_per_round=cfg.get("candidates_per_round", 1),
             recent_rounds=cfg.get("proposer_recent_rounds", 6),
             gate_block=ctx.gate_lines,
             prompt_dir=ctx.prompt_dir,
         )
-    except (AgentError, ValueError) as exc:
+    except (model_mod.ModelError, proposer_mod.ProposerError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.
         print(f"[{stamp()}] proposer failed; aborting run: {exc}", flush=True)
         raise
+    finally:
+        ctx.workspace.remove_worktree(worktree_id)
     print(f"[{stamp()}] proposals: {len(proposal_obj.proposals)} candidate(s)",
           flush=True)
-    return proposal_obj.proposals
+    return proposal_obj
 
 
 def _summary(ctx: RunContext, run_dir_path: Path) -> dict:
