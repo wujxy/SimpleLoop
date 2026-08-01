@@ -289,6 +289,60 @@ def test_exec_argv_does_not_duplicate_run_directory_bind(tmp_path: Path):
     assert f"{runtime.run_dir}:{runtime.run_dir}:rw" in argv
 
 
+def test_research_argv_is_contained_read_only_and_offline(tmp_path: Path):
+    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    source = tmp_path / "source"
+    repo = tmp_path / "repo-view"
+    scratch = tmp_path / "scratch"
+    for path in (source, repo, scratch):
+        path.mkdir()
+
+    argv = runtime.research_exec_argv(
+        ["bash", "-lc", "git show --stat HEAD"],
+        source=source,
+        repo=repo,
+        history=runtime.run_dir,
+        scratch=scratch,
+        cwd="source",
+    )
+
+    assert "--containall" in argv
+    assert argv[argv.index("--network") + 1] == "none"
+    assert f"{source.resolve()}:/source:ro" in argv
+    assert f"{repo.resolve()}:/repo:ro" in argv
+    assert f"{runtime.run_dir}:/history:ro" in argv
+    assert f"{scratch.resolve()}:/scratch:rw" in argv
+    assert argv[argv.index("--cwd") + 1] == "/source"
+
+
+def test_research_argv_accepts_only_source_or_scratch_cwd(tmp_path: Path):
+    runtime = _make_runtime(tmp_path)
+    with pytest.raises(ValueError, match="source.*scratch"):
+        runtime.research_exec_argv(
+            ["true"], source=tmp_path, repo=tmp_path,
+            history=tmp_path, scratch=tmp_path, cwd="history",
+        )
+
+
+def test_research_env_contains_no_credentials(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(runtime_mod.os, "environ", {
+        "PATH": "/host/bin",
+        "HOME": "/home/user",
+        "LANG": "C.UTF-8",
+        "HEPAI_API_KEY": "secret",
+        "ANTHROPIC_API_KEY": "secret",
+        "CONDOR_TOKEN": "secret",
+        "HTTPS_PROXY": "https://proxy",
+    })
+    runtime = _make_runtime(tmp_path)
+
+    assert runtime.research_subprocess_env() == {
+        "PATH": "/host/bin",
+        "HOME": "/home/user",
+        "LANG": "C.UTF-8",
+    }
+
+
 def test_subprocess_env_strips_container_injection_and_forwards_allowlist(
     monkeypatch,
     tmp_path: Path,

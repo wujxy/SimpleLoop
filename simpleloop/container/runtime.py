@@ -123,6 +123,53 @@ class ApptainerRuntime:
             env[f"APPTAINERENV_{key}"] = str(value)
         return env
 
+    def research_exec_argv(
+        self,
+        payload: Sequence[str],
+        *,
+        source: str | Path,
+        repo: str | Path,
+        history: str | Path,
+        scratch: str | Path,
+        cwd: str,
+    ) -> list[str]:
+        """Build the offline, read-only Proposer research boundary."""
+        if cwd not in {"source", "scratch"}:
+            raise ValueError("research cwd must be 'source' or 'scratch'")
+        argv = [
+            self.executable,
+            "exec",
+            "--cleanenv",
+            "--no-eval",
+            "--containall",
+            "--net",
+            "--network",
+            "none",
+        ]
+        if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
+            argv.append("--userns")
+        for bind in self.binds:
+            argv.extend(["--bind", f"{bind}:{bind}:ro"])
+        argv.extend([
+            "--bind", f"{Path(source).resolve()}:/source:ro",
+            "--bind", f"{Path(repo).resolve()}:/repo:ro",
+            "--bind", f"{Path(history).resolve()}:/history:ro",
+            "--bind", f"{Path(scratch).resolve()}:/scratch:rw",
+            "--cwd", f"/{cwd}", str(self.image),
+        ])
+        argv.extend(str(item) for item in payload)
+        return argv
+
+    def research_subprocess_env(self) -> dict[str, str]:
+        """Allow only launcher basics; never expose credentials or proxies."""
+        allowed = {
+            "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "LD_LIBRARY_PATH",
+        }
+        return {
+            key: value for key, value in os.environ.items()
+            if key in allowed
+        }
+
     def preflight(self) -> None:
         """Verify host paths and required tools inside the configured image."""
         found = shutil.which(self.executable)

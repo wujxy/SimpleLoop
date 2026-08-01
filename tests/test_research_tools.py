@@ -1,15 +1,48 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
 from simpleloop.roles.research_tools import (
     Insight,
     InsightStore,
+    ResearchCommandRunner,
     render_insights,
     search_history,
 )
+
+
+class _Runtime:
+    def __init__(self, run_dir):
+        self.run_dir = run_dir
+        self.argv_call = None
+
+    def research_exec_argv(self, payload, **paths):
+        self.argv_call = (payload, paths)
+        return ["apptainer", *payload]
+
+    def research_subprocess_env(self):
+        return {"PATH": "/usr/bin"}
+
+
+class _Process:
+    pid = 123
+
+    def __init__(self, *, output=("stdout", "stderr"), returncode=0,
+                 timeout_once=False):
+        self.output = output
+        self.returncode = returncode
+        self.timeout_once = timeout_once
+        self.timeouts = []
+
+    def communicate(self, timeout=None):
+        self.timeouts.append(timeout)
+        if self.timeout_once:
+            self.timeout_once = False
+            raise subprocess.TimeoutExpired("apptainer", timeout)
+        return self.output
 
 
 def _candidate(round_id: int, *, proposal: str = "cache values") -> dict:
@@ -115,3 +148,100 @@ def test_render_insights_keeps_all_records_compact():
     ]
 
     assert json.loads(render_insights(records)) == records
+
+
+def _runner(tmp_path, *, cap=100, timeout=12):
+    paths = {
+        name: tmp_path / name
+        for name in ("source", "repo", "history", "scratch")
+    }
+    for path in paths.values():
+        path.mkdir()
+    runtime = _Runtime(paths["history"])
+    runner = ResearchCommandRunner(
+        runtime=runtime,
+        source=paths["source"],
+        repo=paths["repo"],
+        history_dir=paths["history"],
+        scratch=paths["scratch"],
+        timeout_seconds=timeout,
+        output_cap_chars=cap,
+    )
+    return runner, runtime
+
+
+def test_research_command_uses_process_group_and_returns_observation(
+    tmp_path, monkeypatch,
+):
+    runner, runtime = _runner(tmp_path)
+    process = _Process(returncode=7)
+    popen_calls = []
+
+    def fake_popen(argv, **kwargs):
+        popen_calls.append((argv, kwargs))
+        return process
+
+    monkeypatch.setattr("simpleloop.roles.research_tools.subprocess.Popen",
+                        fake_popen)
+
+    result = runner.run("git show HEAD", cwd="source")
+
+    payload, paths = runtime.argv_call
+    assert payload == [
+        "env", "GIT_DIR=/repo/.git", "GIT_WORK_TREE=/source",
+        "bash", "-lc", "git show HEAD",
+    ]
+    assert paths["cwd"] == "source"
+    assert popen_calls[0][1]["start_new_session"] is True
+    assert popen_calls[0][1]["shell"] is False
+    assert result == {
+        "ok": False,
+        "returncode": 7,
+        "timed_out": False,
+        "truncated": False,
+        "output": "stdout\n[stderr]\nstderr",
+    }
+
+
+def test_research_command_timeout_kills_process_group(tmp_path, monkeypatch):
+    runner, _runtime = _runner(tmp_path, timeout=9)
+    process = _Process(output=("partial", ""), timeout_once=True)
+    killed = []
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.os.killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    result = runner.run("sleep 100", cwd="scratch")
+
+    assert killed and killed[0][0] == process.pid
+    assert result["timed_out"] is True
+    assert result["returncode"] is None
+    assert process.timeouts == [9, None]
+
+
+def test_research_command_caps_combined_output(tmp_path, monkeypatch):
+    runner, _runtime = _runner(tmp_path, cap=12)
+    process = _Process(output=("abcdefghij", "klmnop"))
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+
+    result = runner.run("true", cwd="source")
+
+    assert result["truncated"] is True
+    assert result["output"] == "abcdefghij\n["
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd"), [("", "source"), ("true", "history")],
+)
+def test_research_command_rejects_invalid_input(tmp_path, command, cwd):
+    runner, _runtime = _runner(tmp_path)
+    with pytest.raises(ValueError):
+        runner.run(command, cwd=cwd)

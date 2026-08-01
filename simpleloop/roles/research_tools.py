@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,3 +134,81 @@ class InsightStore:
 
 def render_insights(records: list[dict]) -> str:
     return json.dumps(records, ensure_ascii=False)
+
+
+class ResearchCommandRunner:
+    """Run one bounded Bash command inside the research container."""
+
+    def __init__(
+        self,
+        *,
+        runtime,
+        source: Path,
+        repo: Path,
+        history_dir: Path,
+        scratch: Path,
+        timeout_seconds: int,
+        output_cap_chars: int,
+    ):
+        self.runtime = runtime
+        self.source = Path(source)
+        self.repo = Path(repo)
+        self.history_dir = Path(history_dir)
+        self.scratch = Path(scratch)
+        self.timeout_seconds = timeout_seconds
+        self.output_cap_chars = output_cap_chars
+
+    def run(self, command: str, *, cwd: str = "source") -> dict:
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("research command must be non-empty")
+        if cwd not in {"source", "scratch"}:
+            raise ValueError("research cwd must be 'source' or 'scratch'")
+        payload = [
+            "env",
+            "GIT_DIR=/repo/.git",
+            "GIT_WORK_TREE=/source",
+            "bash",
+            "-lc",
+            command,
+        ]
+        argv = self.runtime.research_exec_argv(
+            payload,
+            source=self.source,
+            repo=self.repo,
+            history=self.history_dir,
+            scratch=self.scratch,
+            cwd=cwd,
+        )
+        process = subprocess.Popen(
+            argv,
+            cwd=str(self.runtime.run_dir),
+            env=self.runtime.research_subprocess_env(),
+            shell=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            stdout, stderr = process.communicate(
+                timeout=self.timeout_seconds,
+            )
+            returncode = process.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            returncode = None
+        output = stdout or ""
+        if stderr:
+            output += "\n[stderr]\n" + stderr
+        truncated = len(output) > self.output_cap_chars
+        output = output[:self.output_cap_chars]
+        return {
+            "ok": not timed_out and returncode == 0,
+            "returncode": returncode,
+            "timed_out": timed_out,
+            "truncated": truncated,
+            "output": output,
+        }
