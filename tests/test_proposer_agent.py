@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from simpleloop.roles import proposer as proposer_mod
-from simpleloop.roles.model import ModelReply
+from simpleloop.roles.model import ModelError, ModelReply
 from simpleloop.roles.proposer import ProposerAgent, ProposerError, _parse_action
 from simpleloop.roles.research_tools import Insight
 
@@ -233,6 +233,69 @@ def test_agent_stops_at_step_budget(tmp_path, monkeypatch):
 
     with pytest.raises(ProposerError, match="max_steps"):
         _agent(model, max_steps=1).run(**_run_args(tmp_path))
+
+
+def test_agent_repairs_protocol_without_consuming_a_step(
+    tmp_path, monkeypatch, capsys,
+):
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    rejected = (
+        '{"action":"search_history","query":"cache"} PRIVATE_TAIL'
+    )
+    model = FakeModel([
+        ModelReply(rejected, usage={"t": 1}),
+        _reply(
+            {"action": "search_history", "query": "cache"},
+            {"t": 2},
+        ),
+        _reply({
+            "action": "submit_proposals",
+            "proposals": ["Try A"],
+        }, {"t": 3}),
+    ])
+
+    result = _agent(model, max_steps=2).run(**_run_args(tmp_path))
+
+    assert result.proposals == ["Try A"]
+    assert result.usage == [{"t": 1}, {"t": 2}, {"t": 3}]
+    assert [item[0]["action"] for item in FakeTools.instances[0].actions] == [
+        "search_history",
+    ]
+    output = capsys.readouterr().out
+    assert "protocol repair 1/2 reason=invalid_json" in output
+    assert "PRIVATE_TAIL" not in output
+
+
+def test_agent_fails_closed_after_two_protocol_repairs(
+    tmp_path, monkeypatch,
+):
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    model = FakeModel([ModelReply("{} trailing") for _ in range(3)])
+
+    with pytest.raises(ProposerError, match="after 2 repairs"):
+        _agent(model).run(**_run_args(tmp_path))
+
+    assert len(model.calls) == 3
+    assert FakeTools.instances[0].actions == []
+
+
+def test_agent_does_not_repair_model_transport_errors(tmp_path):
+    class RaisingModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **_kwargs):
+            self.calls += 1
+            raise ModelError("transport failed")
+
+    model = RaisingModel()
+
+    with pytest.raises(ModelError, match="transport failed"):
+        _agent(model).run(**_run_args(tmp_path))
+
+    assert model.calls == 1
 
 
 @pytest.mark.parametrize("text", [

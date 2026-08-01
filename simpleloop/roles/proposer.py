@@ -43,6 +43,8 @@ Runtime contract (immutable):
 - Choose research actions and their order adaptively. No action is mandatory.
 """.strip()
 
+_MAX_PROTOCOL_REPAIRS = 2
+
 def _action_summary(action: dict) -> str:
     name = action["action"]
     if name == "run_research_command":
@@ -152,25 +154,52 @@ class ProposerAgent:
             )
             for _step in range(self.max_steps):
                 step = _step + 1
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise ProposerError("proposer deadline exceeded")
                 print(
                     f"[proposer step {step}/{self.max_steps}] thinking",
                     flush=True,
                 )
-                reply = self.model.complete(
-                    system=system_prompt,
-                    messages=messages,
-                    timeout_seconds=remaining,
-                )
-                usages.append(reply.usage)
-                if self.usage_observer is not None and reply.usage is not None:
-                    self.usage_observer(reply.usage)
-                action = _parse_action(
-                    reply.text,
-                    candidates_per_round=candidates_per_round,
-                )
+                for repair in range(_MAX_PROTOCOL_REPAIRS + 1):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ProposerError("proposer deadline exceeded")
+                    reply = self.model.complete(
+                        system=system_prompt,
+                        messages=messages,
+                        timeout_seconds=remaining,
+                    )
+                    usages.append(reply.usage)
+                    if (self.usage_observer is not None
+                            and reply.usage is not None):
+                        self.usage_observer(reply.usage)
+                    try:
+                        action = _parse_action(
+                            reply.text,
+                            candidates_per_round=candidates_per_round,
+                        )
+                    except ProposerError as exc:
+                        if repair == _MAX_PROTOCOL_REPAIRS:
+                            raise ProposerError(
+                                "proposer action protocol failed after "
+                                f"{_MAX_PROTOCOL_REPAIRS} repairs"
+                            ) from exc
+                        reason = _protocol_reason(exc)
+                        print(
+                            f"[proposer step {step}/{self.max_steps}] "
+                            f"protocol repair {repair + 1}/"
+                            f"{_MAX_PROTOCOL_REPAIRS} reason={reason}",
+                            flush=True,
+                        )
+                        messages.extend([
+                            {"role": "assistant", "content": reply.text},
+                            {"role": "user", "content": (
+                                "Protocol correction required "
+                                f"({reason}). Return exactly one JSON action "
+                                "object matching the Runtime contract, with "
+                                "no prose or additional JSON."
+                            )},
+                        ])
+                        continue
+                    break
                 print(
                     f"[proposer step {step}/{self.max_steps}] "
                     f"{_action_summary(action)}",
@@ -296,6 +325,12 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             normalized.append(proposal.strip())
         return {"action": name, "proposals": normalized}
     raise ProposerError(f"unknown proposer action: {name}")
+
+
+def _protocol_reason(exc: ProposerError) -> str:
+    if isinstance(exc.__cause__, (TypeError, json.JSONDecodeError)):
+        return "invalid_json"
+    return "invalid_action"
 
 
 def _require_keys(
