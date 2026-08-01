@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Do not print prompts, accumulated messages, raw model responses, tool-result bodies, Insight text, environment variables, or credentials.
-- Normalize query and command previews to one line and cap them at 160 characters.
+- Do not print model-controlled command, query, reference, Insight, or proposal text; expose only action metadata and character counts.
 - Do not add a logger abstraction, trace file, configuration flag, dependency, or public API.
 - Keep the outer Proposer -> Executor -> Harness/Gates topology and all authority boundaries unchanged.
 - Set the default `researcher.max_steps` to 50; explicit YAML values remain explicit per-run budgets.
@@ -37,14 +37,17 @@ Update `FakeTools.execute()` to return realistic bounded observation shapes, the
 def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-    long_command = "git diff --stat\n" + ("x" * 180) + "HIDDEN_TAIL"
+    long_command = (
+        "printf PRIVATE_COMMAND_BODY\n" + ("x" * 180) + "HIDDEN_TAIL"
+    )
     model = FakeModel([
         _reply({
             "action": "run_research_command",
             "command": long_command,
             "cwd": "source",
         }),
-        _reply({"action": "search_history", "query": "cache reuse"}),
+        _reply({"action": "search_history", "query": "TOOL_RESULT_BODY"}),
+        _reply({"action": "inspect_episode", "ref": "PRIVATE_REF_BODY"}),
         _reply({
             "action": "write_insight",
             "text": "PRIVATE INSIGHT BODY",
@@ -62,13 +65,18 @@ def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
     assert "[proposer] started max_steps=5" in output
     assert "[proposer step 1/5] thinking" in output
     assert "action=run_research_command cwd=source" in output
+    assert f"command_chars={len(long_command)}" in output
     assert "result=ok exit_code=0" in output
-    assert "action=search_history" in output
+    assert "output_chars=16 truncated=false" in output
+    assert "action=search_history query_chars=16" in output
     assert "matches=0" in output
+    assert "action=inspect_episode ref_chars=16" in output
     assert "action=write_insight refs=1" in output
     assert "action=submit_proposals count=1" in output
-    assert "[proposer] finished steps=4 elapsed=" in output
+    assert "[proposer] finished steps=5 elapsed=" in output
     assert "TOOL_RESULT_BODY" not in output
+    assert "PRIVATE_COMMAND_BODY" not in output
+    assert "PRIVATE_REF_BODY" not in output
     assert "PRIVATE INSIGHT BODY" not in output
     assert "HIDDEN_TAIL" not in output
 ```
@@ -88,9 +96,8 @@ Expected: FAIL because `ProposerAgent.run()` currently prints no activity.
 
 - [ ] **Step 3: Implement the minimal summaries**
 
-In `simpleloop/roles/proposer.py`, add a 160-character one-line preview helper,
-action-specific summary helper, and result helper. The loop implementation must
-have this shape:
+In `simpleloop/roles/proposer.py`, add an action-specific metadata summary
+helper and result helper. The loop implementation must have this shape:
 
 ```python
 started = time.monotonic()
@@ -127,9 +134,9 @@ for _step in range(self.max_steps):
 The helpers expose only:
 
 ```text
-run_research_command: cwd, bounded command; ok/error, exit_code, output_chars, truncated, timed_out when true
-search_history: bounded query; ok/error, match count
-inspect_episode: ref; ok/error
+run_research_command: cwd, command character count; ok/error, exit_code, output_chars, truncated, timed_out when true
+search_history: query character count; ok/error, match count
+inspect_episode: reference character count; ok/error
 write_insight: ref count; ok/error
 submit_proposals: proposal count
 ```

@@ -127,14 +127,17 @@ def test_agent_investigates_in_any_order_then_submits(
 def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-    long_command = "git diff --stat\n" + ("x" * 180) + "HIDDEN_TAIL"
+    long_command = (
+        "printf PRIVATE_COMMAND_BODY\n" + ("x" * 180) + "HIDDEN_TAIL"
+    )
     model = FakeModel([
         _reply({
             "action": "run_research_command",
             "command": long_command,
             "cwd": "source",
         }),
-        _reply({"action": "search_history", "query": "cache reuse"}),
+        _reply({"action": "search_history", "query": "TOOL_RESULT_BODY"}),
+        _reply({"action": "inspect_episode", "ref": "PRIVATE_REF_BODY"}),
         _reply({
             "action": "write_insight",
             "text": "PRIVATE INSIGHT BODY",
@@ -152,13 +155,18 @@ def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
     assert "[proposer] started max_steps=5" in output
     assert "[proposer step 1/5] thinking" in output
     assert "action=run_research_command cwd=source" in output
+    assert f"command_chars={len(long_command)}" in output
     assert "result=ok exit_code=0" in output
-    assert "action=search_history" in output
+    assert "output_chars=16 truncated=false" in output
+    assert "action=search_history query_chars=16" in output
     assert "matches=0" in output
+    assert "action=inspect_episode ref_chars=16" in output
     assert "action=write_insight refs=1" in output
     assert "action=submit_proposals count=1" in output
-    assert "[proposer] finished steps=4 elapsed=" in output
+    assert "[proposer] finished steps=5 elapsed=" in output
     assert "TOOL_RESULT_BODY" not in output
+    assert "PRIVATE_COMMAND_BODY" not in output
+    assert "PRIVATE_REF_BODY" not in output
     assert "PRIVATE INSIGHT BODY" not in output
     assert "HIDDEN_TAIL" not in output
 

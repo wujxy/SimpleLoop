@@ -43,31 +43,17 @@ Runtime contract (immutable):
 - Choose research actions and their order adaptively. No action is mandatory.
 """.strip()
 
-_SUMMARY_PREVIEW_CHARS = 160
-
-
-def _preview(value: str) -> str:
-    text = " ".join(value.split())
-    if len(text) <= _SUMMARY_PREVIEW_CHARS:
-        return text
-    return text[:_SUMMARY_PREVIEW_CHARS - 3] + "..."
-
-
-def _quoted_preview(value: str) -> str:
-    return json.dumps(_preview(value), ensure_ascii=False)
-
-
 def _action_summary(action: dict) -> str:
     name = action["action"]
     if name == "run_research_command":
         return (
             f"action={name} cwd={action['cwd']} "
-            f"command={_quoted_preview(action['command'])}"
+            f"command_chars={len(action['command'])}"
         )
     if name == "search_history":
-        return f"action={name} query={_quoted_preview(action['query'])}"
+        return f"action={name} query_chars={len(action['query'])}"
     if name == "inspect_episode":
-        return f"action={name} ref={_quoted_preview(action['ref'])}"
+        return f"action={name} ref_chars={len(action['ref'])}"
     if name == "write_insight":
         return f"action={name} refs={len(action['refs'])}"
     return f"action={name} count={len(action['proposals'])}"

@@ -50,19 +50,22 @@ A run emits a concise lifecycle and one line before and after meaningful work:
 ```text
 [proposer] started max_steps=50
 [proposer step 1/50] thinking
-[proposer step 1/50] action=search_history query="cache reuse"
+[proposer step 1/50] action=search_history query_chars=11
 [proposer step 1/50] result=ok matches=3
 [proposer step 2/50] thinking
-[proposer step 2/50] action=run_research_command cwd=source command="git diff ..."
+[proposer step 2/50] action=run_research_command cwd=source command_chars=12
 [proposer step 2/50] result=ok exit_code=0 output_chars=1842 truncated=false
 [proposer step 3/50] thinking
 [proposer step 3/50] action=submit_proposals count=1
 [proposer] finished steps=3 elapsed=44.1s
 ```
 
-The exact result fields depend on the action. Summaries may contain counts,
-identifiers, workspace-relative paths, exit status, output size, and truncation
-status. Queries and commands are converted to one line and length-bounded.
+The exact result fields depend on the action. Summaries contain only action
+types, counts, fixed-enum fields such as `cwd`, exit status, output size, and
+truncation status. Model-controlled command, query, reference, Insight, and
+proposal text is never printed, even in truncated form. This prevents the
+model from copying prior context or a tool-result body into a later action and
+thereby leaking it through the activity log.
 
 The following data is never printed by this feature:
 
@@ -82,8 +85,8 @@ exception behavior; no raw payload is added to the log.
 
 `ProposerAgent.run()` remains the owner of the loop and prints the lifecycle,
 thinking, action, result, and completion lines. Small private formatting
-helpers are acceptable only where needed to keep the loop readable and enforce
-single-line bounded text. No public API changes are required.
+helpers are acceptable only where needed to keep the loop readable and expose
+safe metadata. No public API changes are required.
 
 The elapsed time uses a monotonic clock. The existing model timeout, command
 timeout, telemetry, and exception semantics remain unchanged.
@@ -107,7 +110,8 @@ Focused tests will verify:
 
 - lifecycle, thinking, action, result, and completion summaries are visible;
 - action-specific metadata is useful but bounded;
-- tool-result contents and Insight text are not printed;
+- model-controlled action text, tool-result contents, and Insight text are not
+  printed, including when a later action echoes earlier private content;
 - the configured step count appears in output;
 - the configuration default is 50;
 - existing successful, malformed-action, timeout, and max-step behavior is
