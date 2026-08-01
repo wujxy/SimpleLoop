@@ -11,6 +11,7 @@ Minimal schema:
   loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
   loop.max_workers: int              (optional, default 1; candidate concurrency)
   loop.proposer_recent_rounds: int   (optional, default 6; rounds of history fed to proposer)
+  researcher: object                 (required by agent-driven runs; optional for static mode)
   runtime.image: path                (required; readable SIF image)
   runtime.definition: path           (optional; defaults beside image with .def suffix)
   runtime.binds: [absolute dir]      (optional, default [])
@@ -54,7 +55,16 @@ import yaml
 
 TASK_TOP_KEYS = {
     "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution",
-    "self_improvement",
+    "self_improvement", "researcher",
+}
+
+_RESEARCHER_DEFAULTS = {
+    "api": "hepai",
+    "model": "gpt-5.5",
+    "base_url": "https://aiapi.ihep.ac.cn/apiv2",
+    "max_steps": 20,
+    "command_timeout_seconds": 120,
+    "command_output_cap_chars": 12000,
 }
 
 
@@ -204,6 +214,11 @@ def _resolve(
         if "self_improvement" in raw
         else None
     )
+    researcher = (
+        _resolve_researcher(raw["researcher"])
+        if "researcher" in raw
+        else None
+    )
 
     return {
         "goal": str(goal),
@@ -229,7 +244,36 @@ def _resolve(
         "baseline_ref": baseline_ref,
         "config_dir": str(path.parent),
         "self_improvement": self_improvement,
+        "researcher": researcher,
     }
+
+
+def _resolve_researcher(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        raise ConfigError("researcher: must be an object")
+    unknown = set(raw) - set(_RESEARCHER_DEFAULTS)
+    if unknown:
+        raise ConfigError(f"researcher: unknown key(s): {sorted(unknown)}")
+    result = {**_RESEARCHER_DEFAULTS, **raw}
+    if result["api"] != "hepai":
+        raise ConfigError("researcher.api: first version supports only 'hepai'")
+    for key in ("model", "base_url"):
+        if not isinstance(result[key], str) or not result[key].strip():
+            raise ConfigError(
+                f"researcher.{key}: must be a non-empty string"
+            )
+    for key, minimum in (
+        ("max_steps", 1),
+        ("command_timeout_seconds", 1),
+        ("command_output_cap_chars", 1000),
+    ):
+        value = result[key]
+        if (not isinstance(value, int) or isinstance(value, bool)
+                or value < minimum):
+            raise ConfigError(
+                f"researcher.{key}: must be an integer >= {minimum}"
+            )
+    return result
 
 
 def _resolve_self_improvement(raw: object) -> dict:

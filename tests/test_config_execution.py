@@ -51,6 +51,65 @@ def test_default_backend_is_local(tmp_path: Path):
     assert cfg["hepjob"]["max_attempts"] == 2
 
 
+def test_researcher_defaults(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["researcher"] = {}
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    cfg = config_mod.load(path)
+
+    assert cfg["researcher"] == {
+        "api": "hepai",
+        "model": "gpt-5.5",
+        "base_url": "https://aiapi.ihep.ac.cn/apiv2",
+        "max_steps": 20,
+        "command_timeout_seconds": 120,
+        "command_output_cap_chars": 12000,
+    }
+
+
+def test_missing_researcher_is_preserved_for_static_mode(tmp_path: Path):
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(_base_task(tmp_path)), encoding="utf-8")
+
+    assert config_mod.load(path)["researcher"] is None
+
+
+def test_researcher_rejects_unknown_key(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["researcher"] = {"temperature": 0.2}
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match="researcher.*temperature"):
+        config_mod.load(path)
+
+
+@pytest.mark.parametrize(
+    ("researcher", "message"),
+    [
+        (None, "must be an object"),
+        ({"api": "openai"}, "supports only 'hepai'"),
+        ({"model": " "}, "researcher.model"),
+        ({"base_url": ""}, "researcher.base_url"),
+        ({"max_steps": 0}, "researcher.max_steps"),
+        ({"command_timeout_seconds": 0}, "command_timeout_seconds"),
+        ({"command_output_cap_chars": 999}, "command_output_cap_chars"),
+    ],
+)
+def test_researcher_rejects_invalid_values(
+    tmp_path: Path, researcher: object, message: str,
+):
+    raw = _base_task(tmp_path)
+    raw["researcher"] = researcher
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match=message):
+        config_mod.load(path)
+
+
 @pytest.mark.parametrize("key", ["PATHS", "EVAL_COMMANDS"])
 def test_metrics_reject_reserved_keys(tmp_path: Path, key: str):
     raw = _base_task(tmp_path)
