@@ -39,6 +39,7 @@ def test_hepai_uses_nonstreaming_chat_completion_and_timeout():
             {"role": "user", "content": "investigate"},
         ],
         "stream": False,
+        "response_format": {"type": "json_object"},
         "timeout": 12.5,
     }
     assert reply.text == (

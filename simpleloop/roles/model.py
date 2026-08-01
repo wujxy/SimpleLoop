@@ -61,6 +61,7 @@ class HepAIChatModel:
             model=self.model,
             messages=[{"role": "system", "content": system}, *messages],
             stream=False,
+            response_format={"type": "json_object"},
             timeout=timeout_seconds,
         )
         text = response.choices[0].message.content
