@@ -36,7 +36,20 @@ class FakeTools:
             self.pending_insight = Insight.from_dict({
                 "text": action["text"], "refs": action["refs"],
             })
-        return {"ok": True, "action": action["action"]}
+            return {"ok": True, "result": "insight pending"}
+        if action["action"] == "run_research_command":
+            return {
+                "ok": True,
+                "returncode": 0,
+                "timed_out": False,
+                "truncated": False,
+                "output": "TOOL_RESULT_BODY",
+            }
+        if action["action"] == "search_history":
+            return {"ok": True, "result": []}
+        if action["action"] == "inspect_episode":
+            return {"ok": True, "result": {"ref": action["ref"]}}
+        raise AssertionError(f"unexpected fake action: {action['action']}")
 
 
 def _reply(action: dict, usage=None) -> ModelReply:
@@ -109,6 +122,45 @@ def test_agent_investigates_in_any_order_then_submits(
     assert json.loads(model.calls[1]["messages"][-1]["content"])[
         "tool_result"
     ]["ok"]
+
+
+def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    long_command = "git diff --stat\n" + ("x" * 180) + "HIDDEN_TAIL"
+    model = FakeModel([
+        _reply({
+            "action": "run_research_command",
+            "command": long_command,
+            "cwd": "source",
+        }),
+        _reply({"action": "search_history", "query": "cache reuse"}),
+        _reply({
+            "action": "write_insight",
+            "text": "PRIVATE INSIGHT BODY",
+            "refs": ["r0c0"],
+        }),
+        _reply({
+            "action": "submit_proposals",
+            "proposals": ["Replace the cache layout."],
+        }),
+    ])
+
+    _agent(model, max_steps=5).run(**_run_args(tmp_path))
+
+    output = capsys.readouterr().out
+    assert "[proposer] started max_steps=5" in output
+    assert "[proposer step 1/5] thinking" in output
+    assert "action=run_research_command cwd=source" in output
+    assert "result=ok exit_code=0" in output
+    assert "action=search_history" in output
+    assert "matches=0" in output
+    assert "action=write_insight refs=1" in output
+    assert "action=submit_proposals count=1" in output
+    assert "[proposer] finished steps=4 elapsed=" in output
+    assert "TOOL_RESULT_BODY" not in output
+    assert "PRIVATE INSIGHT BODY" not in output
+    assert "HIDDEN_TAIL" not in output
 
 
 def test_later_insight_replaces_earlier_pending_insight(tmp_path, monkeypatch):

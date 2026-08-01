@@ -43,6 +43,56 @@ Runtime contract (immutable):
 - Choose research actions and their order adaptively. No action is mandatory.
 """.strip()
 
+_SUMMARY_PREVIEW_CHARS = 160
+
+
+def _preview(value: str) -> str:
+    text = " ".join(value.split())
+    if len(text) <= _SUMMARY_PREVIEW_CHARS:
+        return text
+    return text[:_SUMMARY_PREVIEW_CHARS - 3] + "..."
+
+
+def _quoted_preview(value: str) -> str:
+    return json.dumps(_preview(value), ensure_ascii=False)
+
+
+def _action_summary(action: dict) -> str:
+    name = action["action"]
+    if name == "run_research_command":
+        return (
+            f"action={name} cwd={action['cwd']} "
+            f"command={_quoted_preview(action['command'])}"
+        )
+    if name == "search_history":
+        return f"action={name} query={_quoted_preview(action['query'])}"
+    if name == "inspect_episode":
+        return f"action={name} ref={_quoted_preview(action['ref'])}"
+    if name == "write_insight":
+        return f"action={name} refs={len(action['refs'])}"
+    return f"action={name} count={len(action['proposals'])}"
+
+
+def _result_summary(action: dict, observation: dict) -> str:
+    parts = [f"result={'ok' if observation.get('ok') else 'error'}"]
+    if action["action"] == "run_research_command":
+        if "returncode" in observation:
+            parts.append(f"exit_code={observation['returncode']}")
+        output = observation.get("output")
+        if isinstance(output, str):
+            parts.append(f"output_chars={len(output)}")
+        if "truncated" in observation:
+            parts.append(
+                f"truncated={str(bool(observation['truncated'])).lower()}"
+            )
+        if observation.get("timed_out"):
+            parts.append("timed_out=true")
+    elif action["action"] == "search_history":
+        matches = observation.get("result")
+        if isinstance(matches, list):
+            parts.append(f"matches={len(matches)}")
+    return " ".join(parts)
+
 
 class ProposerAgent:
     def __init__(
@@ -99,8 +149,10 @@ class ProposerAgent:
                 gate_block=gate_block,
             ),
         }]
-        deadline = time.monotonic() + self.timeout_seconds
+        started = time.monotonic()
+        deadline = started + self.timeout_seconds
         usages = []
+        print(f"[proposer] started max_steps={self.max_steps}", flush=True)
         with TemporaryDirectory(prefix="simpleloop-research-") as scratch:
             tools = ResearchTools(
                 runtime=self.runtime,
@@ -113,9 +165,14 @@ class ProposerAgent:
                 command_output_cap_chars=self.command_output_cap_chars,
             )
             for _step in range(self.max_steps):
+                step = _step + 1
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ProposerError("proposer deadline exceeded")
+                print(
+                    f"[proposer step {step}/{self.max_steps}] thinking",
+                    flush=True,
+                )
                 reply = self.model.complete(
                     system=system_prompt,
                     messages=messages,
@@ -128,13 +185,28 @@ class ProposerAgent:
                     reply.text,
                     candidates_per_round=candidates_per_round,
                 )
+                print(
+                    f"[proposer step {step}/{self.max_steps}] "
+                    f"{_action_summary(action)}",
+                    flush=True,
+                )
                 if action["action"] == "submit_proposals":
+                    print(
+                        f"[proposer] finished steps={step} "
+                        f"elapsed={time.monotonic() - started:.1f}s",
+                        flush=True,
+                    )
                     return ProposerResult(
                         proposals=action["proposals"],
                         insight=tools.pending_insight,
                         usage=usages,
                     )
                 observation = tools.execute(action, deadline=deadline)
+                print(
+                    f"[proposer step {step}/{self.max_steps}] "
+                    f"{_result_summary(action, observation)}",
+                    flush=True,
+                )
                 messages.extend([
                     {"role": "assistant", "content": reply.text},
                     {"role": "user", "content": json.dumps(
