@@ -181,7 +181,7 @@ class ProposerAgent:
                             raise ProposerError(
                                 "proposer action protocol failed after "
                                 f"{_MAX_PROTOCOL_REPAIRS} repairs"
-                            ) from exc
+                            ) from None
                         reason = _protocol_reason(exc)
                         print(
                             f"[proposer step {step}/{self.max_steps}] "

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from pathlib import Path
 
 import pytest
@@ -254,11 +255,18 @@ def test_agent_repairs_protocol_without_consuming_a_step(
             "proposals": ["Try A"],
         }, {"t": 3}),
     ])
+    observed_usage = []
 
-    result = _agent(model, max_steps=2).run(**_run_args(tmp_path))
+    result = _agent(
+        model, max_steps=2, observer=observed_usage.append,
+    ).run(**_run_args(tmp_path))
 
     assert result.proposals == ["Try A"]
     assert result.usage == [{"t": 1}, {"t": 2}, {"t": 3}]
+    assert observed_usage == result.usage
+    assert model.calls[1]["timeout_seconds"] <= model.calls[0][
+        "timeout_seconds"
+    ]
     assert [item[0]["action"] for item in FakeTools.instances[0].actions] == [
         "search_history",
     ]
@@ -279,6 +287,23 @@ def test_agent_fails_closed_after_two_protocol_repairs(
 
     assert len(model.calls) == 3
     assert FakeTools.instances[0].actions == []
+
+
+def test_failed_protocol_repair_traceback_hides_rejected_content(
+    tmp_path, monkeypatch,
+):
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    marker = "PRIVATE_ACTION_MARKER"
+    model = FakeModel([
+        _reply({"action": marker}) for _ in range(3)
+    ])
+
+    with pytest.raises(ProposerError) as exc_info:
+        _agent(model).run(**_run_args(tmp_path))
+
+    rendered = "".join(traceback.format_exception(exc_info.value))
+    assert marker not in rendered
 
 
 def test_agent_does_not_repair_model_transport_errors(tmp_path):
