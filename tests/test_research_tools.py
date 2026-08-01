@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import io
+import os
 import subprocess
 
 import pytest
@@ -37,13 +39,26 @@ class _Process:
         self.returncode = returncode
         self.timeout_once = timeout_once
         self.timeouts = []
+        self.stdout = io.StringIO(output[0])
+        self.stderr = io.StringIO(output[1])
 
-    def communicate(self, timeout=None):
+    def wait(self, timeout=None):
         self.timeouts.append(timeout)
         if self.timeout_once:
             self.timeout_once = False
             raise subprocess.TimeoutExpired("apptainer", timeout)
-        return self.output
+        return self.returncode
+
+
+class _RepeatingStream:
+    def __init__(self, char: str, count: int):
+        self.char = char
+        self.remaining = count
+
+    def read(self, size: int) -> str:
+        count = min(size, self.remaining)
+        self.remaining -= count
+        return self.char * count
 
 
 def _candidate(round_id: int, *, proposal: str = "cache values") -> dict:
@@ -158,6 +173,11 @@ def _runner(tmp_path, *, cap=100, timeout=12):
     }
     for path in paths.values():
         path.mkdir()
+    git_dir = paths["repo"] / ".git" / "worktrees" / "research"
+    git_dir.mkdir(parents=True)
+    (paths["source"] / ".git").write_text(
+        f"gitdir: {git_dir}\n", encoding="utf-8",
+    )
     runtime = _Runtime(paths["history"])
     runner = ResearchCommandRunner(
         runtime=runtime,
@@ -184,12 +204,16 @@ def test_research_command_uses_process_group_and_returns_observation(
 
     monkeypatch.setattr("simpleloop.roles.research_tools.subprocess.Popen",
                         fake_popen)
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
+    )
 
     result = runner.run("git show HEAD", cwd="source")
 
     payload, paths = runtime.argv_call
     assert payload == [
-        "env", "GIT_DIR=/repo/.git", "GIT_WORK_TREE=/source",
+        "env", "GIT_DIR=/repo/.git/worktrees/research",
+        "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/source",
         "bash", "-lc", "git show HEAD",
     ]
     assert paths["cwd"] == "source"
@@ -202,6 +226,63 @@ def test_research_command_uses_process_group_and_returns_observation(
         "truncated": False,
         "output": "stdout\n[stderr]\nstderr",
     }
+
+
+def test_research_command_uses_the_snapshot_worktree_head(tmp_path):
+    repo = tmp_path / "repo"
+    source = tmp_path / "source"
+    history = tmp_path / "history"
+    scratch = tmp_path / "scratch"
+    repo.mkdir()
+    history.mkdir()
+    scratch.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=True,
+        ).stdout.strip()
+
+    git("-C", str(repo), "init")
+    git("-C", str(repo), "config", "user.name", "Test")
+    git("-C", str(repo), "config", "user.email", "test@example.invalid")
+    (repo / "value.txt").write_text("parent\n", encoding="utf-8")
+    git("-C", str(repo), "add", "value.txt")
+    git("-C", str(repo), "commit", "-m", "parent")
+    parent_sha = git("-C", str(repo), "rev-parse", "HEAD")
+    (repo / "value.txt").write_text("new head\n", encoding="utf-8")
+    git("-C", str(repo), "commit", "-am", "new head")
+    git("-C", str(repo), "worktree", "add", "--detach", str(source), parent_sha)
+
+    class HostRuntime:
+        run_dir = tmp_path
+
+        def research_exec_argv(self, payload, **paths):
+            replacements = {
+                "/repo": str(paths["repo"]),
+                "/source": str(paths["source"]),
+            }
+            return [
+                next((item.replace(old, new) for old, new in replacements.items()
+                      if old in item), item)
+                for item in payload
+            ]
+
+        def research_subprocess_env(self):
+            return {"PATH": os.environ["PATH"]}
+
+    runner = ResearchCommandRunner(
+        runtime=HostRuntime(), source=source, repo=repo,
+        history_dir=history, scratch=scratch,
+        timeout_seconds=10, output_cap_chars=1000,
+    )
+
+    result = runner.run(
+        'git rev-parse HEAD && test -z "$(git status --porcelain)"',
+    )
+
+    assert result["ok"] is True
+    assert result["output"].strip() == parent_sha
 
 
 def test_research_command_timeout_kills_process_group(tmp_path, monkeypatch):
@@ -227,16 +308,21 @@ def test_research_command_timeout_kills_process_group(tmp_path, monkeypatch):
 
 def test_research_command_caps_combined_output(tmp_path, monkeypatch):
     runner, _runtime = _runner(tmp_path, cap=12)
-    process = _Process(output=("abcdefghij", "klmnop"))
+    process = _Process(output=("", "tail"))
+    process.stdout = _RepeatingStream("x", 1_000_000)
     monkeypatch.setattr(
         "simpleloop.roles.research_tools.subprocess.Popen",
         lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
     )
 
     result = runner.run("true", cwd="source")
 
     assert result["truncated"] is True
-    assert result["output"] == "abcdefghij\n["
+    assert result["output"] == "x" * 12
+    assert process.stdout.remaining == 0
 
 
 @pytest.mark.parametrize(

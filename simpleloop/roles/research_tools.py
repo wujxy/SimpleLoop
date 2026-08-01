@@ -8,6 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Thread
 
 from ..harness.memory import resolve_episode
 
@@ -170,9 +171,11 @@ class ResearchCommandRunner:
             raise ValueError("research command must be non-empty")
         if cwd not in {"source", "scratch"}:
             raise ValueError("research cwd must be 'source' or 'scratch'")
+        git_dir = self._worktree_git_dir()
         payload = [
             "env",
-            "GIT_DIR=/repo/.git",
+            f"GIT_DIR={git_dir}",
+            "GIT_COMMON_DIR=/repo/.git",
             "GIT_WORK_TREE=/source",
             "bash",
             "-lc",
@@ -202,20 +205,43 @@ class ResearchCommandRunner:
             if timeout_seconds is None
             else min(self.timeout_seconds, timeout_seconds)
         )
+        stdout_result: dict = {}
+        stderr_result: dict = {}
+        readers = [
+            Thread(
+                target=_drain_bounded,
+                args=(process.stdout, self.output_cap_chars, stdout_result),
+            ),
+            Thread(
+                target=_drain_bounded,
+                args=(process.stderr, self.output_cap_chars, stderr_result),
+            ),
+        ]
+        for reader in readers:
+            reader.start()
         try:
-            stdout, stderr = process.communicate(
-                timeout=timeout,
-            )
+            process.wait(timeout=timeout)
             returncode = process.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
+            _kill_process_group(process.pid)
+            process.wait()
             returncode = None
-        output = stdout or ""
+        finally:
+            if not timed_out:
+                _kill_process_group(process.pid)
+            for reader in readers:
+                reader.join()
+        stdout = stdout_result.get("text", "")
+        stderr = stderr_result.get("text", "")
+        output = stdout
         if stderr:
             output += "\n[stderr]\n" + stderr
-        truncated = len(output) > self.output_cap_chars
+        truncated = (
+            stdout_result.get("truncated", False)
+            or stderr_result.get("truncated", False)
+            or len(output) > self.output_cap_chars
+        )
         output = output[:self.output_cap_chars]
         return {
             "ok": not timed_out and returncode == 0,
@@ -224,6 +250,55 @@ class ResearchCommandRunner:
             "truncated": truncated,
             "output": output,
         }
+
+    def _worktree_git_dir(self) -> str:
+        git_file = self.source / ".git"
+        try:
+            line = git_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(
+                f"research source has no worktree metadata: {git_file}"
+            ) from exc
+        if not line.startswith("gitdir: "):
+            raise ValueError(f"invalid worktree metadata: {git_file}")
+        git_dir = Path(line.removeprefix("gitdir: "))
+        if not git_dir.is_absolute():
+            git_dir = git_file.parent / git_dir
+        admin_root = (self.repo / ".git" / "worktrees").resolve()
+        try:
+            relative = git_dir.resolve().relative_to(admin_root)
+        except ValueError as exc:
+            raise ValueError(
+                "research worktree metadata points outside the run repository"
+            ) from exc
+        if len(relative.parts) != 1:
+            raise ValueError("invalid research worktree admin path")
+        return f"/repo/.git/worktrees/{relative.as_posix()}"
+
+
+def _drain_bounded(stream, cap: int, result: dict) -> None:
+    chunks: list[str] = []
+    kept = 0
+    truncated = False
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            break
+        room = cap - kept
+        if room > 0:
+            retained = chunk[:room]
+            chunks.append(retained)
+            kept += len(retained)
+        if len(chunk) > max(room, 0):
+            truncated = True
+    result.update(text="".join(chunks), truncated=truncated)
+
+
+def _kill_process_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 class ResearchTools:

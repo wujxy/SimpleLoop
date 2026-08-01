@@ -430,7 +430,7 @@ git commit -m "feat: add proposer research memory"
 
 ## Task 3: Add the read-only research-command sandbox
 
-**Necessity:** Code reading, Git comparison, and local analysis require a general research tool. Raw host Bash would expose credentials and mutable project state, so the only acceptable MVP is one sandboxed Bash action with read-only source/history mounts, ephemeral scratch, no network, a timeout, and an output cap. No command allowlist or extra file tools are needed because Bash subsumes them inside the boundary.
+**Necessity:** Code reading, Git comparison, and local analysis require a general research tool. Raw host Bash would expose credentials and mutable project state, so the only acceptable MVP is one sandboxed Bash action with allowlisted read-only source/evidence mounts, ephemeral scratch, no network, a timeout, and an output cap. No command allowlist or extra file tools are needed because Bash subsumes them inside the boundary.
 
 **Files:**
 
@@ -455,8 +455,11 @@ def test_research_argv_is_contained_read_only_and_offline(runtime, tmp_path):
     assert argv[argv.index("--network") + 1] == "none"
     assert f"{tmp_path / 'source'}:/source:ro" in argv
     assert f"{tmp_path / 'repo'}:/repo:ro" in argv
-    assert f"{tmp_path / 'run'}:/history:ro" in argv
+    assert f"{tmp_path / 'run/history.jsonl'}:/history.jsonl:ro" in argv
+    assert f"{tmp_path / 'run/rounds'}:/rounds:ro" in argv
     assert f"{tmp_path / 'scratch'}:/scratch:rw" in argv
+    assert f"{tmp_path / 'run'}:/history:ro" not in argv
+    assert not any("job_env.sh" in item for item in argv)
     assert argv[argv.index("--cwd") + 1] == "/source"
 
 
@@ -490,12 +493,14 @@ def research_exec_argv(
     ]
     if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
         argv.append("--userns")
-    for bind in self.binds:
-        argv.extend(["--bind", f"{bind}:{bind}:ro"])
+    evidence = Path(history).resolve()
+    if (evidence / "history.jsonl").is_file():
+        argv.extend(["--bind", f"{evidence / 'history.jsonl'}:/history.jsonl:ro"])
+    if (evidence / "rounds").is_dir():
+        argv.extend(["--bind", f"{evidence / 'rounds'}:/rounds:ro"])
     argv.extend([
         "--bind", f"{Path(source).resolve()}:/source:ro",
         "--bind", f"{Path(repo).resolve()}:/repo:ro",
-        "--bind", f"{Path(history).resolve()}:/history:ro",
         "--bind", f"{Path(scratch).resolve()}:/scratch:rw",
         "--cwd", f"/{cwd}", str(self.image),
     ])
@@ -507,7 +512,12 @@ def research_subprocess_env(self) -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key in allowed}
 ```
 
-The research payload will receive `GIT_DIR=/repo/.git` and `GIT_WORK_TREE=/source` through the explicit `env` program arguments, not the host environment.
+Configured task binds are deliberately not inherited by research because a
+broad bind can make frontend credentials reachable by their original absolute
+path. The research payload derives the current worktree admin directory from
+`/source/.git`, validates that it is under `/repo/.git/worktrees`, and receives
+`GIT_DIR`, `GIT_COMMON_DIR=/repo/.git`, and `GIT_WORK_TREE=/source` through the
+explicit `env` arguments rather than the host environment.
 
 - [ ] **Step 4: Write failing command-runner tests**
 
@@ -539,13 +549,14 @@ The runner must invoke:
 ```python
 payload = [
     "env",
-    "GIT_DIR=/repo/.git",
+    "GIT_DIR=/repo/.git/worktrees/<validated-current-worktree>",
+    "GIT_COMMON_DIR=/repo/.git",
     "GIT_WORK_TREE=/source",
     "bash", "-lc", command,
 ]
 ```
 
-Use `subprocess.Popen(..., shell=False, text=True, stdout=PIPE, stderr=PIPE, start_new_session=True)`. On `TimeoutExpired`, kill the process group with `os.killpg(process.pid, signal.SIGKILL)` and collect remaining output. Combine stdout and stderr once, retain the first `output_cap_chars`, and set `truncated`. A non-zero command is a valid tool observation with `ok=False`; only malformed action input is a contract error.
+Use `subprocess.Popen(..., shell=False, text=True, stdout=PIPE, stderr=PIPE, start_new_session=True)`. Drain both pipes concurrently while retaining only a bounded prefix, so the cap bounds frontend memory rather than merely truncating after `communicate()`. On `TimeoutExpired`, kill the process group; also clean up the group after a normal shell exit so background children cannot persist. Combine the retained stdout/stderr once and set `truncated`. A non-zero command is a valid tool observation with `ok=False`; only malformed action input is a contract error.
 
 The Proposer call creates its scratch with `tempfile.TemporaryDirectory(prefix="simpleloop-research-")`, and its caller removes the read-only Git worktree in `finally`. Do not persist shell state or scratch.
 

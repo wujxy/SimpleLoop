@@ -480,8 +480,14 @@ def _reconcile_completed_inflight(ctx: RunContext, history: list[dict]) -> None:
     if inflight is None:
         return
     round_id = inflight.get("round_id")
-    if not any(record.get("round") == round_id for record in history):
+    last_round = history[-1].get("round") if history else None
+    if round_id == len(history):
         return
+    if round_id != last_round:
+        raise ValueError(
+            f"--continue: inflight file is for round {round_id}, but history "
+            f"ends at round {last_round}"
+        )
     raw_insight = inflight.get("insight")
     if raw_insight is not None:
         ctx.insight_store.append(round_id, Insight.from_dict(raw_insight))

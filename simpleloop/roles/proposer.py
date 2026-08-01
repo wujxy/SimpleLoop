@@ -35,8 +35,9 @@ Runtime contract (immutable):
   {"action":"write_insight","text":"1..500 chars","refs":["r0c0"]}
 - Terminal action:
   {"action":"submit_proposals","proposals":["executable instruction"]}
-- /source is the accepted revision, /repo is its read-only Git object store,
-  /history is persisted run evidence, and /scratch is temporary writable space.
+- /source is the accepted revision, /repo is its read-only Git repository,
+  /history.jsonl and /rounds are persisted run evidence when present, and
+  /scratch is temporary writable space.
 - You cannot call the Executor or Harness, edit candidates, choose a parent,
   or declare evaluation and Gate facts. Only Harness records are authoritative.
 - Choose research actions and their order adaptively. No action is mandatory.

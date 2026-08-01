@@ -652,6 +652,34 @@ def test_continue_reconciles_completed_inflight_insight(tmp_path):
     assert insight_store.load()[0]["id"] == "I0"
     assert (tmp_path / loop_mod.INFLIGHT_NAME).exists() is False
 
+
+def test_continue_does_not_reconcile_an_older_inflight_round(tmp_path):
+    store = Store(tmp_path, metrics_schema=_SCHEMA)
+    for round_id in (0, 1):
+        store.append_generation(
+            round_id, parent_sha="parent", selected_candidate=None,
+            selected_sha=None, candidates=[],
+        )
+    insight_store = InsightStore(tmp_path / "insights.jsonl")
+    journal = loop_mod._InflightJournal(
+        tmp_path / loop_mod.INFLIGHT_NAME,
+        meta={
+            "round_id": 0, "parent_sha": "parent", "proposals": ["p"],
+            "insight": {"text": "Stale fact", "refs": ["r0c0"]},
+        },
+    )
+    journal.save([{"state": "COMPLETED"}])
+    ctx = RunContext(
+        cfg={}, run_dir=tmp_path, store=store,
+        insight_store=insight_store,
+    )
+
+    with pytest.raises(ValueError, match="inflight.*round 0"):
+        loop_mod._reconcile_completed_inflight(ctx, store.history())
+
+    assert insight_store.load() == []
+    assert (tmp_path / loop_mod.INFLIGHT_NAME).exists() is True
+
 def _run_loop_integration(
     monkeypatch, tmp_path, *, prompt_dir=None, max_rounds=2,
     target_rounds=None,

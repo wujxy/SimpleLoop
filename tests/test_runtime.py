@@ -290,12 +290,22 @@ def test_exec_argv_does_not_duplicate_run_directory_bind(tmp_path: Path):
 
 
 def test_research_argv_is_contained_read_only_and_offline(tmp_path: Path):
-    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    base = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    runtime = ApptainerRuntime(
+        base.image, [tmp_path], base.run_dir,
+        executable=base.executable,
+    )
     source = tmp_path / "source"
     repo = tmp_path / "repo-view"
     scratch = tmp_path / "scratch"
     for path in (source, repo, scratch):
         path.mkdir()
+    history = runtime.run_dir / "history.jsonl"
+    history.write_text("{}\n", encoding="utf-8")
+    rounds = runtime.run_dir / "rounds"
+    rounds.mkdir()
+    secret = runtime.run_dir / "job_env.sh"
+    secret.write_text("export ANTHROPIC_API_KEY=secret\n", encoding="utf-8")
 
     argv = runtime.research_exec_argv(
         ["bash", "-lc", "git show --stat HEAD"],
@@ -310,8 +320,11 @@ def test_research_argv_is_contained_read_only_and_offline(tmp_path: Path):
     assert argv[argv.index("--network") + 1] == "none"
     assert f"{source.resolve()}:/source:ro" in argv
     assert f"{repo.resolve()}:/repo:ro" in argv
-    assert f"{runtime.run_dir}:/history:ro" in argv
+    assert f"{history.resolve()}:/history.jsonl:ro" in argv
+    assert f"{rounds.resolve()}:/rounds:ro" in argv
     assert f"{scratch.resolve()}:/scratch:rw" in argv
+    assert f"{tmp_path.resolve()}:{tmp_path.resolve()}:ro" not in argv
+    assert not any(str(secret) in arg for arg in argv)
     assert argv[argv.index("--cwd") + 1] == "/source"
 
 

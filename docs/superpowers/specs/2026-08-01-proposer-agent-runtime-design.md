@@ -244,14 +244,17 @@ Raw host Bash is not exposed. A dedicated Apptainer command builder creates:
 
 ```text
 /source    current parent snapshot, read-only
-/repo      per-run Git object store, read-only
-/history   run facts and artifacts, read-only
+/repo      per-run Git repository and worktree metadata, read-only
+/history.jsonl  factual experiment history, read-only, when present
+/rounds    candidate artifacts, read-only, when present
 /scratch   ephemeral per-Proposer-call directory, writable
 ```
 
-Configured task binds are mounted read-only for research. The container uses a
-contained home and temporary filesystem, a sanitized environment, no HEPAI or
-Anthropic credentials, no scheduler credentials, and no Worker control handle.
+Configured task binds are not inherited by research: they may cover frontend
+state or HEPJob's credential file. Only the evidence paths above are mounted.
+The container uses a contained home and temporary filesystem, a sanitized
+environment, no HEPAI or Anthropic credentials, no scheduler credentials, and
+no Worker control handle.
 Network is disabled for research commands. Background processes are terminated
 with the command process group when the command ends or times out.
 
@@ -412,8 +415,8 @@ Required coverage:
 3. The agent accepts arbitrary valid tool order and does not require a
    reflection/Insight sequence.
 4. JSON action validation rejects prose, unknown actions, and extra fields.
-5. Research shell can read source/history and write scratch, but cannot mutate
-   source, repo, history, or run state.
+5. Research shell can read source and allowlisted evidence and write scratch,
+   but cannot read frontend credentials or mutate source, repo, or run state.
 6. Command timeout, process-group termination, and output caps are enforced.
 7. Search finds old candidates outside the recent prompt window.
 8. Episode lookup returns one persisted candidate without injecting unrelated
@@ -441,7 +444,7 @@ Required coverage:
 | Search + episode lookup | Makes old facts discoverable without full-history injection | vector DB, embeddings, knowledge graph |
 | One optional Insight | Provides compact semantic continuity and history keys | multiple memory types, Memory Agent, compaction |
 | Step/time/output limits | Bound spend, processes, and context | adaptive budget controller |
-| Read-only source/history + scratch | Enforces role authority while allowing experiments | persistent research filesystem |
+| Read-only source/evidence + scratch | Enforces role authority without exposing frontend credentials | persistent research filesystem |
 | Minimal `ChatModel` protocol | Meets the explicit future multi-interface requirement | provider plugins, routing, negotiation |
 
 Removing any item in the first column would either collapse the feature back
