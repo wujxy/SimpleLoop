@@ -35,7 +35,7 @@ class EmptyWorkspace:
 def test_load_semantic_uses_identity_internalized_v000():
     text = load_semantic("proposer")
     normalized = " ".join(text.split())
-    assert text.startswith("You are the Scientist responsible")
+    assert text.startswith("You are one Scientist responsible")
     assert "experimental opportunity" in normalized
     assert "Executor is implementation capacity" in normalized
     assert "Harness" in text

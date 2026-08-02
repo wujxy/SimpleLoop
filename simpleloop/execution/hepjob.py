@@ -86,6 +86,17 @@ class HEPJobBackend(ExecutionBackend):
         self._parent_sha = ""
         self._journal: RoundJournal | None = None
 
+    def _target_args(self) -> list[str]:
+        """condor -pool/-name flags selecting the target schedd. -pool is
+        required on login nodes whose default collector cannot see the JUNO
+        schedds (cm01.ihep.ac.cn owns schedd06/07/10/11/12)."""
+        args: list[str] = []
+        if self.cfg.get("collector"):
+            args += ["-pool", self.cfg["collector"]]
+        if self.cfg.get("schedd_name"):
+            args += ["-name", self.cfg["schedd_name"]]
+        return args
+
     # ---- backend interface ----
 
     def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
@@ -261,9 +272,7 @@ class HEPJobBackend(ExecutionBackend):
         lines.append("queue")
         submit_file = job.result_dir / "job.sub"
         submit_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        argv = [self.cfg["submit_cmd"]]
-        if self.cfg.get("schedd_name"):
-            argv += ["-name", self.cfg["schedd_name"]]
+        argv = [self.cfg["submit_cmd"]] + self._target_args()
         argv.append(str(submit_file))
         completed = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, check=False)
@@ -390,9 +399,7 @@ class HEPJobBackend(ExecutionBackend):
         lines.append("queue")
         submit_file = job.result_dir / "job.sub"
         submit_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        argv = [self.cfg["submit_cmd"]]
-        if self.cfg.get("schedd_name"):
-            argv += ["-name", self.cfg["schedd_name"]]
+        argv = [self.cfg["submit_cmd"]] + self._target_args()
         argv.append(str(submit_file))
         completed = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, check=False)
@@ -578,9 +585,7 @@ class HEPJobBackend(ExecutionBackend):
         single user-scoped query + local filter is both simpler and correct."""
         if not job_ids:
             return {}
-        argv = [self.cfg["query_cmd"]]
-        if self.cfg.get("schedd_name"):
-            argv += ["-name", self.cfg["schedd_name"]]
+        argv = [self.cfg["query_cmd"]] + self._target_args()
         argv += ["-af", "ClusterId", "ProcId", "JobStatus"]
         completed = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, check=False)
@@ -603,9 +608,7 @@ class HEPJobBackend(ExecutionBackend):
 
     def _hold_reason(self, job_id: str) -> str:
         cluster, _, proc = job_id.partition(".")
-        argv = [self.cfg["query_cmd"]]
-        if self.cfg.get("schedd_name"):
-            argv += ["-name", self.cfg["schedd_name"]]
+        argv = [self.cfg["query_cmd"]] + self._target_args()
         argv += ["-af", "HoldReason",
                  "-constraint", f"ClusterId=={cluster} && ProcId=={proc}"]
         completed = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
@@ -614,9 +617,7 @@ class HEPJobBackend(ExecutionBackend):
         return reason if completed.returncode == 0 and reason else "unknown"
 
     def _remove(self, job: _Job) -> None:
-        argv = [self.cfg["remove_cmd"]]
-        if self.cfg.get("schedd_name"):
-            argv += ["-name", self.cfg["schedd_name"]]
+        argv = [self.cfg["remove_cmd"]] + self._target_args()
         argv.append(job.job_id)
         subprocess.run(argv, text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, check=False)

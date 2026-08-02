@@ -21,7 +21,9 @@ Minimal schema:
   eval.output_cap_chars: int          (optional, default 16000; retained output per command)
   eval.history_cap_chars: int         (optional, default 6000; eval text kept per round in history.jsonl)
   execution.backend: local|hepjob     (optional, default local; candidate execution backend)
-  execution.hepjob.schedd_name: str   (required for hepjob; condor schedd, e.g. scheduler@host)
+  execution.hepjob.schedd_name: str   (required for hepjob; condor schedd, e.g. scheduler@schedd11.ihep.ac.cn)
+  execution.hepjob.collector: str     (optional; condor collector/pool, e.g. cm01.ihep.ac.cn — needed when the
+                                       login node's default collector cannot locate the named schedd)
   execution.hepjob.accounting_group: str   (required for hepjob; e.g. JUNO.juno.default)
   execution.hepjob.accounting_group_user: str  (optional, default current user)
   execution.hepjob.ihep_group: str    (optional; +IHEP_RealGroup job attribute)
@@ -426,6 +428,7 @@ def _resolve_metrics(raw: object) -> dict:
 
 _HEPJOB_DEFAULTS = {
     "accounting_group_user": None,   # filled with the current OS user
+    "collector": None,               # condor collector/pool host, e.g. cm01.ihep.ac.cn
     "ihep_group": None,
     "request_os": "AlmaLinux9",
     "cpu_model": None,
@@ -455,9 +458,9 @@ _HEPJOB_INT_RANGES = {
 # CPU model -> condor Requirements expression targeting the IHEP pool's
 # machine ads (CpuFamily/CpuModelNumber). The pool advertises no CPU brand
 # string, so targeting by model name requires this explicit map. Verified
-# against scheduler@pvm069.ihep.ac.cn on 2026-07-30:
-#   family 25 / model 17 -> AMD Zen 4 (Genoa), 125 slots (majority)
-#   family 26 / model  2 -> AMD Zen 5 (Turin), 6 slots (asic001, lhws318)
+# against the JUNO main pool (collector cm01.ihep.ac.cn) on 2026-08-02:
+#   family 25 / model 17 -> AMD Zen 4 (Genoa), ~5745 slots
+#   family 26 / model  2 -> AMD Zen 5 (Turin), ~6176 slots
 _CPU_MODEL_REQUIREMENTS = {
     "zen4": "CpuFamily==25 && CpuModelNumber==17",
     "genoa": "CpuFamily==25 && CpuModelNumber==17",
@@ -485,7 +488,7 @@ def _resolve_execution(raw: object) -> tuple[str, dict]:
     hepjob_raw = raw.get("hepjob", {})
     if not isinstance(hepjob_raw, dict):
         raise ConfigError("execution.hepjob: must be an object")
-    allowed = {"schedd_name", "accounting_group"} | set(_HEPJOB_DEFAULTS)
+    allowed = {"schedd_name", "collector", "accounting_group"} | set(_HEPJOB_DEFAULTS)
     unknown = set(hepjob_raw) - allowed
     if unknown:
         raise ConfigError(
@@ -503,9 +506,9 @@ def _resolve_execution(raw: object) -> tuple[str, dict]:
                                     or not value.strip()):
             raise ConfigError(
                 f"execution.hepjob.{key}: required when backend is hepjob")
-    for key in ("schedd_name", "accounting_group", "accounting_group_user",
-                "ihep_group", "request_os", "cpu_model", "python_executable",
-                "submit_cmd", "query_cmd", "remove_cmd"):
+    for key in ("schedd_name", "collector", "accounting_group",
+                "accounting_group_user", "ihep_group", "request_os", "cpu_model",
+                "python_executable", "submit_cmd", "query_cmd", "remove_cmd"):
         value = hepjob.get(key)
         if value is not None and not isinstance(value, str):
             raise ConfigError(f"execution.hepjob.{key}: must be a string")

@@ -1,9 +1,10 @@
-"""Bounded scientific Proposer agent with read-only research tools."""
+"""Proposer Scientist agent: a single-session cognitive state machine."""
 from __future__ import annotations
 
 import json
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -30,16 +31,92 @@ class ProposerResult:
     usage: object = None
 
 
+# --- Cognitive state machine (doc §6, §11, §12) ---------------------------
+
+class ResearchPhase(str, Enum):
+    OBSERVE = "observe"
+    INVESTIGATE = "investigate"
+    CHECKPOINT = "checkpoint"
+
+
+@dataclass
+class WorkingState:
+    """Lightweight per-runtime state. Only `phase` drives control flow in the
+    MVP; the richer doc §12 fields are added when something consumes them."""
+    phase: ResearchPhase = ResearchPhase.OBSERVE
+
+
+# Research tools never change phase.
+_RESEARCH_TOOL_ACTIONS = frozenset((
+    "run_research_command",
+    "search_history",
+    "inspect_episode",
+    "write_insight",  # deprecated standalone form, kept for backward compat
+))
+
+# Actions legal in each phase (doc §11 transition table).
+_LEGAL_ACTIONS = {
+    ResearchPhase.OBSERVE: _RESEARCH_TOOL_ACTIONS | {"frame_research"},
+    ResearchPhase.INVESTIGATE: _RESEARCH_TOOL_ACTIONS | {"conclude_research"},
+    ResearchPhase.CHECKPOINT: {
+        "submit_proposals", "continue_investigation", "reframe_research",
+    },
+}
+
+# Where each control action lands.
+_TRANSITION_TARGET = {
+    ("observe", "frame_research"): ResearchPhase.INVESTIGATE,
+    ("investigate", "conclude_research"): ResearchPhase.CHECKPOINT,
+    ("checkpoint", "continue_investigation"): ResearchPhase.INVESTIGATE,
+    ("checkpoint", "reframe_research"): ResearchPhase.OBSERVE,
+    ("checkpoint", "submit_proposals"): None,  # terminal
+}
+
+
+def _legal_action_list(phase: ResearchPhase) -> str:
+    return ", ".join(sorted(_LEGAL_ACTIONS[phase]))
+
+
+def _validate_phase_transition(
+    phase: ResearchPhase, action_name: str,
+) -> ResearchPhase | None:
+    """Return the next phase (or None for terminal), or raise ProposerError."""
+    if action_name in _RESEARCH_TOOL_ACTIONS:
+        return phase  # tools never change phase
+    target = _TRANSITION_TARGET.get((phase.value, action_name))
+    if target is None and (phase.value, action_name) not in _TRANSITION_TARGET:
+        raise ProposerError(
+            f"action {action_name!r} is not legal in phase {phase.value}; "
+            f"legal actions: {_legal_action_list(phase)}"
+        )
+    return target
+
+
+# --- Prompt scaffolding ----------------------------------------------------
+
 _PROTOCOL_ENVELOPE = (
     "Runtime contract (immutable):\n"
     "Return exactly one JSON object per response, with no prose outside it."
 )
 
 _TERMINAL_ACTION_PROMPT = (
-    "Terminal action:\n"
-    '- {"action":"submit_proposals",'
-    '"proposals":["executable instruction"]}'
+    "Terminal action (only legal from the research checkpoint):\n"
+    '- {"action":"submit_proposals","proposals":["..."],"memory_update":M}\n'
+    "  where M is {\"mode\":\"save\",\"text\":\"...\",\"refs\":[\"rNcM\"]}\n"
+    "  or     {\"mode\":\"no_change\",\"reason\":\"...\"}"
 )
+
+_CONTROL_ACTION_PROMPT = """Control actions (phase transitions, carry no tool result):
+- {"action":"frame_research","observations":["..."],"research_questions":["..."]}
+  Leave Observe for Investigate. State what you observed and the questions worth
+  spending this round's budget on.
+- {"action":"conclude_research","findings":["..."],"remaining_uncertainty":["..."],"decision_basis":"..."}
+  Leave Investigate for the research checkpoint. State findings, residual
+  uncertainty, and the basis for spending an experiment.
+- {"action":"continue_investigation","gap":"...","next_question":"..."}
+  From the checkpoint, return to Investigate when evidence is still insufficient.
+- {"action":"reframe_research","reason":"...","observation_scope":"..."}
+  From the checkpoint, return to Observe when the original framing is wrong."""
 
 _RUNTIME_BOUNDARIES = """Runtime boundaries:
 - /source is the accepted revision, /repo is its read-only Git repository,
@@ -49,31 +126,48 @@ _RUNTIME_BOUNDARIES = """Runtime boundaries:
   or declare evaluation and Gate facts. Only Harness records are authoritative.
 """.strip()
 
+_BUDGET_REMINDER = (
+    "Research budget is nearly exhausted. Use the evidence already gathered "
+    "to choose one of: submit the strongest justified proposals; continue only "
+    "if one concrete unanswered question can still be resolved within budget."
+)
+
 
 def _runtime_protocol() -> str:
     return "\n\n".join((
         _PROTOCOL_ENVELOPE,
         "Research tools:\n" + render_research_tool_prompt(),
+        _CONTROL_ACTION_PROMPT,
         _TERMINAL_ACTION_PROMPT,
         _RUNTIME_BOUNDARIES,
     ))
 
+
 _MAX_PROTOCOL_REPAIRS = 2
 
-def _action_summary(action: dict) -> str:
+
+# --- Logging summaries (never leak raw content) ----------------------------
+
+def _action_summary(action: dict, *, phase: ResearchPhase,
+                    next_phase: ResearchPhase | None) -> str:
     name = action["action"]
     if name == "run_research_command":
         return (
-            f"action={name} cwd={action['cwd']} "
+            f"phase={phase.value} action={name} cwd={action['cwd']} "
             f"command_chars={len(action['command'])}"
         )
     if name == "search_history":
-        return f"action={name} query_chars={len(action['query'])}"
+        return f"phase={phase.value} action={name} query_chars={len(action['query'])}"
     if name == "inspect_episode":
-        return f"action={name} ref_chars={len(action['ref'])}"
+        return f"phase={phase.value} action={name} ref_chars={len(action['ref'])}"
     if name == "write_insight":
-        return f"action={name} refs={len(action['refs'])}"
-    return f"action={name} count={len(action['proposals'])}"
+        return f"phase={phase.value} action={name} refs={len(action['refs'])}"
+    if name in ("frame_research", "conclude_research",
+                "continue_investigation", "reframe_research"):
+        tgt = next_phase.value if next_phase is not None else "exit"
+        return f"phase={phase.value}->{tgt} action={name}"
+    # submit_proposals
+    return f"phase={phase.value}->exit action={name} count={len(action['proposals'])}"
 
 
 def _result_summary(action: dict, observation: dict) -> str:
@@ -96,6 +190,201 @@ def _result_summary(action: dict, observation: dict) -> str:
             parts.append(f"matches={len(matches)}")
     return " ".join(parts)
 
+
+# --- Action parsing -------------------------------------------------------
+
+def _require_keys(
+    value: dict,
+    required: set[str],
+    optional: set[str] | None = None,
+) -> None:
+    allowed = required | (optional or set())
+    if not required <= set(value) or set(value) - allowed:
+        raise ProposerError(
+            f"invalid keys for {value.get('action')}: {sorted(value)}"
+        )
+
+
+def _require_string_list(value, *, name: str, allow_empty: bool = False) -> list[str]:
+    if not isinstance(value, list):
+        raise ProposerError(f"{name} must be a list")
+    if not allow_empty and not value:
+        raise ProposerError(f"{name} must be non-empty")
+    out = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ProposerError(f"{name} must contain non-empty strings")
+        out.append(item.strip())
+    return out
+
+
+def _parse_memory_update(value: dict) -> Insight | None:
+    """Validate submit_proposals.memory_update (doc §10.6)."""
+    if not isinstance(value, dict):
+        raise ProposerError("memory_update must be a JSON object")
+    mode = value.get("mode")
+    if mode == "save":
+        _require_keys(value, {"mode", "text", "refs"})
+        text = value["text"]
+        refs = _require_string_list(value["refs"], name="memory_update.refs")
+        if not isinstance(text, str) or not text.strip():
+            raise ProposerError("memory_update.text must be non-empty")
+        return Insight.from_dict({"text": text.strip(), "refs": refs})
+    if mode == "no_change":
+        _require_keys(value, {"mode", "reason"})
+        reason = value["reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise ProposerError("memory_update.reason must be non-empty")
+        return None
+    raise ProposerError(
+        "memory_update.mode must be 'save' or 'no_change'"
+    )
+
+
+def _parse_action(text: str, candidates_per_round: int) -> dict:
+    try:
+        action = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProposerError("proposer response must be one JSON object") from exc
+    if not isinstance(action, dict) or not isinstance(action.get("action"), str):
+        raise ProposerError("proposer action must be a JSON object with action")
+    name = action["action"]
+
+    if name == "run_research_command":
+        _require_keys(action, {"action", "command"}, {"cwd"})
+        command = action["command"]
+        cwd = action.get("cwd", "source")
+        if not isinstance(command, str) or not command.strip():
+            raise ProposerError("research command must be non-empty")
+        if cwd not in {"source", "scratch"}:
+            raise ProposerError("research cwd must be source or scratch")
+        return {"action": name, "command": command, "cwd": cwd}
+    if name == "search_history":
+        _require_keys(action, {"action", "query"})
+        query = action["query"]
+        if not isinstance(query, str) or not query.strip():
+            raise ProposerError("history query must be non-empty")
+        return {"action": name, "query": query.strip()}
+    if name == "inspect_episode":
+        _require_keys(action, {"action", "ref"})
+        ref = action["ref"]
+        if not isinstance(ref, str) or not ref.strip():
+            raise ProposerError("episode ref must be non-empty")
+        return {"action": name, "ref": ref.strip()}
+    if name == "write_insight":
+        _require_keys(action, {"action", "text", "refs"})
+        insight_text = action["text"]
+        refs = action["refs"]
+        if not isinstance(insight_text, str) or not insight_text.strip():
+            raise ProposerError("insight text must be non-empty")
+        if (not isinstance(refs, list) or not refs
+                or not all(isinstance(ref, str) for ref in refs)):
+            raise ProposerError("insight refs must be a non-empty string list")
+        return {
+            "action": name,
+            "text": insight_text.strip(),
+            "refs": refs,
+        }
+    if name == "frame_research":
+        _require_keys(
+            action, {"action", "observations", "research_questions"},
+        )
+        return {
+            "action": name,
+            "observations": _require_string_list(
+                action["observations"], name="observations",
+            ),
+            "research_questions": _require_string_list(
+                action["research_questions"], name="research_questions",
+            ),
+        }
+    if name == "conclude_research":
+        _require_keys(
+            action, {"action", "findings", "remaining_uncertainty",
+                     "decision_basis"},
+        )
+        basis = action["decision_basis"]
+        if not isinstance(basis, str) or not basis.strip():
+            raise ProposerError("decision_basis must be non-empty")
+        return {
+            "action": name,
+            "findings": _require_string_list(
+                action["findings"], name="findings",
+            ),
+            "remaining_uncertainty": _require_string_list(
+                action["remaining_uncertainty"],
+                name="remaining_uncertainty", allow_empty=True,
+            ),
+            "decision_basis": basis.strip(),
+        }
+    if name == "continue_investigation":
+        _require_keys(action, {"action", "gap", "next_question"})
+        gap = action["gap"]
+        question = action["next_question"]
+        if not isinstance(gap, str) or not gap.strip():
+            raise ProposerError("continue_investigation gap must be non-empty")
+        if not isinstance(question, str) or not question.strip():
+            raise ProposerError(
+                "continue_investigation next_question must be non-empty"
+            )
+        return {"action": name, "gap": gap.strip(), "next_question": question.strip()}
+    if name == "reframe_research":
+        _require_keys(action, {"action", "reason", "observation_scope"})
+        reason = action["reason"]
+        scope = action["observation_scope"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise ProposerError("reframe_research reason must be non-empty")
+        if not isinstance(scope, str) or not scope.strip():
+            raise ProposerError(
+                "reframe_research observation_scope must be non-empty"
+            )
+        return {
+            "action": name,
+            "reason": reason.strip(),
+            "observation_scope": scope.strip(),
+        }
+    if name == "submit_proposals":
+        _require_keys(action, {"action", "proposals", "memory_update"})
+        proposals = action["proposals"]
+        if (not isinstance(proposals, list)
+                or len(proposals) != candidates_per_round):
+            raise ProposerError(
+                f"expected exactly {candidates_per_round} proposals"
+            )
+        normalized = []
+        for proposal in proposals:
+            if not isinstance(proposal, str) or not proposal.strip():
+                raise ProposerError("proposals must be nonblank strings")
+            normalized.append(proposal.strip())
+        memory_update = action["memory_update"]
+        # Validate eagerly so malformed contracts are rejected at parse time.
+        _parse_memory_update(memory_update)
+        return {
+            "action": name,
+            "proposals": normalized,
+            "memory_update": memory_update,
+        }
+    raise ProposerError(f"unknown proposer action: {name}")
+
+
+def _protocol_reason(exc: ProposerError) -> str:
+    if isinstance(exc.__cause__, (TypeError, json.JSONDecodeError)):
+        return "invalid_json"
+    return "invalid_action"
+
+
+def _phase_repair_message(phase: ResearchPhase, reason: str) -> str:
+    return (
+        f"Protocol correction required ({reason}). Current research phase is "
+        f"{phase.value}. Legal actions in this phase: "
+        f"{_legal_action_list(phase)}. submit_proposals is only legal from the "
+        "checkpoint, which you reach via frame_research then conclude_research. "
+        "Return exactly one JSON action object matching the Runtime contract, "
+        "with no prose or additional JSON."
+    )
+
+
+# --- The Scientist runtime ------------------------------------------------
 
 class ProposerAgent:
     def __init__(
@@ -155,6 +444,10 @@ class ProposerAgent:
         started = time.monotonic()
         deadline = started + self.timeout_seconds
         usages = []
+        state = WorkingState()
+        budget_reminder_step = int(0.8 * self.max_steps)
+        reminded = False
+        pending_insight: Insight | None = None
         print(f"[proposer] started max_steps={self.max_steps}", flush=True)
         with TemporaryDirectory(prefix="simpleloop-research-") as scratch:
             tools = ResearchTools(
@@ -173,6 +466,12 @@ class ProposerAgent:
                     f"[proposer step {step}/{self.max_steps}] thinking",
                     flush=True,
                 )
+                if (not reminded and budget_reminder_step > 0
+                        and step >= budget_reminder_step):
+                    messages.append({
+                        "role": "user", "content": _BUDGET_REMINDER,
+                    })
+                    reminded = True
                 for repair in range(_MAX_PROTOCOL_REPAIRS + 1):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -214,13 +513,45 @@ class ProposerAgent:
                             )},
                         ])
                         continue
+                    # Schema OK; now check the phase transition.
+                    try:
+                        next_phase = _validate_phase_transition(
+                            state.phase, action["action"],
+                        )
+                    except ProposerError as exc:
+                        if repair == _MAX_PROTOCOL_REPAIRS:
+                            raise ProposerError(
+                                "proposer action protocol failed after "
+                                f"{_MAX_PROTOCOL_REPAIRS} repairs"
+                            ) from exc
+                        print(
+                            f"[proposer step {step}/{self.max_steps}] "
+                            f"protocol repair {repair + 1}/"
+                            f"{_MAX_PROTOCOL_REPAIRS} "
+                            f"reason=phase_illegal",
+                            flush=True,
+                        )
+                        messages.extend([
+                            {"role": "assistant", "content": reply.text},
+                            {"role": "user", "content": _phase_repair_message(
+                                state.phase, "phase_illegal",
+                            )},
+                        ])
+                        continue
                     break
                 print(
                     f"[proposer step {step}/{self.max_steps}] "
-                    f"{_action_summary(action)}",
+                    f"{_action_summary(action, phase=state.phase, next_phase=next_phase)}",
                     flush=True,
                 )
-                if action["action"] == "submit_proposals":
+
+                name = action["action"]
+
+                # Terminal action.
+                if name == "submit_proposals":
+                    insight = _parse_memory_update(action["memory_update"])
+                    if insight is None:
+                        insight = pending_insight
                     print(
                         f"[proposer] finished steps={step} "
                         f"elapsed={time.monotonic() - started:.1f}s",
@@ -228,10 +559,40 @@ class ProposerAgent:
                     )
                     return ProposerResult(
                         proposals=action["proposals"],
-                        insight=tools.pending_insight,
+                        insight=insight,
                         usage=usages,
                     )
+
+                # Control actions: internal state transitions, no tool call.
+                if name == "frame_research":
+                    state.phase = ResearchPhase.INVESTIGATE
+                    messages.append({
+                        "role": "assistant", "content": reply.text,
+                    })
+                    continue
+                if name == "conclude_research":
+                    state.phase = ResearchPhase.CHECKPOINT
+                    messages.append({
+                        "role": "assistant", "content": reply.text,
+                    })
+                    continue
+                if name == "continue_investigation":
+                    state.phase = ResearchPhase.INVESTIGATE
+                    messages.append({
+                        "role": "assistant", "content": reply.text,
+                    })
+                    continue
+                if name == "reframe_research":
+                    state.phase = ResearchPhase.OBSERVE
+                    messages.append({
+                        "role": "assistant", "content": reply.text,
+                    })
+                    continue
+
+                # Research tool action.
                 observation = tools.execute(action, deadline=deadline)
+                if name == "write_insight":
+                    pending_insight = tools.pending_insight or pending_insight
                 print(
                     f"[proposer step {step}/{self.max_steps}] "
                     f"{_result_summary(action, observation)}",
@@ -280,81 +641,3 @@ Insights are fallible hypotheses and factual-history indexes, not Harness facts.
 Submit exactly {candidates_per_round} nonblank executable proposal(s).
 Every candidate begins from the accepted revision above.
 """
-
-
-def _parse_action(text: str, candidates_per_round: int) -> dict:
-    try:
-        action = json.loads(text)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ProposerError("proposer response must be one JSON object") from exc
-    if not isinstance(action, dict) or not isinstance(action.get("action"), str):
-        raise ProposerError("proposer action must be a JSON object with action")
-    name = action["action"]
-    if name == "run_research_command":
-        _require_keys(action, {"action", "command"}, {"cwd"})
-        command = action["command"]
-        cwd = action.get("cwd", "source")
-        if not isinstance(command, str) or not command.strip():
-            raise ProposerError("research command must be non-empty")
-        if cwd not in {"source", "scratch"}:
-            raise ProposerError("research cwd must be source or scratch")
-        return {"action": name, "command": command, "cwd": cwd}
-    if name == "search_history":
-        _require_keys(action, {"action", "query"})
-        query = action["query"]
-        if not isinstance(query, str) or not query.strip():
-            raise ProposerError("history query must be non-empty")
-        return {"action": name, "query": query.strip()}
-    if name == "inspect_episode":
-        _require_keys(action, {"action", "ref"})
-        ref = action["ref"]
-        if not isinstance(ref, str) or not ref.strip():
-            raise ProposerError("episode ref must be non-empty")
-        return {"action": name, "ref": ref.strip()}
-    if name == "write_insight":
-        _require_keys(action, {"action", "text", "refs"})
-        insight_text = action["text"]
-        refs = action["refs"]
-        if not isinstance(insight_text, str) or not insight_text.strip():
-            raise ProposerError("insight text must be non-empty")
-        if (not isinstance(refs, list) or not refs
-                or not all(isinstance(ref, str) for ref in refs)):
-            raise ProposerError("insight refs must be a non-empty string list")
-        return {
-            "action": name,
-            "text": insight_text.strip(),
-            "refs": refs,
-        }
-    if name == "submit_proposals":
-        _require_keys(action, {"action", "proposals"})
-        proposals = action["proposals"]
-        if (not isinstance(proposals, list)
-                or len(proposals) != candidates_per_round):
-            raise ProposerError(
-                f"expected exactly {candidates_per_round} proposals"
-            )
-        normalized = []
-        for proposal in proposals:
-            if not isinstance(proposal, str) or not proposal.strip():
-                raise ProposerError("proposals must be nonblank strings")
-            normalized.append(proposal.strip())
-        return {"action": name, "proposals": normalized}
-    raise ProposerError(f"unknown proposer action: {name}")
-
-
-def _protocol_reason(exc: ProposerError) -> str:
-    if isinstance(exc.__cause__, (TypeError, json.JSONDecodeError)):
-        return "invalid_json"
-    return "invalid_action"
-
-
-def _require_keys(
-    value: dict,
-    required: set[str],
-    optional: set[str] | None = None,
-) -> None:
-    allowed = required | (optional or set())
-    if not required <= set(value) or set(value) - allowed:
-        raise ProposerError(
-            f"invalid keys for {value.get('action')}: {sorted(value)}"
-        )

@@ -60,7 +60,8 @@ source:
 execution:
   backend: hepjob
   hepjob:
-    schedd_name: scheduler@pvm069.ihep.ac.cn
+    schedd_name: scheduler@schedd11.ihep.ac.cn
+    collector: cm01.ihep.ac.cn
     accounting_group: JUNO.juno.default
     cpu_model: zen4
     memory_mb: 6000

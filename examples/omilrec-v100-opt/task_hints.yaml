@@ -29,13 +29,16 @@ loop:
   candidates_per_round: 3
   max_workers: 3
   agent_timeout_seconds: 7200
-  proposer_recent_rounds: 2
+  proposer_recent_rounds: 3
+
+self_improvement:
+  interval_rounds: 10
 
 researcher:
   api: hepai
   model: gpt-5.5
   base_url: https://aiapi.ihep.ac.cn/apiv2
-  max_steps: 20
+  max_steps: 50
   command_timeout_seconds: 120
   command_output_cap_chars: 12000
 
@@ -85,9 +88,10 @@ source:
 execution:
   backend: hepjob
   hepjob:
-    schedd_name: scheduler@pvm069.ihep.ac.cn
+    schedd_name: scheduler@schedd11.ihep.ac.cn
+    collector: cm01.ihep.ac.cn
     accounting_group: JUNO.juno.default
-    cpu_model: zen5
+    cpu_model: zen4
     memory_mb: 6000
     poll_seconds: 15
     max_attempts: 2

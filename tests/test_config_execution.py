@@ -154,7 +154,8 @@ def test_hepjob_resolves_full_block(tmp_path: Path):
     cfg = config_mod.load(_write(tmp_path, {
         "backend": "hepjob",
         "hepjob": {
-            "schedd_name": "scheduler@pvm069.ihep.ac.cn",
+            "schedd_name": "scheduler@schedd11.ihep.ac.cn",
+            "collector": "cm01.ihep.ac.cn",
             "accounting_group": "JUNO.juno.default",
             "memory_mb": 8000,
             "poll_seconds": 15,
@@ -163,7 +164,8 @@ def test_hepjob_resolves_full_block(tmp_path: Path):
     }))
     assert cfg["execution_backend"] == "hepjob"
     h = cfg["hepjob"]
-    assert h["schedd_name"] == "scheduler@pvm069.ihep.ac.cn"
+    assert h["schedd_name"] == "scheduler@schedd11.ihep.ac.cn"
+    assert h["collector"] == "cm01.ihep.ac.cn"
     assert h["accounting_group"] == "JUNO.juno.default"
     assert h["memory_mb"] == 8000
     assert h["max_attempts"] == 3
