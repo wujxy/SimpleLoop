@@ -123,10 +123,13 @@ def build_deps(
     )
     timeout = cfg.get("agent_timeout_seconds", 3600)
     max_output_tokens = cfg.get("agent_max_output_tokens", 64000)
+    executor = (cfg.get("roles") or {}).get("executor") or {}
     executor_agent = Agent(runtime=runtime, command="claude",
                            timeout_seconds=timeout,
                            allowed_tools="Read,Edit,Write,Bash",
                            max_output_tokens=max_output_tokens,
+                           model=executor.get("model"),
+                           base_url=executor.get("base_url"),
                            usage_observer=usage_observer)
     workspace = Workspace(
         run_dir=run_dir,

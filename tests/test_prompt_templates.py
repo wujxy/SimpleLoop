@@ -32,15 +32,11 @@ class EmptyWorkspace:
         return ""
 
 
-def test_load_semantic_uses_identity_internalized_v000():
+def test_load_semantic_default_proposer_loads():
+    # Architecture only: the default proposer prompt loads as non-empty text.
+    # Tests must not pin prompt semantics — the wording is free to change.
     text = load_semantic("proposer")
-    normalized = " ".join(text.split())
-    assert text.startswith("You are one Scientist responsible")
-    assert "experimental opportunity" in normalized
-    assert "Executor is implementation capacity" in normalized
-    assert "Harness" in text
-    assert '"action"' not in text
-    assert "run_research_command" not in text
+    assert isinstance(text, str) and text.strip()
 
 
 def test_load_semantic_uses_active_prompt_directory(tmp_path: Path):

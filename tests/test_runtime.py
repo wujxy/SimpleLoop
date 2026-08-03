@@ -707,12 +707,15 @@ def test_run_eval_wraps_bash_lc_and_parses_metrics(
     assert "[OK]" in result.text
 
 
-def test_run_eval_records_each_nonzero_status(monkeypatch, tmp_path: Path):
+def test_run_eval_records_nonzero_status_and_preserves_streams(
+    monkeypatch, tmp_path: Path,
+):
     runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
     results = iter(
         [
             subprocess.CompletedProcess([], 0, "first", ""),
-            subprocess.CompletedProcess([], 9, "", "second failed"),
+            subprocess.CompletedProcess([], 9, "build progress",
+                                        "compiler diagnostic"),
         ]
     )
     monkeypatch.setattr(
@@ -721,35 +724,12 @@ def test_run_eval_records_each_nonzero_status(monkeypatch, tmp_path: Path):
         lambda *args, **kwargs: next(results),
     )
 
-    result = evals_mod.run_eval(
-        ["first", "second"],
-        tmp_path,
-        runtime,
-    )
+    result = evals_mod.run_eval(["first", "second"], tmp_path, runtime)
 
     assert result.returncodes == (0, 9)
     assert result.commands_ok is False
     assert "[EXIT 9]" in result.text
-
-
-def test_run_eval_preserves_stdout_and_stderr_on_failure(
-    monkeypatch,
-    tmp_path: Path,
-):
-    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
-    monkeypatch.setattr(
-        evals_mod.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0],
-            7,
-            "build progress",
-            "compiler diagnostic",
-        ),
-    )
-
-    result = evals_mod.run_eval(["build"], tmp_path, runtime)
-
+    # The failing command's stdout and stderr are preserved in the report.
     assert "stdout:\nbuild progress" in result.text
     assert "stderr:\ncompiler diagnostic" in result.text
 
@@ -951,10 +931,15 @@ def test_run_preflights_before_agent_or_workspace(
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 60,
-        "researcher": {
-            "model": "gpt-5.5", "base_url": "https://example.invalid",
-            "max_steps": 5, "command_timeout_seconds": 2,
-            "command_output_cap_chars": 1000,
+        "roles": {
+            "researcher": {
+                "model": "gpt-5.5", "base_url": "https://example.invalid",
+                "max_steps": 5, "command_timeout_seconds": 2,
+                "command_output_cap_chars": 1000,
+            },
+            "executor": {
+                "model": "glm-5", "base_url": "https://example.invalid",
+            },
         },
         "runtime_image": str(tmp_path / "runtime.sif"),
         "runtime_binds": [],
@@ -977,6 +962,32 @@ def test_run_preflights_before_agent_or_workspace(
     assert events.count("preflight") == 1
     assert events.index("preflight") < events.index("agent")
     assert events.index("preflight") < events.index("workspace.setup")
+
+
+def test_assert_executor_ready_requires_executor_base_url():
+    # executor missing entirely -> the 12-round ConnectionRefused failure mode
+    with pytest.raises(config_mod.ConfigError, match="roles.executor.base_url"):
+        loop_mod._assert_executor_ready({"roles": {"executor": None}})
+    # blank base_url is just as bad
+    with pytest.raises(config_mod.ConfigError, match="roles.executor.base_url"):
+        loop_mod._assert_executor_ready(
+            {"roles": {"executor": {"model": "glm-5", "base_url": " "}}})
+
+
+def test_assert_executor_ready_requires_auth_env(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = {"roles": {"executor": {"model": "glm-5",
+                                  "base_url": "https://x.example/anthropic"}}}
+    with pytest.raises(config_mod.ConfigError, match="ANTHROPIC_AUTH_TOKEN"):
+        loop_mod._assert_executor_ready(cfg)
+
+
+def test_assert_executor_ready_passes_when_configured():
+    cfg = {"roles": {"executor": {"model": "glm-5",
+                                  "base_url": "https://x.example/anthropic"}}}
+    # autouse fixture seeds ANTHROPIC_AUTH_TOKEN; a configured executor passes
+    loop_mod._assert_executor_ready(cfg)
 
 
 def test_validate_prints_normalized_runtime(monkeypatch, capsys):

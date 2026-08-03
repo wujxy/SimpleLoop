@@ -25,22 +25,26 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 20
+  max_rounds: 30
   candidates_per_round: 3
   max_workers: 3
   agent_timeout_seconds: 7200
-  proposer_recent_rounds: 3
 
-self_improvement:
-  interval_rounds: 10
+# self_improvement:
+#   interval_rounds: 10
 
-researcher:
-  api: hepai
-  model: gpt-5.5
-  base_url: https://aiapi.ihep.ac.cn/apiv2
-  max_steps: 50
-  command_timeout_seconds: 120
-  command_output_cap_chars: 12000
+roles:
+  researcher:
+    api: hepai
+    model: gpt-5.5
+    base_url: https://aiapi.ihep.ac.cn/apiv2
+    max_steps: 50
+    command_timeout_seconds: 120
+    command_output_cap_chars: 12000
+  executor:
+    api: anthropic
+    model: glm-5.2
+    base_url: https://aiapi.ihep.ac.cn/apiv2
 
 runtime:
   image: ../junosw-apptainer.sif
@@ -88,10 +92,10 @@ source:
 execution:
   backend: hepjob
   hepjob:
-    schedd_name: scheduler@schedd11.ihep.ac.cn
+    schedd_name: scheduler@schedd12.ihep.ac.cn
     collector: cm01.ihep.ac.cn
     accounting_group: JUNO.juno.default
-    cpu_model: zen4
+    cpu_model: skylake
     memory_mb: 6000
     poll_seconds: 15
     max_attempts: 2

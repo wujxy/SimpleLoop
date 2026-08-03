@@ -85,6 +85,12 @@ class HEPJobBackend(ExecutionBackend):
         self._round_id = -1
         self._parent_sha = ""
         self._journal: RoundJournal | None = None
+        # Materialize job_env.sh once at construction (before the baseline job
+        # is submitted) so EVERY condor job — baseline included — sources the
+        # forwarded payload env. Previously only run_candidates() did this, so
+        # the baseline job sourced a non-existent file (masked only because the
+        # baseline runs no claude call).
+        self._ensure_job_env()
 
     def _target_args(self) -> list[str]:
         """condor -pool/-name flags selecting the target schedd. -pool is

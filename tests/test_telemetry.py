@@ -175,10 +175,15 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
-        "researcher": {
-            "model": "gpt-5.5", "base_url": "https://example.invalid",
-            "max_steps": 5, "command_timeout_seconds": 2,
-            "command_output_cap_chars": 1000,
+        "roles": {
+            "researcher": {
+                "model": "gpt-5.5", "base_url": "https://example.invalid",
+                "max_steps": 5, "command_timeout_seconds": 2,
+                "command_output_cap_chars": 1000,
+            },
+            "executor": {
+                "model": "glm-5", "base_url": "https://example.invalid",
+            },
         },
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",

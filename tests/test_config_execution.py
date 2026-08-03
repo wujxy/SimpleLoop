@@ -45,6 +45,9 @@ def _write(tmp_path: Path, execution: dict) -> Path:
 def test_default_backend_is_local(tmp_path: Path):
     cfg = config_mod.load(_write(tmp_path, {}))
     assert cfg["execution_backend"] == "local"
+    # Explicit "local" resolves the same way.
+    assert config_mod.load(
+        _write(tmp_path, {"backend": "local"}))["execution_backend"] == "local"
     # hepjob cfg carries defaults even for the local backend so a resolved
     # snapshot stays self-describing.
     assert cfg["hepjob"]["poll_seconds"] == 30
@@ -53,13 +56,13 @@ def test_default_backend_is_local(tmp_path: Path):
 
 def test_researcher_defaults(tmp_path: Path):
     raw = _base_task(tmp_path)
-    raw["researcher"] = {}
+    raw["roles"] = {"researcher": {}}
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     cfg = config_mod.load(path)
 
-    assert cfg["researcher"] == {
+    assert cfg["roles"]["researcher"] == {
         "api": "hepai",
         "model": "gpt-5.5",
         "base_url": "https://aiapi.ihep.ac.cn/apiv2",
@@ -69,16 +72,66 @@ def test_researcher_defaults(tmp_path: Path):
     }
 
 
-def test_missing_researcher_is_preserved_for_static_mode(tmp_path: Path):
+def test_executor_defaults_and_required_fields(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["roles"] = {"executor": {"model": "glm-5",
+                                 "base_url": "https://x.example/anthropic"}}
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    cfg = config_mod.load(path)
+
+    assert cfg["roles"]["executor"] == {
+        "api": "anthropic",  # defaulted
+        "model": "glm-5",
+        "base_url": "https://x.example/anthropic",
+    }
+    # researcher stays absent (static mode) when only executor is declared
+    assert cfg["roles"]["researcher"] is None
+
+
+def test_executor_rejects_missing_model_and_base_url(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["roles"] = {"executor": {"api": "anthropic"}}
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match="roles.executor.model"):
+        config_mod.load(path)
+
+
+def test_executor_rejects_unsupported_api(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["roles"] = {"executor": {"api": "openai", "model": "x",
+                                 "base_url": "y"}}
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match="supports only 'anthropic'"):
+        config_mod.load(path)
+
+
+def test_missing_roles_is_preserved_for_static_mode(tmp_path: Path):
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(_base_task(tmp_path)), encoding="utf-8")
 
-    assert config_mod.load(path)["researcher"] is None
+    roles = config_mod.load(path)["roles"]
+    assert roles == {"researcher": None, "executor": None}
+
+
+def test_legacy_top_level_researcher_is_rejected_with_hint(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["researcher"] = {}  # legacy top-level placement
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match="researcher.*roles"):
+        config_mod.load(path)
 
 
 def test_researcher_rejects_unknown_key(tmp_path: Path):
     raw = _base_task(tmp_path)
-    raw["researcher"] = {"temperature": 0.2}
+    raw["roles"] = {"researcher": {"temperature": 0.2}}
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
@@ -102,7 +155,7 @@ def test_researcher_rejects_invalid_values(
     tmp_path: Path, researcher: object, message: str,
 ):
     raw = _base_task(tmp_path)
-    raw["researcher"] = researcher
+    raw["roles"] = {"researcher": researcher}
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
@@ -133,11 +186,6 @@ def test_metrics_reject_duplicate_and_objective_gate_keys(tmp_path: Path):
 
         with pytest.raises(config_mod.ConfigError, match="unique"):
             config_mod.load(path)
-
-
-def test_explicit_local_backend(tmp_path: Path):
-    cfg = config_mod.load(_write(tmp_path, {"backend": "local"}))
-    assert cfg["execution_backend"] == "local"
 
 
 def test_hepjob_requires_schedd_and_accounting_group(tmp_path: Path):

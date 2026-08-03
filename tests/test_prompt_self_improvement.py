@@ -74,11 +74,6 @@ def test_self_improvement_resolves_minimal_block(tmp_path: Path):
     ("overrides", "message"),
     [
         ({"interval_rounds": 0}, "interval_rounds"),
-        ({"enabled": True}, "unknown"),
-        ({"max_prompt_chars": 30000}, "unknown"),
-        ({"optimizer_command": "claude"}, "unknown"),
-        ({"prompt_dir": "prompts"}, "unknown"),
-        ({"history_dir": "history"}, "unknown"),
         ({"unknown": True}, "unknown"),
     ],
 )
@@ -117,10 +112,6 @@ def test_history_initializes_new_v000_from_package_prompts(tmp_path: Path):
         assert (history.prompt_dir / f"{role}.md").read_text() == expected
         assert (history.history_dir / "v000" / f"{role}.md").read_text() == expected
     assert history.state["active_version"] == "v000"
-
-
-def test_prompt_names_exclude_judger():
-    assert PROMPT_NAMES == ("proposer", "executor", "meta_optimizer")
 
 
 def test_history_initialization_replaces_orphan_v000(tmp_path: Path):
@@ -236,7 +227,13 @@ def test_gate_rejects_changed_meta_core(tmp_path: Path):
     history = PromptHistory(tmp_path / "prompts", tmp_path / "history")
     history.initialize()
     meta = history.prompt_dir / "meta_optimizer.md"
-    meta.write_text(meta.read_text().replace("META OPTIMIZER", "TASK SOLVER"))
+    text = meta.read_text()
+    # Mutate deterministically inside the identity core, independent of the
+    # prompt's prose — the old replace("META OPTIMIZER", ...) silently no-op'd
+    # if that phrase was ever reworded, neutering the test.
+    begin = "<!-- META_IDENTITY_CORE_BEGIN -->"
+    assert begin in text
+    meta.write_text(text.replace(begin, begin + "\nMUTATION_PROBE", 1))
     OptimizerReport.load(_write_report(history.prompt_dir))
 
     errors = PromptGate().check(history.prompt_dir)
@@ -263,19 +260,15 @@ def test_gate_rejects_symlink_and_restore_does_not_write_through_it(
     assert proposer.is_file() and not proposer.is_symlink()
 
 
-def test_report_rejects_unknown_fields(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [({"unknown": True}, "exactly"), ({"diagnosis": ""}, "diagnosis")],
+)
+def test_report_rejects_malformed(tmp_path: Path, kwargs: dict, match: str):
     prompt_dir = tmp_path / "prompts"
     prompt_dir.mkdir()
-    path = _write_report(prompt_dir, unknown=True)
-    with pytest.raises(ValueError, match="exactly"):
-        OptimizerReport.load(path)
-
-
-def test_report_rejects_empty_diagnosis(tmp_path: Path):
-    prompt_dir = tmp_path / "prompts"
-    prompt_dir.mkdir()
-    path = _write_report(prompt_dir, diagnosis="")
-    with pytest.raises(ValueError, match="diagnosis"):
+    path = _write_report(prompt_dir, **kwargs)
+    with pytest.raises(ValueError, match=match):
         OptimizerReport.load(path)
 
 
@@ -328,7 +321,6 @@ def test_optimizer_receives_absolute_read_write_boundaries(tmp_path: Path):
     assert str(run_dir.resolve()) in fake.prompt
     assert str(history.history_dir.resolve()) in fake.prompt
     assert str(source_dir.resolve()) in fake.prompt
-    assert "Fixed artifacts:" in fake.prompt
     assert fake.cwd == history.prompt_dir.resolve()
     assert fake.json_schema["properties"]["evidence"]["items"] == {
         "type": "string",

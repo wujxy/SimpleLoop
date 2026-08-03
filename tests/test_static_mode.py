@@ -27,7 +27,6 @@ def _config(tmp_path, max_rounds=99):
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
-        "proposer_recent_rounds": 6,
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "editable_paths": ["src/**"],

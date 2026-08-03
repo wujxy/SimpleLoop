@@ -8,14 +8,11 @@ import subprocess
 import pytest
 
 from simpleloop.roles.research_tools import (
-    Insight,
-    InsightStore,
     RESEARCH_TOOL_SPECS,
     ResearchCommandRunner,
     ResearchTools,
-    render_insights,
+    render_history_directory,
     render_research_tool_prompt,
-    search_history,
 )
 
 
@@ -63,7 +60,8 @@ class _RepeatingStream:
         return self.char * count
 
 
-def _candidate(round_id: int, *, proposal: str = "cache values") -> dict:
+def _candidate(round_id: int, *, proposal: str = "cache values",
+               note: str = "") -> dict:
     return {
         "candidate": 0,
         "proposal": proposal,
@@ -77,110 +75,67 @@ def _candidate(round_id: int, *, proposal: str = "cache values") -> dict:
         "metrics": {"SPEED_MS": 100 - round_id},
         "changed_paths": [f"src/r{round_id}.cc"],
         "eval_block": f"SPEED_MS={100 - round_id}",
+        "note": note,
     }
 
 
-def _history(count: int = 3) -> list[dict]:
+def _history(count: int = 3, *, note: str = "") -> list[dict]:
     return [
         {"round": round_id, "parent_sha": f"parent-{round_id}",
-         "candidates": [_candidate(round_id)]}
+         "candidates": [_candidate(round_id, note=note)]}
         for round_id in range(count)
     ]
 
 
-@pytest.mark.parametrize(
-    "query",
-    ["r2c0", "cache", "COMPLETED", "src/r2.cc", "SPEED_MS", "physics_gate"],
-)
-def test_search_history_matches_factual_index_fields(query: str):
-    matches = search_history(_history(), query)
+# --- render_history_directory --------------------------------------------
 
-    assert matches[0]["ref"] == "r2c0"
-    assert "eval_block" not in matches[0]
+def test_render_history_directory_empty():
+    assert render_history_directory([]) == "(no prior experiments)"
 
 
-def test_search_history_is_newest_first_and_capped():
-    matches = search_history(_history(25), "cache", limit=20)
-
-    assert len(matches) == 20
-    assert matches[0]["ref"] == "r24c0"
-    assert matches[-1]["ref"] == "r5c0"
-
-
-def test_search_history_requires_nonblank_query():
-    with pytest.raises(ValueError, match="non-empty"):
-        search_history(_history(), "   ")
+def test_render_history_directory_lists_every_round_with_note():
+    history = _history(3, note="cache helped")
+    out = render_history_directory(history)
+    # Every prior candidate is listed as ref: note — no window, no collapse.
+    assert "r0c0: cache helped" in out
+    assert "r1c0: cache helped" in out
+    assert "r2c0: cache helped" in out
+    assert "Older experiments" not in out
 
 
-def test_insight_store_is_append_only_and_idempotent(tmp_path):
-    store = InsightStore(tmp_path / "insights.jsonl")
-    insight = Insight(text="Cache misses dominate.", refs=("r0c0",))
-
-    assert store.append(round_id=0, insight=insight) is True
-    assert store.append(round_id=0, insight=insight) is False
-    assert store.load() == [{
-        "id": "I0",
-        "round": 0,
-        "text": "Cache misses dominate.",
-        "refs": ["r0c0"],
-    }]
+def test_render_history_directory_blank_note_shows_bare_ref():
+    history = _history(1, note="")
+    out = render_history_directory(history)
+    assert "r0c0:" in out
+    assert "Older experiments" not in out
 
 
-def test_insight_store_rejects_conflict(tmp_path):
-    store = InsightStore(tmp_path / "insights.jsonl")
-    store.append(0, Insight("A", ("r0c0",)))
-
-    with pytest.raises(ValueError, match="conflicting"):
-        store.append(0, Insight("B", ("r0c0",)))
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        {"text": "", "refs": ["r0c0"]},
-        {"text": "x" * 501, "refs": ["r0c0"]},
-        {"text": "fact", "refs": []},
-        {"text": "fact", "refs": [1]},
-        {"text": "fact", "refs": ["r0c0"], "extra": True},
-    ],
-)
-def test_insight_rejects_invalid_shape(value):
-    with pytest.raises(ValueError):
-        Insight.from_dict(value)
+def test_render_history_directory_mixes_noted_and_blank_latest():
+    # Older round carries a note; the latest round is still blank (written next
+    # round) — both appear, with no collapsing to bare refs.
+    history = _history(2, note="x")
+    history[1]["candidates"][0]["note"] = ""
+    out = render_history_directory(history)
+    assert "r0c0: x" in out
+    assert "r1c0:" in out
+    assert "r1c0: x" not in out
 
 
-def test_insight_store_rejects_noncurrent_file_schema(tmp_path):
-    path = tmp_path / "insights.jsonl"
-    path.write_text(json.dumps({
-        "id": "I0", "round": 0, "summary": "old schema",
-    }) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="current insight schema"):
-        InsightStore(path).load()
-
-
-def test_render_insights_keeps_all_records_compact():
-    records = [
-        {"id": "I0", "round": 0, "text": "A", "refs": ["r0c0"]},
-        {"id": "I1", "round": 1, "text": "B", "refs": ["r1c0"]},
-    ]
-
-    assert json.loads(render_insights(records)) == records
-
+# --- tool prompt ---------------------------------------------------------
 
 def test_research_tool_prompt_is_composed_from_tool_specs():
     prompt = render_research_tool_prompt()
 
     assert {spec.action for spec in RESEARCH_TOOL_SPECS} == {
         "run_research_command",
-        "search_history",
         "inspect_episode",
-        "write_insight",
     }
     for spec in RESEARCH_TOOL_SPECS:
         assert spec.schema in prompt
         assert spec.description in prompt
 
+
+# --- ResearchCommandRunner (unchanged behavior) --------------------------
 
 def _runner(tmp_path, *, cap=100, timeout=12):
     paths = {
@@ -350,7 +305,7 @@ def test_research_command_rejects_invalid_input(tmp_path, command, cwd):
         runner.run(command, cwd=cwd)
 
 
-def test_research_tools_search_inspect_and_replace_pending_insight(tmp_path):
+def test_research_tools_inspect_episode(tmp_path):
     runner, runtime = _runner(tmp_path)
     tools = ResearchTools(
         runtime=runtime, source=runner.source, repo=runner.repo,
@@ -359,43 +314,12 @@ def test_research_tools_search_inspect_and_replace_pending_insight(tmp_path):
         command_output_cap_chars=100,
     )
 
-    search = tools.execute(
-        {"action": "search_history", "query": "cache"}, deadline=1000,
-    )
     episode = tools.execute(
         {"action": "inspect_episode", "ref": "r2c0"}, deadline=1000,
     )
-    tools.execute({
-        "action": "write_insight", "text": "First", "refs": ["r1c0"],
-    }, deadline=1000)
-    tools.execute({
-        "action": "write_insight", "text": "Second", "refs": ["r2c0"],
-    }, deadline=1000)
 
-    assert search["ok"] and search["result"][0]["ref"] == "r2c0"
+    assert episode["ok"]
     assert episode["result"]["eval_block"] == "SPEED_MS=98"
-    assert tools.pending_insight == Insight("Second", ("r2c0",))
-
-
-def test_research_tools_invalid_insight_is_rewriteable_observation(tmp_path):
-    runner, runtime = _runner(tmp_path)
-    tools = ResearchTools(
-        runtime=runtime, source=runner.source, repo=runner.repo,
-        history_dir=runner.history_dir, scratch=runner.scratch,
-        history=_history(), command_timeout_seconds=12,
-        command_output_cap_chars=100,
-    )
-
-    bad_ref = tools.execute({
-        "action": "write_insight", "text": "Unsupported", "refs": ["r9c0"],
-    }, deadline=1000)
-    too_long = tools.execute({
-        "action": "write_insight", "text": "x" * 501, "refs": ["r2c0"],
-    }, deadline=1000)
-
-    assert bad_ref["ok"] is False and "not found" in bad_ref["error"]
-    assert too_long["ok"] is False and "500" in too_long["error"]
-    assert tools.pending_insight is None
 
 
 def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):

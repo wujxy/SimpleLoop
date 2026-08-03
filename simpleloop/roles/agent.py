@@ -60,12 +60,14 @@ class Agent:
         allowed_tools: str = "Read,Edit,Write,Bash",
         max_output_tokens: int = 64000,
         usage_observer: Callable[[object], None] | None = None,
+        base_url: str | None = None,
     ):
         self.runtime = runtime
         self.command = command
         self.timeout_seconds = timeout_seconds
         self.extra_args = list(extra_args or [])
         self.model = model
+        self.base_url = base_url
         self.allowed_tools = allowed_tools
         # Raised above Claude Code's 32000 default so long reasoning before the
         # final JSON does not abort the turn.
@@ -139,6 +141,10 @@ class Agent:
               f"prompt={len(prompt_bytes)}B via stdin)", flush=True)
         env = self.runtime.subprocess_env({
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
+            # Config-authoritative endpoint: overrides any ambient value so the
+            # executor never silently falls back to the unreachable default
+            # Anthropic URL on isolated worker nodes.
+            **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
         })
         proc = subprocess.Popen(
             argv,

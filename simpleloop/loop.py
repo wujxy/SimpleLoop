@@ -22,7 +22,6 @@ from .execution.base import InfraRoundError, RoundJournal
 from .harness import evals
 from .reporting import plot as plot_mod
 from .roles import proposer as proposer_mod
-from .roles.research_tools import Insight, InsightStore
 from .harness import views
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
@@ -78,7 +77,6 @@ class RunContext:
     telemetry: RunTelemetry | None = None
     proposer_agent: proposer_mod.ProposerAgent | None = None
     executor_agent: Agent | None = None
-    insight_store: InsightStore | None = None
     prompt_dir: Path | None = None
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
@@ -207,9 +205,9 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         print(f"[{stamp()}] STATIC-PROPOSAL mode: {n_rounds} round(s) from the "
               f"supplied batch (config max_rounds={cfg['max_rounds']} ignored)", flush=True)
     else:
-        if cfg.get("researcher") is None:
+        if cfg.get("roles", {}).get("researcher") is None:
             raise config_mod.ConfigError(
-                "researcher: required for agent-driven runs"
+                "roles.researcher: required for agent-driven runs"
             )
         if target_rounds is None:
             n_rounds = cfg["max_rounds"]
@@ -274,10 +272,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             journal = _InflightJournal(
                 ctx.run_dir / INFLIGHT_NAME,
                 meta={k: v for k, v in inflight.items() if k != "jobs"})
-            round_insight = (
-                Insight.from_dict(inflight["insight"])
-                if inflight.get("insight") is not None else None
-            )
+            round_annotations = inflight.get("annotations") or []
             try:
                 candidates = ctx.execution_backend.resume_round(
                     inflight.get("jobs") or [], round_id=round_id,
@@ -292,17 +287,14 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             proposal_result = _next_proposals(
                 ctx, static_proposals, round_id, parent_sha)
             proposals_batch = proposal_result.proposals
-            round_insight = proposal_result.insight
+            round_annotations = proposal_result.annotations
             journal = _InflightJournal(
                 ctx.run_dir / INFLIGHT_NAME,
                 meta={
                     "round_id": round_id,
                     "parent_sha": parent_sha,
                     "proposals": proposals_batch,
-                    "insight": (
-                        round_insight.to_dict()
-                        if round_insight is not None else None
-                    ),
+                    "annotations": round_annotations,
                 })
             try:
                 candidates = ctx.execution_backend.run_candidates(
@@ -354,8 +346,11 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             candidates=candidates,
             telemetry=ctx.telemetry.snapshot(persist=True),
         )
-        if round_insight is not None:
-            ctx.insight_store.append(round_id, round_insight)
+        # The proposer's annotations summarize the PREVIOUS round's results;
+        # backfill them into that round's candidate records now that this
+        # round is durably recorded.
+        if round_annotations and round_id > 0:
+            ctx.store.backfill_notes(round_id - 1, round_annotations)
         journal.clear()
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         parent_sha = next_base_sha
@@ -364,6 +359,27 @@ def _run_locked(cfg: dict, run_dir_path: Path,
     print(f"\n[{stamp()}] done. best={summary['best_sha']}", flush=True)
     print(f"[{stamp()}] working repo (for tracing): {ctx.workspace.repo}", flush=True)
     return summary
+
+
+def _assert_executor_ready(cfg: dict) -> None:
+    """Fail fast before submitting any job. The executor `claude` runs on
+    isolated worker nodes and needs both an explicit endpoint (from config)
+    and a forwarded credential (from the environment). Without this guard a
+    missing config silently produces round after round of EXECUTOR_FAILED
+    (ConnectionRefused) — exactly the 12-round failure this guards against."""
+    executor = (cfg.get("roles") or {}).get("executor")
+    if not executor or not str(executor.get("base_url", "")).strip():
+        raise config_mod.ConfigError(
+            "roles.executor.base_url: required for candidate execution — "
+            "declare roles.executor (api/model/base_url) in the config"
+        )
+    if not (os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or os.environ.get("ANTHROPIC_API_KEY")):
+        raise config_mod.ConfigError(
+            "ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) must be exported in "
+            "the shell running 'simpleloop run'; it is forwarded to worker "
+            "nodes via job_env.sh so the in-job claude can authenticate"
+        )
 
 
 def _build_context(
@@ -387,12 +403,14 @@ def _build_context(
         print(line, flush=True)
     runtime.preflight()
     print("preflight: PASS", flush=True)
+    _assert_executor_ready(cfg)
 
     timeout = cfg.get("agent_timeout_seconds", 3600)
     max_output_tokens = cfg.get("agent_max_output_tokens", 64000)
+    roles = cfg["roles"]
     proposer_agent = None
     if enable_researcher:
-        researcher = cfg["researcher"]
+        researcher = roles["researcher"]
         proposer_agent = proposer_mod.ProposerAgent(
             model=model_mod.HepAIChatModel.from_config(researcher),
             runtime=runtime,
@@ -404,10 +422,13 @@ def _build_context(
             ],
             usage_observer=telemetry.record_usage,
         )
+    executor = roles["executor"]
     executor_agent = Agent(runtime=runtime, command="claude",
                            timeout_seconds=timeout,
                            allowed_tools="Read,Edit,Write,Bash",
                            max_output_tokens=max_output_tokens,
+                           model=executor["model"],
+                           base_url=executor["base_url"],
                            usage_observer=telemetry.record_usage)
     workspace = Workspace(
         run_dir=run_dir_path,
@@ -417,13 +438,11 @@ def _build_context(
     )
     store = Store(run_dir_path, metrics_schema=cfg["metrics"],
                   history_eval_cap=cfg.get("eval_history_cap_chars", 6000))
-    insight_store = InsightStore(run_dir_path / "insights.jsonl")
     # Same gate bullet lines go into both the proposer's and executor's prompt.
     gate_lines = views.gate_block(cfg.get("metrics"))
     ctx = RunContext(
         cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
         store=store, telemetry=telemetry, proposer_agent=proposer_agent,
-        insight_store=insight_store,
         executor_agent=executor_agent,
         prompt_dir=prompt_dir, gate_lines=gate_lines,
     )
@@ -475,7 +494,11 @@ def _starting_state(ctx: RunContext, continue_run: bool,
 
 
 def _reconcile_completed_inflight(ctx: RunContext, history: list[dict]) -> None:
-    """Finish an interrupted history -> insight -> journal commit."""
+    """Finish an interrupted history -> notes backfill -> journal commit.
+
+    The round's candidates were durably recorded before the crash; the only
+    unfinished step is backfilling the proposer's annotations into the prior
+    round and clearing the inflight file."""
     inflight = _load_inflight(ctx.run_dir)
     if inflight is None:
         return
@@ -488,9 +511,9 @@ def _reconcile_completed_inflight(ctx: RunContext, history: list[dict]) -> None:
             f"--continue: inflight file is for round {round_id}, but history "
             f"ends at round {last_round}"
         )
-    raw_insight = inflight.get("insight")
-    if raw_insight is not None:
-        ctx.insight_store.append(round_id, Insight.from_dict(raw_insight))
+    annotations = inflight.get("annotations") or []
+    if annotations and round_id > 0:
+        ctx.store.backfill_notes(round_id - 1, annotations)
     _InflightJournal(ctx.run_dir / INFLIGHT_NAME, meta={}).clear()
 
 
@@ -504,7 +527,7 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
     if static_proposals is not None:
         proposal_text = static_proposals[round_id]
         print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
-        return proposer_mod.ProposerResult([proposal_text], None)
+        return proposer_mod.ProposerResult([proposal_text], [])
 
     cfg = ctx.cfg
     history = ctx.store.history()
@@ -514,13 +537,11 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
         proposal_obj = ctx.proposer_agent.run(
             goal=cfg["goal"], editable=cfg["editable_paths"],
             frozen=cfg["frozen_paths"], history=history,
-            insights=ctx.insight_store.load(),
             base_sha=parent_sha,
             source_path=source_path,
             repo_path=ctx.workspace.repo,
             run_dir=ctx.run_dir,
             candidates_per_round=cfg.get("candidates_per_round", 1),
-            recent_rounds=cfg.get("proposer_recent_rounds", 6),
             gate_block=ctx.gate_lines,
             prompt_dir=ctx.prompt_dir,
         )

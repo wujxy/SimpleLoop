@@ -18,6 +18,9 @@ _RESEARCHER = {
     "max_steps": 5, "command_timeout_seconds": 2,
     "command_output_cap_chars": 1000,
 }
+_EXECUTOR = {
+    "model": "glm-5", "base_url": "https://example.invalid",
+}
 
 
 class _FakeModel:
@@ -283,7 +286,7 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
-        "researcher": _RESEARCHER,
+        "roles": {"researcher": _RESEARCHER, "executor": _EXECUTOR},
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "editable_paths": ["src/**"],
@@ -589,7 +592,7 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
         "candidates_per_round": 1,
         "max_workers": 1,
         "agent_timeout_seconds": 10,
-        "researcher": _RESEARCHER,
+        "roles": {"researcher": _RESEARCHER, "executor": _EXECUTOR},
         "repo_path": tmp_path / "source",
         "baseline_ref": "HEAD",
         "editable_paths": ["src/**"],

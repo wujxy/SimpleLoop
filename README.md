@@ -60,13 +60,18 @@ loop:
   max_rounds: 10
   candidates_per_round: 1
   max_workers: 1
-researcher:
-  api: hepai
-  model: gpt-5.5
-  base_url: https://aiapi.ihep.ac.cn/apiv2
-  max_steps: 50
-  command_timeout_seconds: 120
-  command_output_cap_chars: 12000
+roles:
+  researcher:
+    api: hepai
+    model: gpt-5.5
+    base_url: https://aiapi.ihep.ac.cn/apiv2
+    max_steps: 50
+    command_timeout_seconds: 120
+    command_output_cap_chars: 12000
+  executor:
+    api: anthropic
+    model: glm-5
+    base_url: https://open.bigmodel.cn/api/anthropic
 runtime:
   image: /path/to/runtime.sif
   binds: []

@@ -10,13 +10,11 @@ from tempfile import TemporaryDirectory
 
 from .model import ChatModel
 from .research_tools import (
-    Insight,
     ResearchTools,
-    render_insights,
+    render_history_directory,
     render_research_tool_prompt,
 )
 from ..container.runtime import ApptainerRuntime
-from ..harness import views
 from ..prompts import load_semantic
 
 
@@ -27,7 +25,7 @@ class ProposerError(RuntimeError):
 @dataclass(frozen=True)
 class ProposerResult:
     proposals: list[str]
-    insight: Insight | None
+    annotations: list[dict]
     usage: object = None
 
 
@@ -49,9 +47,7 @@ class WorkingState:
 # Research tools never change phase.
 _RESEARCH_TOOL_ACTIONS = frozenset((
     "run_research_command",
-    "search_history",
     "inspect_episode",
-    "write_insight",  # deprecated standalone form, kept for backward compat
 ))
 
 # Actions legal in each phase (doc §11 transition table).
@@ -101,9 +97,11 @@ _PROTOCOL_ENVELOPE = (
 
 _TERMINAL_ACTION_PROMPT = (
     "Terminal action (only legal from the research checkpoint):\n"
-    '- {"action":"submit_proposals","proposals":["..."],"memory_update":M}\n'
-    "  where M is {\"mode\":\"save\",\"text\":\"...\",\"refs\":[\"rNcM\"]}\n"
-    "  or     {\"mode\":\"no_change\",\"reason\":\"...\"}"
+    '- {"action":"submit_proposals","proposals":["..."],'
+    '"annotations":[{"ref":"rNcM","text":"1-200 chars"}, ...]}\n'
+    "  annotations summarize the PREVIOUS round's candidates: one entry per"
+    " prior candidate, each with a valid ref and a non-empty note. Use []"
+    " on the first round (no previous candidates)."
 )
 
 _CONTROL_ACTION_PROMPT = """Control actions (phase transitions, carry no tool result):
@@ -156,12 +154,8 @@ def _action_summary(action: dict, *, phase: ResearchPhase,
             f"phase={phase.value} action={name} cwd={action['cwd']} "
             f"command_chars={len(action['command'])}"
         )
-    if name == "search_history":
-        return f"phase={phase.value} action={name} query_chars={len(action['query'])}"
     if name == "inspect_episode":
         return f"phase={phase.value} action={name} ref_chars={len(action['ref'])}"
-    if name == "write_insight":
-        return f"phase={phase.value} action={name} refs={len(action['refs'])}"
     if name in ("frame_research", "conclude_research",
                 "continue_investigation", "reframe_research"):
         tgt = next_phase.value if next_phase is not None else "exit"
@@ -184,10 +178,6 @@ def _result_summary(action: dict, observation: dict) -> str:
             )
         if observation.get("timed_out"):
             parts.append("timed_out=true")
-    elif action["action"] == "search_history":
-        matches = observation.get("result")
-        if isinstance(matches, list):
-            parts.append(f"matches={len(matches)}")
     return " ".join(parts)
 
 
@@ -218,30 +208,51 @@ def _require_string_list(value, *, name: str, allow_empty: bool = False) -> list
     return out
 
 
-def _parse_memory_update(value: dict) -> Insight | None:
-    """Validate submit_proposals.memory_update (doc §10.6)."""
-    if not isinstance(value, dict):
-        raise ProposerError("memory_update must be a JSON object")
-    mode = value.get("mode")
-    if mode == "save":
-        _require_keys(value, {"mode", "text", "refs"})
-        text = value["text"]
-        refs = _require_string_list(value["refs"], name="memory_update.refs")
+def _parse_annotations(value, *, expected_refs: set[str]) -> list[dict]:
+    """Validate submit_proposals.annotations: one {ref, text} per prior
+    candidate. ``expected_refs`` is empty on the first round (no prior
+    candidates), in which case annotations must be an empty list."""
+    if not isinstance(value, list):
+        raise ProposerError("annotations must be a list")
+    if not expected_refs:
+        if value:
+            raise ProposerError(
+                "annotations must be empty when there are no prior candidates"
+            )
+        return []
+    if len(value) != len(expected_refs):
+        raise ProposerError(
+            f"annotations must have one entry per prior candidate "
+            f"(expected {len(expected_refs)}, got {len(value)})"
+        )
+    seen: set[str] = set()
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"ref", "text"}:
+            raise ProposerError(
+                "each annotation must be an object with ref and text"
+            )
+        ref = item["ref"]
+        text = item["text"]
+        if not isinstance(ref, str) or ref not in expected_refs:
+            raise ProposerError(
+                f"annotation ref {ref!r} is not a known prior candidate ref"
+            )
+        if ref in seen:
+            raise ProposerError(f"annotation ref {ref!r} appears more than once")
+        seen.add(ref)
         if not isinstance(text, str) or not text.strip():
-            raise ProposerError("memory_update.text must be non-empty")
-        return Insight.from_dict({"text": text.strip(), "refs": refs})
-    if mode == "no_change":
-        _require_keys(value, {"mode", "reason"})
-        reason = value["reason"]
-        if not isinstance(reason, str) or not reason.strip():
-            raise ProposerError("memory_update.reason must be non-empty")
-        return None
-    raise ProposerError(
-        "memory_update.mode must be 'save' or 'no_change'"
-    )
+            raise ProposerError("annotation text must be non-empty")
+        text = text.strip()
+        if len(text) > 200:
+            raise ProposerError("annotation text must be at most 200 characters")
+        out.append({"ref": ref, "text": text})
+    return out
 
 
-def _parse_action(text: str, candidates_per_round: int) -> dict:
+def _parse_action(
+    text: str, candidates_per_round: int, prior_refs: set[str],
+) -> dict:
     try:
         action = json.loads(text)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -259,32 +270,12 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
         if cwd not in {"source", "scratch"}:
             raise ProposerError("research cwd must be source or scratch")
         return {"action": name, "command": command, "cwd": cwd}
-    if name == "search_history":
-        _require_keys(action, {"action", "query"})
-        query = action["query"]
-        if not isinstance(query, str) or not query.strip():
-            raise ProposerError("history query must be non-empty")
-        return {"action": name, "query": query.strip()}
     if name == "inspect_episode":
         _require_keys(action, {"action", "ref"})
         ref = action["ref"]
         if not isinstance(ref, str) or not ref.strip():
             raise ProposerError("episode ref must be non-empty")
         return {"action": name, "ref": ref.strip()}
-    if name == "write_insight":
-        _require_keys(action, {"action", "text", "refs"})
-        insight_text = action["text"]
-        refs = action["refs"]
-        if not isinstance(insight_text, str) or not insight_text.strip():
-            raise ProposerError("insight text must be non-empty")
-        if (not isinstance(refs, list) or not refs
-                or not all(isinstance(ref, str) for ref in refs)):
-            raise ProposerError("insight refs must be a non-empty string list")
-        return {
-            "action": name,
-            "text": insight_text.strip(),
-            "refs": refs,
-        }
     if name == "frame_research":
         _require_keys(
             action, {"action", "observations", "research_questions"},
@@ -344,7 +335,7 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             "observation_scope": scope.strip(),
         }
     if name == "submit_proposals":
-        _require_keys(action, {"action", "proposals", "memory_update"})
+        _require_keys(action, {"action", "proposals", "annotations"})
         proposals = action["proposals"]
         if (not isinstance(proposals, list)
                 or len(proposals) != candidates_per_round):
@@ -356,13 +347,13 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             if not isinstance(proposal, str) or not proposal.strip():
                 raise ProposerError("proposals must be nonblank strings")
             normalized.append(proposal.strip())
-        memory_update = action["memory_update"]
-        # Validate eagerly so malformed contracts are rejected at parse time.
-        _parse_memory_update(memory_update)
+        annotations = _parse_annotations(
+            action["annotations"], expected_refs=prior_refs,
+        )
         return {
             "action": name,
             "proposals": normalized,
-            "memory_update": memory_update,
+            "annotations": annotations,
         }
     raise ProposerError(f"unknown proposer action: {name}")
 
@@ -413,16 +404,15 @@ class ProposerAgent:
         editable: list[str],
         frozen: list[str],
         history: list[dict],
-        insights: list[dict],
         base_sha: str,
         source_path: Path,
         repo_path: Path,
         run_dir: Path,
         candidates_per_round: int,
-        recent_rounds: int,
         gate_block: str,
         prompt_dir: Path | None,
     ) -> ProposerResult:
+        prior_refs = _prior_candidate_refs(history)
         system_prompt = (
             f"{load_semantic('proposer', prompt_dir).rstrip()}\n\n"
             f"{_runtime_protocol()}"
@@ -434,10 +424,8 @@ class ProposerAgent:
                 editable=editable,
                 frozen=frozen,
                 history=history,
-                insights=insights,
                 base_sha=base_sha,
                 candidates_per_round=candidates_per_round,
-                recent_rounds=recent_rounds,
                 gate_block=gate_block,
             ),
         }]
@@ -447,7 +435,6 @@ class ProposerAgent:
         state = WorkingState()
         budget_reminder_step = int(0.8 * self.max_steps)
         reminded = False
-        pending_insight: Insight | None = None
         print(f"[proposer] started max_steps={self.max_steps}", flush=True)
         with TemporaryDirectory(prefix="simpleloop-research-") as scratch:
             tools = ResearchTools(
@@ -489,6 +476,7 @@ class ProposerAgent:
                         action = _parse_action(
                             reply.text,
                             candidates_per_round=candidates_per_round,
+                            prior_refs=prior_refs,
                         )
                     except ProposerError as exc:
                         if repair == _MAX_PROTOCOL_REPAIRS:
@@ -549,9 +537,6 @@ class ProposerAgent:
 
                 # Terminal action.
                 if name == "submit_proposals":
-                    insight = _parse_memory_update(action["memory_update"])
-                    if insight is None:
-                        insight = pending_insight
                     print(
                         f"[proposer] finished steps={step} "
                         f"elapsed={time.monotonic() - started:.1f}s",
@@ -559,7 +544,7 @@ class ProposerAgent:
                     )
                     return ProposerResult(
                         proposals=action["proposals"],
-                        insight=insight,
+                        annotations=action["annotations"],
                         usage=usages,
                     )
 
@@ -591,8 +576,6 @@ class ProposerAgent:
 
                 # Research tool action.
                 observation = tools.execute(action, deadline=deadline)
-                if name == "write_insight":
-                    pending_insight = tools.pending_insight or pending_insight
                 print(
                     f"[proposer step {step}/{self.max_steps}] "
                     f"{_result_summary(action, observation)}",
@@ -607,20 +590,31 @@ class ProposerAgent:
         raise ProposerError("proposer exceeded researcher.max_steps")
 
 
+def _prior_candidate_refs(history: list[dict]) -> set[str]:
+    """Refs of every candidate in the most recent recorded round, or empty
+    on the first round. Annotations must cover exactly these refs."""
+    if not history:
+        return set()
+    last = max(
+        (r for r in history if isinstance(r, dict)),
+        key=lambda r: r.get("round", 0),
+    )
+    refs: set[str] = set()
+    for candidate in last.get("candidates") or []:
+        refs.add(f"r{last.get('round', 0)}c{candidate.get('candidate', 0)}")
+    return refs
+
+
 def _initial_context(
     *,
     goal: str,
     editable: list[str],
     frozen: list[str],
     history: list[dict],
-    insights: list[dict],
     base_sha: str,
     candidates_per_round: int,
-    recent_rounds: int,
     gate_block: str,
 ) -> str:
-    recent = views.for_proposer(history, recent_rounds=recent_rounds)
-    facts = json.dumps(recent, ensure_ascii=False, indent=2) if recent else "[]"
     return f"""Research objective:
 {goal}
 
@@ -631,13 +625,11 @@ Current accepted revision: {base_sha}
 Editable paths: {json.dumps(editable, ensure_ascii=False)}
 Frozen paths: {json.dumps(frozen, ensure_ascii=False)}
 
-Recent factual outcomes:
-{facts}
+Lab notebook directory (every prior experiment as `ref: note`; the latest
+round has no notes yet — that is this round's job. inspect_episode by ref for
+full detail):
+{render_history_directory(history)}
 
-Proposer Insights:
-{render_insights(insights)}
-
-Insights are fallible hypotheses and factual-history indexes, not Harness facts.
 Submit exactly {candidates_per_round} nonblank executable proposal(s).
 Every candidate begins from the accepted revision above.
 """

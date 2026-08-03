@@ -10,8 +10,8 @@ Minimal schema:
   loop.agent_max_output_tokens: int  (optional, default 64000; per claude call output ceiling)
   loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
   loop.max_workers: int              (optional, default 1; candidate concurrency)
-  loop.proposer_recent_rounds: int   (optional, default 6; rounds of history fed to proposer)
-  researcher: object                 (required by agent-driven runs; optional for static mode)
+  roles.researcher: object           (optional; required by agent-driven runs, omitted in static mode)
+  roles.executor: object             (required for candidate execution; api/model/base_url — auth via ANTHROPIC_AUTH_TOKEN env)
   runtime.image: path                (required; readable SIF image)
   runtime.definition: path           (optional; defaults beside image with .def suffix)
   runtime.binds: [absolute dir]      (optional, default [])
@@ -57,7 +57,7 @@ import yaml
 
 TASK_TOP_KEYS = {
     "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution",
-    "self_improvement", "researcher",
+    "self_improvement", "roles",
 }
 
 _RESEARCHER_DEFAULTS = {
@@ -67,6 +67,13 @@ _RESEARCHER_DEFAULTS = {
     "max_steps": 50,
     "command_timeout_seconds": 120,
     "command_output_cap_chars": 12000,
+}
+
+# Only `api` carries a default; the executor's `model` and `base_url` are
+# required (no implicit endpoint) so candidate execution never silently falls
+# back to an unreachable default Anthropic URL on isolated worker nodes.
+_EXECUTOR_DEFAULTS = {
+    "api": "anthropic",
 }
 
 
@@ -94,6 +101,14 @@ def load_resolved(run_dir: str | Path) -> dict[str, Any]:
         raise ConfigError(f"could not read {path}: {exc}") from exc
     if not isinstance(resolved, dict):
         raise ConfigError(f"{path}: top-level value must be an object")
+    # Backward compatibility: runs written before the `roles:` refactor stored
+    # the researcher config under a top-level `researcher` key. Lift it into the
+    # current `roles.researcher` shape so plot/export/--continue still work.
+    if "researcher" in resolved and "roles" not in resolved:
+        resolved["roles"] = {
+            "researcher": resolved.pop("researcher"),
+            "executor": None,
+        }
     return resolved
 
 
@@ -128,7 +143,12 @@ def _resolve(
 ) -> dict:
     unknown = set(raw) - TASK_TOP_KEYS
     if unknown:
-        raise ConfigError(f"config: unknown top-level key(s): {sorted(unknown)}")
+        hint = ""
+        if "researcher" in unknown:
+            hint = (" — 'researcher:' moved under 'roles:'; use "
+                    "'roles.researcher:' (and add 'roles.executor:')")
+        raise ConfigError(
+            f"config: unknown top-level key(s): {sorted(unknown)}{hint}")
     if raw.get("kind") != "task":
         raise ConfigError("config: kind must be 'task'")
 
@@ -168,9 +188,6 @@ def _resolve(
     max_workers = loop.get("max_workers", 1)
     if not isinstance(max_workers, int) or max_workers < 1:
         raise ConfigError("loop.max_workers: must be a positive integer")
-    proposer_recent_rounds = loop.get("proposer_recent_rounds", 6)
-    if not isinstance(proposer_recent_rounds, int) or proposer_recent_rounds < 1:
-        raise ConfigError("loop.proposer_recent_rounds: must be a positive integer")
 
     src_path = source.get("path")
     if not src_path:
@@ -216,11 +233,7 @@ def _resolve(
         if "self_improvement" in raw
         else None
     )
-    researcher = (
-        _resolve_researcher(raw["researcher"])
-        if "researcher" in raw
-        else None
-    )
+    roles = _resolve_roles(raw.get("roles"))
 
     return {
         "goal": str(goal),
@@ -231,7 +244,6 @@ def _resolve(
         "agent_max_output_tokens": int(agent_max_output_tokens),
         "candidates_per_round": int(candidates_per_round),
         "max_workers": int(max_workers),
-        "proposer_recent_rounds": int(proposer_recent_rounds),
         "runtime_image": runtime_image,
         "runtime_definition": runtime_definition,
         "runtime_binds": runtime_binds,
@@ -246,7 +258,7 @@ def _resolve(
         "baseline_ref": baseline_ref,
         "config_dir": str(path.parent),
         "self_improvement": self_improvement,
-        "researcher": researcher,
+        "roles": roles,
     }
 
 
@@ -274,6 +286,56 @@ def _resolve_researcher(raw: object) -> dict:
                 or value < minimum):
             raise ConfigError(
                 f"researcher.{key}: must be an integer >= {minimum}"
+            )
+    return result
+
+
+def _resolve_roles(raw: object) -> dict:
+    """Resolve the unified `roles:` block (researcher + executor). Both roles
+    are optional in the schema; whether each is required is enforced by the
+    caller (researcher: required for agent-driven runs; executor: required for
+    candidate execution, checked in the loop's fail-fast guard)."""
+    if raw is None:
+        return {"researcher": None, "executor": None}
+    if not isinstance(raw, dict):
+        raise ConfigError("roles: must be an object")
+    unknown = set(raw) - {"researcher", "executor"}
+    if unknown:
+        raise ConfigError(f"roles: unknown key(s): {sorted(unknown)}")
+    return {
+        "researcher": (
+            _resolve_researcher(raw["researcher"])
+            if "researcher" in raw
+            else None
+        ),
+        "executor": (
+            _resolve_executor(raw["executor"])
+            if "executor" in raw
+            else None
+        ),
+    }
+
+
+def _resolve_executor(raw: object) -> dict:
+    """Resolve `roles.executor`: the claude/Anthropic-compatible endpoint the
+    executor agent runs against. model and base_url are required and
+    declarative (secrets stay in the environment via ANTHROPIC_AUTH_TOKEN /
+    ANTHROPIC_API_KEY, never in config)."""
+    if not isinstance(raw, dict):
+        raise ConfigError("roles.executor: must be an object")
+    unknown = set(raw) - set(_EXECUTOR_DEFAULTS) - {"model", "base_url"}
+    if unknown:
+        raise ConfigError(f"roles.executor: unknown key(s): {sorted(unknown)}")
+    result = {**_EXECUTOR_DEFAULTS, **raw}
+    if result["api"] != "anthropic":
+        raise ConfigError(
+            "roles.executor.api: first version supports only 'anthropic'"
+        )
+    for key in ("model", "base_url"):
+        value = result.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"roles.executor.{key}: must be a non-empty string"
             )
     return result
 
@@ -458,14 +520,27 @@ _HEPJOB_INT_RANGES = {
 # CPU model -> condor Requirements expression targeting the IHEP pool's
 # machine ads (CpuFamily/CpuModelNumber). The pool advertises no CPU brand
 # string, so targeting by model name requires this explicit map. Verified
-# against the JUNO main pool (collector cm01.ihep.ac.cn) on 2026-08-02:
-#   family 25 / model 17 -> AMD Zen 4 (Genoa), ~5745 slots
-#   family 26 / model  2 -> AMD Zen 5 (Turin), ~6176 slots
+# against the JUNO main pool (collector cm01.ihep.ac.cn) on 2026-08-03:
+#   family  6 / model  62 -> Intel Ivy Bridge,           ~32 slots
+#   family  6 / model  63 -> Intel Haswell,            ~4025 slots
+#   family  6 / model  79 -> Intel Skylake-X,           ~144 slots
+#   family  6 / model  85 -> Intel Skylake/Cascade Lake, ~21296 slots (pool bulk)
+#   family  6 / model 106 -> Intel Ice Lake,           ~10924 slots
+#   family  6 / model 143 -> Intel Sapphire/Emerald Rapids, ~1384 slots
+#   family 25 / model  17 -> AMD Zen 4 (Genoa),         ~5866 slots
+#   family 26 / model   2 -> AMD Zen 5 (Turin),         ~6256 slots
 _CPU_MODEL_REQUIREMENTS = {
     "zen4": "CpuFamily==25 && CpuModelNumber==17",
     "genoa": "CpuFamily==25 && CpuModelNumber==17",
     "zen5": "CpuFamily==26 && CpuModelNumber==2",
     "turin": "CpuFamily==26 && CpuModelNumber==2",
+    "ivybridge": "CpuFamily==6 && CpuModelNumber==62",
+    "haswell": "CpuFamily==6 && CpuModelNumber==63",
+    "skylake-x": "CpuFamily==6 && CpuModelNumber==79",
+    "skylake": "CpuFamily==6 && CpuModelNumber==85",
+    "cascadelake": "CpuFamily==6 && CpuModelNumber==85",
+    "icelake": "CpuFamily==6 && CpuModelNumber==106",
+    "sapphirerapids": "CpuFamily==6 && CpuModelNumber==143",
 }
 
 
