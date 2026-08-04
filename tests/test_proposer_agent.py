@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from simpleloop.memory import MemoryService
+from simpleloop.memory.models import (
+    ExistingFindingTarget,
+    NewFindingTarget,
+)
 from simpleloop.roles import proposer as proposer_mod
 from simpleloop.roles.model import ModelError, ModelReply
 from simpleloop.roles.proposer import (
@@ -49,6 +54,16 @@ class FakeTools:
             }
         if action["action"] == "inspect_episode":
             return {"ok": True, "result": {"ref": action["ref"]}}
+        if action["action"] == "list_findings":
+            return {"ok": True, "result": []}
+        if action["action"] == "search_findings":
+            return {"ok": True, "result": []}
+        if action["action"] == "inspect_finding":
+            return {"ok": True, "result": {"id": action["finding_id"]}}
+        if action["action"] == "search_experiments":
+            return {"ok": True, "result": {
+                "relevant": [], "contrasting": [], "diverse": [],
+            }}
         raise AssertionError(f"unexpected fake action: {action['action']}")
 
 
@@ -73,15 +88,30 @@ def _conclude() -> dict:
     }
 
 
-def _submit(proposals=("Replace the cache layout.",), annotations=None) -> dict:
-    return {
-        "action": "submit_proposals",
-        "proposals": list(proposals),
-        "annotations": annotations if annotations is not None else [],
-    }
+def _new_target(question="Replace the cache layout."):
+    return {"mode": "new", "question": question}
 
 
-def _run_args(tmp_path: Path, *, history=None) -> dict:
+def _submit(proposals=None) -> dict:
+    if proposals is None:
+        proposals = [{
+            "instruction": "Replace the cache layout.",
+            "research_target": _new_target(),
+        }]
+    return {"action": "submit_proposals", "proposals": proposals}
+
+
+_METRICS_SCHEMA = {
+    "objective": {"key": "SPEED_MS", "lower_is_better": True},
+    "gates": [],
+}
+
+
+def _memory_service(run_dir: Path) -> MemoryService:
+    return MemoryService(run_dir=run_dir, metrics_schema=_METRICS_SCHEMA)
+
+
+def _run_args(tmp_path: Path) -> dict:
     source = tmp_path / "source"
     repo = tmp_path / "repo"
     run_dir = tmp_path / "run"
@@ -91,26 +121,16 @@ def _run_args(tmp_path: Path, *, history=None) -> dict:
         "goal": "make reconstruction faster",
         "editable": ["src/**"],
         "frozen": ["tests/**"],
-        "history": history if history is not None else [],
+        "memory_service": _memory_service(run_dir),
         "base_sha": "abc123",
         "source_path": source,
         "repo_path": repo,
         "run_dir": run_dir,
+        "current_round": 0,
         "candidates_per_round": 1,
         "gate_block": "- physics: must pass",
         "prompt_dir": None,
     }
-
-
-def _prior_round(candidates=1, note="") -> list[dict]:
-    return [{
-        "round": 0,
-        "parent_sha": "parent-0",
-        "candidates": [
-            {"candidate": cid, "note": note}
-            for cid in range(candidates)
-        ],
-    }]
 
 
 def _agent(model, *, max_steps=5, observer=None):
@@ -125,72 +145,54 @@ def _agent(model, *, max_steps=5, observer=None):
     )
 
 
-def test_state_machine_happy_path_submits_from_checkpoint(
+def test_state_machine_happy_path_submits_structured_proposals(
     tmp_path, monkeypatch,
 ):
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
     usage = []
     model = FakeModel([
-        _reply({"action": "inspect_episode", "ref": "r0c0"}, {"t": 1}),
+        _reply({"action": "search_experiments", "query": "cache"}, {"t": 1}),
         _reply(_frame(), {"t": 2}),
         _reply(_conclude(), {"t": 3}),
-        _reply(_submit(annotations=[
-            {"ref": "r0c0", "text": "Lookup is the cost source."},
-        ]), {"t": 4}),
+        _reply(_submit(), {"t": 4}),
     ])
 
-    result = _agent(model, observer=usage.append).run(
-        **_run_args(tmp_path, history=_prior_round()))
+    result = _agent(model, observer=usage.append).run(**_run_args(tmp_path))
 
-    assert result.proposals == ["Replace the cache layout."]
-    assert result.annotations == [
-        {"ref": "r0c0", "text": "Lookup is the cost source."},
-    ]
+    assert len(result.proposals) == 1
+    assert result.proposals[0].instruction == "Replace the cache layout."
+    assert isinstance(result.proposals[0].research_target, NewFindingTarget)
     assert result.usage == [{"t": 1}, {"t": 2}, {"t": 3}, {"t": 4}]
     assert usage == result.usage
     assert [item[0]["action"] for item in FakeTools.instances[0].actions] == [
-        "inspect_episode",
+        "search_experiments",
     ]
 
 
-def test_submit_yields_per_candidate_annotations(tmp_path, monkeypatch):
+def test_submit_accepts_existing_target(tmp_path, monkeypatch):
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
     model = FakeModel([
         _reply(_frame()),
         _reply(_conclude()),
-        _reply(_submit(annotations=[
-            {"ref": "r0c0", "text": "first candidate note"},
-        ])),
-    ])
-
-    result = _agent(model).run(**_run_args(tmp_path, history=_prior_round()))
-
-    assert result.annotations == [
-        {"ref": "r0c0", "text": "first candidate note"},
-    ]
-
-
-def test_first_round_annotations_must_be_empty(tmp_path, monkeypatch):
-    FakeTools.instances.clear()
-    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-    model = FakeModel([
-        _reply(_frame()),
-        _reply(_conclude()),
-        # No prior round -> annotations must be [].
-        _reply(_submit(annotations=[])),
+        _reply(_submit(proposals=[{
+            "instruction": "Rerun the QPDF hoist experiment on the new baseline.",
+            "research_target": {"mode": "existing", "finding_id": "F-008"},
+        }])),
     ])
 
     result = _agent(model).run(**_run_args(tmp_path))
 
-    assert result.annotations == []
+    assert isinstance(
+        result.proposals[0].research_target, ExistingFindingTarget,
+    )
+    assert result.proposals[0].research_target.finding_id == "F-008"
 
 
 def test_phase_illegal_submit_is_repaired(tmp_path, monkeypatch, capsys):
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-    # Model tries submit from Observe, then follows the legal path.
     model = FakeModel([
         _reply(_submit()),
         _reply(_frame()),
@@ -200,11 +202,9 @@ def test_phase_illegal_submit_is_repaired(tmp_path, monkeypatch, capsys):
 
     result = _agent(model, max_steps=10).run(**_run_args(tmp_path))
 
-    assert result.proposals == ["Replace the cache layout."]
+    assert len(result.proposals) == 1
     output = capsys.readouterr().out
     assert "reason=phase_illegal" in output
-    # The repair message names a legal action the model can take instead —
-    # don't pin the exact prose of the explanation.
     repair_msg = model.calls[1]["messages"][-1]["content"]
     assert "frame_research" in repair_msg
 
@@ -229,7 +229,7 @@ def test_continue_investigation_returns_to_investigate(
 
     result = _agent(model, max_steps=10).run(**_run_args(tmp_path))
 
-    assert result.proposals == ["Replace the cache layout."]
+    assert len(result.proposals) == 1
     assert [item[0]["action"] for item in FakeTools.instances[0].actions] == [
         "inspect_episode",
     ]
@@ -253,7 +253,7 @@ def test_reframe_research_returns_to_observe(tmp_path, monkeypatch):
 
     result = _agent(model, max_steps=10).run(**_run_args(tmp_path))
 
-    assert result.proposals == ["Replace the cache layout."]
+    assert len(result.proposals) == 1
 
 
 def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
@@ -277,9 +277,6 @@ def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
     _agent(model, max_steps=10).run(**_run_args(tmp_path))
 
     output = capsys.readouterr().out
-    # The proposer prints a safe, redacted trace: private command bodies and
-    # tool outputs never reach stdout. Keep the load-bearing no-leak contract
-    # and confirm action summaries appear — but don't pin the exact log format.
     assert "[proposer] started" in output
     assert "[proposer] finished" in output
     assert "run_research_command" in output
@@ -291,7 +288,9 @@ def test_agent_prints_safe_action_summaries(tmp_path, monkeypatch, capsys):
     assert "HIDDEN_TAIL" not in output
 
 
-def test_agent_injects_directory_and_protocol(tmp_path):
+def test_startup_pack_omits_full_history_directory(tmp_path):
+    """Regression guard: the startup pack must NOT dump every prior candidate
+    as `ref: note`. Continuity is supplied via Frontier + memory tools."""
     prompt_dir = tmp_path / "prompts"
     prompt_dir.mkdir()
     (prompt_dir / "proposer.md").write_text(
@@ -300,41 +299,31 @@ def test_agent_injects_directory_and_protocol(tmp_path):
     model = FakeModel([
         _reply(_frame()),
         _reply(_conclude()),
-        _reply(_submit(annotations=[
-            {"ref": "r1c0", "text": "annotated recent result"},
-        ])),
+        _reply(_submit()),
     ])
-    args = _run_args(
-        tmp_path,
-        history=[
-            {"round": 0, "candidates": [
-                {"candidate": 0, "note": "old result"}]},
-            {"round": 1, "candidates": [
-                {"candidate": 0, "note": "recent result"}]},
-        ],
-    )
-    args.update({"prompt_dir": prompt_dir})
+    args = _run_args(tmp_path)
+    args["prompt_dir"] = prompt_dir
 
     _agent(model, max_steps=10).run(**args)
 
     call = model.calls[0]
-    assert call["system"].startswith("ACTIVE SCIENTIST")  # active prompt wins
-    # The protocol's action vocabulary is documented in the system prompt —
-    # these action names are the contract, not prose to pin.
-    for action in ("run_research_command", "frame_research", "conclude_research",
-                   "continue_investigation", "reframe_research"):
+    assert call["system"].startswith("ACTIVE SCIENTIST")
+    for action in (
+        "run_research_command", "frame_research", "conclude_research",
+        "continue_investigation", "reframe_research", "list_findings",
+        "search_findings", "inspect_finding", "search_experiments",
+    ):
         assert action in call["system"]
     context = call["messages"][0]["content"]
-    # The history directory is rendered into context: a fixture note appears.
-    # Do not pin the directory header wording — that is prompt semantics.
-    assert "recent result" in context
+    # No lab-notebook directory legacy anywhere in the startup pack.
+    assert "notebook" not in context.lower()
+    assert "annotations" not in context.lower()
+    assert "ref: note" not in context.lower()
 
 
 def test_budget_reminder_injected_at_80pct(tmp_path, monkeypatch):
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-    # max_steps=5 -> reminder at step 4. Loop never submits -> budget error,
-    # but we only assert the reminder was injected before the error.
     model = FakeModel([
         _reply({"action": "inspect_episode", "ref": "r0c0"}),
         _reply({"action": "inspect_episode", "ref": "r0c0"}),
@@ -346,14 +335,12 @@ def test_budget_reminder_injected_at_80pct(tmp_path, monkeypatch):
     with pytest.raises(ProposerError, match="max_steps"):
         _agent(model, max_steps=5).run(**_run_args(tmp_path))
 
-    # The 4th model call (step 4) should have the reminder in its messages.
     messages_at_step4 = model.calls[3]["messages"]
     reminder_present = any(
         item.get("content") == proposer_mod._BUDGET_REMINDER
         for item in messages_at_step4
     )
     assert reminder_present
-    # And not present at step 3.
     messages_at_step3 = model.calls[2]["messages"]
     reminder_early = any(
         item.get("content") == proposer_mod._BUDGET_REMINDER
@@ -392,15 +379,9 @@ def test_agent_repairs_protocol_without_consuming_a_step(
         model, max_steps=10, observer=observed_usage.append,
     ).run(**_run_args(tmp_path))
 
-    assert result.proposals == ["Replace the cache layout."]
+    assert len(result.proposals) == 1
     assert result.usage == [{"t": 1}, {"t": 2}, {"t": 3}, {"t": 4}, {"t": 5}]
     assert observed_usage == result.usage
-    assert model.calls[1]["timeout_seconds"] <= model.calls[0][
-        "timeout_seconds"
-    ]
-    assert [item[0]["action"] for item in FakeTools.instances[0].actions] == [
-        "inspect_episode",
-    ]
     output = capsys.readouterr().out
     assert "protocol repair 1/2 reason=invalid_json" in output
     assert "PRIVATE_TAIL" not in output
@@ -466,75 +447,84 @@ def test_agent_does_not_repair_model_transport_errors(tmp_path):
     '{"action":"run_research_command","command":"true","cwd":"host"}',
     '{"action":"submit_proposals","proposals":[]}',
     '{"action":"submit_proposals","proposals":[" "]}',
+    '{"action":"submit_proposals","proposals":[{"instruction":"x"}]}',
+    '{"action":"submit_proposals","proposals":[{'
+    '"instruction":"x","research_target":{"mode":"existing"}}]}',
+    '{"action":"submit_proposals","proposals":[{'
+    '"instruction":"x","research_target":{"mode":"new"}}]}',
+    '{"action":"submit_proposals","proposals":[{'
+    '"instruction":"x","research_target":{"mode":"bogus"}}]}',
     # control actions missing required fields
     '{"action":"frame_research","observations":["a"]}',
     '{"action":"conclude_research","findings":["a"]}',
     '{"action":"continue_investigation","gap":"g"}',
     '{"action":"reframe_research","reason":"r"}',
-    # submit without annotations key
-    '{"action":"submit_proposals","proposals":["x"]}',
-    # non-empty annotations when there are no prior candidates (round 0)
-    '{"action":"submit_proposals","proposals":["x"],'
-    '"annotations":[{"ref":"r0c0","text":"t"}]}',
-    # extra field on an annotation
-    '{"action":"submit_proposals","proposals":["x"],'
-    '"annotations":[{"ref":"r0c0","text":"t","extra":1}]}',
+    # new tool actions missing required fields
+    '{"action":"search_findings"}',
+    '{"action":"inspect_finding"}',
+    '{"action":"search_experiments","filters":{}}',
+    '{"action":"list_findings","state":"bogus"}',
 ])
 def test_action_parser_rejects_malformed_contract(text):
-    # These all fail with an empty prior round (no prior candidates).
     with pytest.raises(ProposerError):
-        _parse_action(text, candidates_per_round=1, prior_refs=set())
-
-
-@pytest.mark.parametrize("text", [
-    # annotations empty string text (count matches the 2 prior candidates)
-    '{"action":"submit_proposals","proposals":["x"],'
-    '"annotations":[{"ref":"r0c0","text":""},{"ref":"r0c1","text":"u"}]}',
-    # annotations over-long text
-    '{"action":"submit_proposals","proposals":["x"],'
-    '"annotations":[{"ref":"r0c0","text":"' + "x" * 201 + '"},'
-    '{"ref":"r0c1","text":"u"}]}',
-    # annotations unknown ref
-    '{"action":"submit_proposals","proposals":["x"],'
-    '"annotations":[{"ref":"r9c9","text":"t"},{"ref":"r0c1","text":"u"}]}',
-    # annotations duplicate ref
-    '{"action":"submit_proposals","proposals":["x"],'
-    '"annotations":[{"ref":"r0c0","text":"a"},{"ref":"r0c0","text":"b"}]}',
-    # annotations wrong count (prior round has 2 candidates, only 1 given)
-    '{"action":"submit_proposals","proposals":["x"],'
-    '"annotations":[{"ref":"r0c0","text":"t"}]}',
-])
-def test_action_parser_rejects_bad_annotations_with_prior_round(text):
-    with pytest.raises(ProposerError):
-        _parse_action(
-            text, candidates_per_round=1, prior_refs={"r0c0", "r0c1"},
-        )
+        _parse_action(text, candidates_per_round=1)
 
 
 def test_action_parser_normalizes_optional_cwd_and_proposals():
     command = _parse_action(
-        '{"action":"run_research_command","command":"rg cache"}', 1, set(),
+        '{"action":"run_research_command","command":"rg cache"}', 1,
     )
     submit = _parse_action(
-        '{"action":"submit_proposals","proposals":["  Try A  "],'
-        '"annotations":[]}', 1, set(),
+        '{"action":"submit_proposals","proposals":[{'
+        '"instruction":"  Try A  ",'
+        '"research_target":{"mode":"new","question":"is A the fix?"}}]}',
+        1,
     )
 
     assert command["cwd"] == "source"
-    assert submit["proposals"] == ["Try A"]
+    assert submit["proposals"][0].instruction == "Try A"
+    assert isinstance(submit["proposals"][0].research_target, NewFindingTarget)
 
 
-def test_action_parser_accepts_full_annotations():
+def test_action_parser_accepts_existing_and_new_targets():
     submit = _parse_action(
-        '{"action":"submit_proposals","proposals":["A","B"],'
-        '"annotations":['
-        '{"ref":"r0c1","text":"second"},'
-        '{"ref":"r0c0","text":"first"}'
+        '{"action":"submit_proposals","proposals":['
+        '{"instruction":"A","research_target":{"mode":"existing",'
+        '"finding_id":"F-001"}},'
+        '{"instruction":"B","research_target":{"mode":"new",'
+        '"question":"is B the fix?","mechanisms":["cache"],'
+        '"code_regions":["src/foo"]}}'
         ']}',
-        2, {"r0c0", "r0c1"},
+        2,
     )
-    assert submit["proposals"] == ["A", "B"]
-    assert {a["ref"] for a in submit["annotations"]} == {"r0c0", "r0c1"}
+    assert len(submit["proposals"]) == 2
+    assert isinstance(
+        submit["proposals"][0].research_target, ExistingFindingTarget,
+    )
+    assert submit["proposals"][0].research_target.finding_id == "F-001"
+    new_t = submit["proposals"][1].research_target
+    assert isinstance(new_t, NewFindingTarget)
+    assert new_t.question == "is B the fix?"
+    assert new_t.mechanisms == ("cache",)
+    assert new_t.code_regions == ("src/foo",)
+
+
+def test_action_parser_accepts_new_tools():
+    for text in [
+        '{"action":"list_findings"}',
+        '{"action":"list_findings","state":"all","limit":5}',
+        '{"action":"search_findings","query":"cache"}',
+        '{"action":"search_findings","query":"cache","limit":3}',
+        '{"action":"inspect_finding","finding_id":"F-001"}',
+        '{"action":"search_experiments","query":"cache"}',
+        '{"action":"search_experiments","query":"cache","filters":{"gate_passed":true},'
+        '"limit":15,"buckets":false}',
+    ]:
+        parsed = _parse_action(text, 1)
+        assert parsed["action"] in {
+            "list_findings", "search_findings", "inspect_finding",
+            "search_experiments",
+        }
 
 
 def test_phase_transition_table():
@@ -543,6 +533,8 @@ def test_phase_transition_table():
     # Research tools never change phase.
     assert v(ResearchPhase.OBSERVE, "run_research_command") == ResearchPhase.OBSERVE
     assert v(ResearchPhase.INVESTIGATE, "inspect_episode") == ResearchPhase.INVESTIGATE
+    assert v(ResearchPhase.OBSERVE, "list_findings") == ResearchPhase.OBSERVE
+    assert v(ResearchPhase.INVESTIGATE, "search_experiments") == ResearchPhase.INVESTIGATE
     # Control transitions.
     assert v(ResearchPhase.OBSERVE, "frame_research") == ResearchPhase.INVESTIGATE
     assert v(ResearchPhase.INVESTIGATE, "conclude_research") == ResearchPhase.CHECKPOINT

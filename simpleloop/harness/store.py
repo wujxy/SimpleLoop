@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from pathlib import Path
 
 from . import memory as memory_mod
@@ -68,11 +67,19 @@ class Store:
                           selected_sha: str | None,
                           candidates: list[dict],
                           telemetry: dict | None = None) -> None:
-        """Record a self-loop generation with multiple candidate attempts."""
+        """Record a self-loop generation with multiple candidate attempts.
+
+        Every candidate row carries a stable ``experiment_id`` (``r<N>c<M>``)
+        and, when the proposal declared a research target, its ``finding_id``.
+        """
         normalized = []
         for i, c in enumerate(candidates):
+            candidate_id = c.get("candidate", i)
+            experiment_id = c.get("experiment_id") or f"r{round_id}c{candidate_id}"
             normalized.append({
-                "candidate": c.get("candidate", i),
+                "candidate": candidate_id,
+                "experiment_id": experiment_id,
+                "finding_id": c.get("finding_id"),
                 "proposal": c.get("proposal") or "",
                 "parent_sha": c.get("parent_sha") or parent_sha,
                 "sha": c.get("sha"),
@@ -83,8 +90,7 @@ class Store:
                 "gates": c.get("gates") or {},
                 "gate_passed": c.get("gate_passed"),
                 "eligible": eligible(c, self.metrics_schema),
-                "selected": c.get("candidate", i) == selected_candidate,
-                "note": c.get("note") or "",
+                "selected": candidate_id == selected_candidate,
                 "telemetry": dict(c.get("telemetry") or {}),
             })
         selected = next((c for c in normalized if c["selected"]), None)
@@ -102,40 +108,6 @@ class Store:
         }
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def backfill_notes(self, round_id: int, annotations: list[dict]) -> None:
-        """Attach the next round's proposer-written notes to a prior round's
-        candidates. Only the target round's ``note`` fields are set (once each);
-        the file is then re-serialized and swapped atomically so a crash never
-        leaves a half-written history. ``annotations`` is a list of
-        ``{ref, text}``; refs encode ``r{round}c{candidate}``."""
-        if not annotations:
-            return
-        rows = self.history()
-        if not rows:
-            raise ValueError("cannot backfill notes into empty history")
-        target = next(
-            (r for r in rows if r.get("round") == round_id), None,
-        )
-        if target is None:
-            raise ValueError(
-                f"cannot backfill notes: round {round_id} not in history"
-            )
-        by_ref: dict[str, str] = {a["ref"]: a["text"] for a in annotations}
-        changed = False
-        for candidate in target.get("candidates") or []:
-            ref = f"r{round_id}c{candidate.get('candidate', 0)}"
-            if ref in by_ref:
-                candidate["note"] = by_ref[ref]
-                changed = True
-        if not changed:
-            return
-        # Re-serialize every row (only the target round's notes changed) and
-        # swap atomically so a crash never leaves a half-written history.
-        out_lines = [json.dumps(r, ensure_ascii=False) for r in rows]
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-        os.replace(tmp, self.path)
 
 
 def _iter_candidates(rounds: list[dict]):

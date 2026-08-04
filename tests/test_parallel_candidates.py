@@ -8,6 +8,8 @@ import yaml
 from simpleloop import candidate_worker as worker_mod
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
+from simpleloop.memory import MemoryService
+from simpleloop.memory.models import NewFindingTarget, ResearchProposal
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.roles.executor import ExecResult
 from simpleloop.harness.evals import EvalResult
@@ -509,8 +511,7 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
         )
 
 
-def test_next_proposals_uses_readonly_parent_snapshot_and_history(tmp_path):
-    history = [{"round": 0, "candidates": [{"candidate": 0, "note": "x"}]}]
+def test_next_proposals_uses_readonly_parent_snapshot_and_memory_service(tmp_path):
 
     class FakeWorkspace:
         repo = tmp_path / "repo"
@@ -519,22 +520,22 @@ def test_next_proposals_uses_readonly_parent_snapshot_and_history(tmp_path):
         def add_worktree(self, worktree_id, parent_sha):
             self.calls.append(("add", worktree_id, parent_sha))
             path = tmp_path / "snapshot"
-            path.mkdir()
+            path.mkdir(exist_ok=True)
             return path
 
         def remove_worktree(self, worktree_id):
             self.calls.append(("remove", worktree_id))
-
-    class FakeStore:
-        def history(self):
-            return history
 
     class FakeProposer:
         kwargs = None
 
         def run(self, **kwargs):
             self.kwargs = kwargs
-            return ProposerResult(["try cache"], [])
+            proposal = ResearchProposal(
+                instruction="try cache",
+                research_target=NewFindingTarget(question="cache?"),
+            )
+            return ProposerResult([proposal])
 
     proposer = FakeProposer()
     ctx = RunContext(
@@ -544,15 +545,17 @@ def test_next_proposals_uses_readonly_parent_snapshot_and_history(tmp_path):
         },
         run_dir=tmp_path,
         workspace=FakeWorkspace(),
-        store=FakeStore(),
+        store=None,
         proposer_agent=proposer,
+        memory_service=MemoryService(tmp_path, metrics_schema=_SCHEMA),
     )
 
     result = loop_mod._next_proposals(ctx, None, 1, "parent-sha")
 
-    assert result.proposals == ["try cache"]
-    assert proposer.kwargs["history"] is history
+    assert result.proposals[0].instruction == "try cache"
+    assert proposer.kwargs["memory_service"] is ctx.memory_service
     assert proposer.kwargs["source_path"] == tmp_path / "snapshot"
+    assert proposer.kwargs["current_round"] == 1
     assert ctx.workspace.calls == [
         ("add", "proposer-1", "parent-sha"),
         ("remove", "proposer-1"),
@@ -567,7 +570,7 @@ def test_next_proposals_removes_snapshot_when_proposer_fails(tmp_path):
 
         def add_worktree(self, worktree_id, _parent_sha):
             path = tmp_path / "snapshot"
-            path.mkdir()
+            path.mkdir(exist_ok=True)
             return path
 
         def remove_worktree(self, worktree_id):
@@ -582,6 +585,7 @@ def test_next_proposals_removes_snapshot_when_proposer_fails(tmp_path):
         run_dir=tmp_path, workspace=FakeWorkspace(),
         store=type("Store", (), {"history": lambda self: []})(),
         proposer_agent=FailingProposer(),
+        memory_service=MemoryService(tmp_path, metrics_schema=_SCHEMA),
     )
 
     with pytest.raises(ValueError, match="bad proposal"):
@@ -590,71 +594,16 @@ def test_next_proposals_removes_snapshot_when_proposer_fails(tmp_path):
     assert removed == ["proposer-2"]
 
 
-def test_next_proposals_static_mode_has_no_annotations(tmp_path):
+def test_next_proposals_static_mode_wraps_instruction_as_new_target(tmp_path):
     result = loop_mod._next_proposals(
         RunContext(cfg={}), ["fixed"], 0, "parent",
     )
 
-    assert result == ProposerResult(["fixed"], [])
-
-
-def test_continue_reconciles_completed_inflight_annotations(tmp_path):
-    store = Store(tmp_path, metrics_schema=_SCHEMA)
-    # Round 1 completed and was written to history, but its annotations
-    # (about round 0) were never backfilled before the crash.
-    for rid in (0, 1):
-        store.append_generation(
-            rid, parent_sha="parent", selected_candidate=None,
-            selected_sha=None, candidates=[{
-                "candidate": 0, "status": "COMPLETED", "gate_passed": False,
-                "eligible": False, "metrics": {},
-            }],
-        )
-    journal = loop_mod._InflightJournal(
-        tmp_path / loop_mod.INFLIGHT_NAME,
-        meta={
-            "round_id": 1, "parent_sha": "parent", "proposals": ["p"],
-            "annotations": [{"ref": "r0c0", "text": "Learned fact"}],
-        },
+    assert len(result.proposals) == 1
+    assert result.proposals[0].instruction == "fixed"
+    assert isinstance(
+        result.proposals[0].research_target, NewFindingTarget,
     )
-    journal.save([{"state": "COMPLETED"}])
-    ctx = RunContext(
-        cfg={}, run_dir=tmp_path, store=store,
-    )
-
-    loop_mod._reconcile_completed_inflight(ctx, store.history())
-
-    assert store.history()[0]["candidates"][0]["note"] == "Learned fact"
-    assert (tmp_path / loop_mod.INFLIGHT_NAME).exists() is False
-
-
-def test_continue_does_not_reconcile_an_older_inflight_round(tmp_path):
-    store = Store(tmp_path, metrics_schema=_SCHEMA)
-    for round_id in (0, 1):
-        store.append_generation(
-            round_id, parent_sha="parent", selected_candidate=None,
-            selected_sha=None, candidates=[{
-                "candidate": 0, "status": "COMPLETED", "gate_passed": False,
-                "eligible": False, "metrics": {},
-            }],
-        )
-    journal = loop_mod._InflightJournal(
-        tmp_path / loop_mod.INFLIGHT_NAME,
-        meta={
-            "round_id": 0, "parent_sha": "parent", "proposals": ["p"],
-            "annotations": [{"ref": "r0c0", "text": "Stale fact"}],
-        },
-    )
-    journal.save([{"state": "COMPLETED"}])
-    ctx = RunContext(
-        cfg={}, run_dir=tmp_path, store=store,
-    )
-
-    with pytest.raises(ValueError, match="inflight.*round 0"):
-        loop_mod._reconcile_completed_inflight(ctx, store.history())
-
-    assert store.history()[0]["candidates"][0].get("note") in ("", None)
-    assert (tmp_path / loop_mod.INFLIGHT_NAME).exists() is True
 
 def _run_loop_integration(
     monkeypatch, tmp_path, *, prompt_dir=None, max_rounds=2,
@@ -729,11 +678,15 @@ def _run_loop_integration(
             pass
 
         def run(self, **kwargs):
-            assert [row["round"] for row in kwargs["history"]] == [0]
+            assert kwargs["current_round"] == 1
             assert kwargs["prompt_dir"] == prompt_dir
             return ProposerResult(
-                ["test another sparse gather"],
-                [{"ref": "r0c0", "text": "Sparse gather remains expensive."}],
+                [ResearchProposal(
+                    instruction="test another sparse gather",
+                    research_target=NewFindingTarget(
+                        question="Does sparse gather still dominate?",
+                    ),
+                )],
             )
 
     class FakeWorkspace:
@@ -763,15 +716,22 @@ def _run_loop_integration(
             return "", {}
 
         def run_candidates(self, *, proposals: list[str], round_id: int,
-                           parent_sha: str, journal=None) -> list[dict]:
+                           parent_sha: str, journal=None,
+                           finding_ids=None) -> list[dict]:
             assert proposals == ["test another sparse gather"]
-            assert journal.meta["annotations"] == [
-                {"ref": "r0c0", "text": "Sparse gather remains expensive."},
+            # The inflight journal carries structured proposal metadata,
+            # NOT annotations.
+            assert "annotations" not in journal.meta
+            assert journal.meta["proposals"] == [
+                {"instruction": "test another sparse gather",
+                 "finding_id": "F-001"},
             ]
+            assert finding_ids == ["F-001"]
             return fake_run_candidates()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,
-                         parent_sha: str, journal=None) -> list[dict]:
+                         parent_sha: str, journal=None,
+                         finding_ids=None) -> list[dict]:
             return []
 
     executed = []
@@ -780,6 +740,8 @@ def _run_loop_integration(
         executed.append(True)
         return [{
             "candidate": 0,
+            "experiment_id": "r1c0",
+            "finding_id": "F-001",
             "proposal": "test another sparse gather",
             "parent_sha": "seed-sha",
             "sha": None,
@@ -809,7 +771,7 @@ def _run_loop_integration(
     return run_dir, executed
 
 
-def test_run_backfills_annotations_into_prior_round_history(
+def test_run_records_experiment_and_finding_but_no_notes(
     monkeypatch, tmp_path,
 ):
     run_dir, _ = _run_loop_integration(
@@ -819,10 +781,14 @@ def test_run_backfills_annotations_into_prior_round_history(
     )
     store = Store(run_dir, metrics_schema=_SCHEMA)
     rounds = store.history()
-    # Round 1's proposer wrote an annotation about round 0's candidate;
-    # it is backfilled into round 0's candidate record.
-    r0_candidate = rounds[0]["candidates"][0]
-    assert r0_candidate["note"] == "Sparse gather remains expensive."
+    r1_candidate = rounds[-1]["candidates"][0]
+    # New candidate schema: no `note`; experiment_id and finding_id are set.
+    assert "note" not in r1_candidate
+    assert r1_candidate["experiment_id"] == "r1c0"
+    assert r1_candidate["finding_id"] == "F-001"
+    # The Findings archive gained an entry (state=active after linking).
+    findings_path = run_dir / "memory" / "findings.jsonl"
+    assert findings_path.is_file()
 
 
 def test_segment_progress_reports_global_total_and_next_optimizer(
@@ -942,11 +908,13 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
             return "", {}
 
         def run_candidates(self, *, proposals: list[str], round_id: int,
-                           parent_sha: str, journal=None) -> list[dict]:
+                           parent_sha: str, journal=None,
+                           finding_ids=None) -> list[dict]:
             return fail_if_executor_runs()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,
-                         parent_sha: str, journal=None) -> list[dict]:
+                         parent_sha: str, journal=None,
+                         finding_ids=None) -> list[dict]:
             return []
 
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)

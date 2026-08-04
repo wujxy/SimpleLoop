@@ -1,4 +1,10 @@
-"""Proposer Scientist agent: a single-session cognitive state machine."""
+"""Proposer Scientist agent: a single-session cognitive state machine.
+
+Doc reference: docs/simpleloop_research_history_memory_redesign.md.
+The Proposer wakes each round with no memory of the last. Continuity is
+supplied by the persistent Experiment Ledger, Finding Archive, and
+Frontier — NOT by summarizing prior candidates.
+"""
 from __future__ import annotations
 
 import json
@@ -10,11 +16,16 @@ from tempfile import TemporaryDirectory
 
 from .model import ChatModel
 from .research_tools import (
+    MEMORY_TOOL_ACTIONS,
     ResearchTools,
-    render_history_directory,
     render_research_tool_prompt,
 )
 from ..container.runtime import ApptainerRuntime
+from ..memory.models import (
+    ExistingFindingTarget,
+    NewFindingTarget,
+    ResearchProposal,
+)
 from ..prompts import load_semantic
 
 
@@ -24,8 +35,11 @@ class ProposerError(RuntimeError):
 
 @dataclass(frozen=True)
 class ProposerResult:
-    proposals: list[str]
-    annotations: list[dict]
+    """One round's structured output. ``proposals`` is a list of
+    ``ResearchProposal`` (instruction + research target); the annotation
+    mechanism has been removed."""
+
+    proposals: list[ResearchProposal]
     usage: object = None
 
 
@@ -45,10 +59,9 @@ class WorkingState:
 
 
 # Research tools never change phase.
-_RESEARCH_TOOL_ACTIONS = frozenset((
-    "run_research_command",
-    "inspect_episode",
-))
+_RESEARCH_TOOL_ACTIONS = frozenset(
+    {"run_research_command"} | MEMORY_TOOL_ACTIONS
+)
 
 # Actions legal in each phase (doc §11 transition table).
 _LEGAL_ACTIONS = {
@@ -97,11 +110,18 @@ _PROTOCOL_ENVELOPE = (
 
 _TERMINAL_ACTION_PROMPT = (
     "Terminal action (only legal from the research checkpoint):\n"
-    '- {"action":"submit_proposals","proposals":["..."],'
-    '"annotations":[{"ref":"rNcM","text":"1-200 chars"}, ...]}\n'
-    "  annotations summarize the PREVIOUS round's candidates: one entry per"
-    " prior candidate, each with a valid ref and a non-empty note. Use []"
-    " on the first round (no previous candidates)."
+    '- {"action":"submit_proposals","proposals":[\n'
+    '    {"instruction":"...", '
+    '"research_target":{"mode":"existing","finding_id":"F-NNN"}},\n'
+    '    {"instruction":"...", '
+    '"research_target":{"mode":"new","question":"...",'
+    '"mechanisms":["..."],"code_regions":["..."]}}\n'
+    "  ]}\n"
+    "  Each proposal must declare either an existing finding "
+    "(mode=existing, referencing a known F-NNN) or a new one "
+    "(mode=new, with a research question; mechanisms and code_regions "
+    "are optional structured tags). There is NO annotations field — "
+    "the Ledger and Findings Archive record continuity for you."
 )
 
 _CONTROL_ACTION_PROMPT = """Control actions (phase transitions, carry no tool result):
@@ -156,6 +176,27 @@ def _action_summary(action: dict, *, phase: ResearchPhase,
         )
     if name == "inspect_episode":
         return f"phase={phase.value} action={name} ref_chars={len(action['ref'])}"
+    if name == "list_findings":
+        return (
+            f"phase={phase.value} action={name} "
+            f"state={action.get('state', 'active')}"
+        )
+    if name == "search_findings":
+        return (
+            f"phase={phase.value} action={name} "
+            f"query_chars={len(action.get('query', ''))}"
+        )
+    if name == "inspect_finding":
+        return (
+            f"phase={phase.value} action={name} "
+            f"finding_id={action.get('finding_id', '')}"
+        )
+    if name == "search_experiments":
+        return (
+            f"phase={phase.value} action={name} "
+            f"query_chars={len(action.get('query', ''))} "
+            f"buckets={bool(action.get('buckets', True))}"
+        )
     if name in ("frame_research", "conclude_research",
                 "continue_investigation", "reframe_research"):
         tgt = next_phase.value if next_phase is not None else "exit"
@@ -208,51 +249,68 @@ def _require_string_list(value, *, name: str, allow_empty: bool = False) -> list
     return out
 
 
-def _parse_annotations(value, *, expected_refs: set[str]) -> list[dict]:
-    """Validate submit_proposals.annotations: one {ref, text} per prior
-    candidate. ``expected_refs`` is empty on the first round (no prior
-    candidates), in which case annotations must be an empty list."""
-    if not isinstance(value, list):
-        raise ProposerError("annotations must be a list")
-    if not expected_refs:
-        if value:
+def _parse_research_target(value) -> ExistingFindingTarget | NewFindingTarget:
+    if not isinstance(value, dict):
+        raise ProposerError("research_target must be an object")
+    mode = value.get("mode")
+    if mode == "existing":
+        if set(value) - {"mode", "finding_id"}:
             raise ProposerError(
-                "annotations must be empty when there are no prior candidates"
+                f"research_target(existing) has unexpected keys: {sorted(value)}"
             )
-        return []
-    if len(value) != len(expected_refs):
-        raise ProposerError(
-            f"annotations must have one entry per prior candidate "
-            f"(expected {len(expected_refs)}, got {len(value)})"
+        finding_id = value.get("finding_id")
+        if not isinstance(finding_id, str) or not finding_id.strip():
+            raise ProposerError(
+                "research_target(existing).finding_id must be a non-empty string"
+            )
+        return ExistingFindingTarget(finding_id=finding_id.strip())
+    if mode == "new":
+        allowed = {"mode", "question", "mechanisms", "code_regions"}
+        if set(value) - allowed:
+            raise ProposerError(
+                f"research_target(new) has unexpected keys: {sorted(value)}"
+            )
+        question = value.get("question")
+        if not isinstance(question, str) or not question.strip():
+            raise ProposerError(
+                "research_target(new).question must be a non-empty string"
+            )
+        mechanisms = tuple(_require_string_list(
+            value.get("mechanisms", []),
+            name="research_target.mechanisms", allow_empty=True,
+        ))
+        code_regions = tuple(_require_string_list(
+            value.get("code_regions", []),
+            name="research_target.code_regions", allow_empty=True,
+        ))
+        return NewFindingTarget(
+            question=question.strip(),
+            mechanisms=mechanisms,
+            code_regions=code_regions,
         )
-    seen: set[str] = set()
-    out: list[dict] = []
-    for item in value:
-        if not isinstance(item, dict) or set(item) != {"ref", "text"}:
-            raise ProposerError(
-                "each annotation must be an object with ref and text"
-            )
-        ref = item["ref"]
-        text = item["text"]
-        if not isinstance(ref, str) or ref not in expected_refs:
-            raise ProposerError(
-                f"annotation ref {ref!r} is not a known prior candidate ref"
-            )
-        if ref in seen:
-            raise ProposerError(f"annotation ref {ref!r} appears more than once")
-        seen.add(ref)
-        if not isinstance(text, str) or not text.strip():
-            raise ProposerError("annotation text must be non-empty")
-        text = text.strip()
-        if len(text) > 200:
-            raise ProposerError("annotation text must be at most 200 characters")
-        out.append({"ref": ref, "text": text})
-    return out
+    raise ProposerError(
+        f"research_target.mode must be 'existing' or 'new', got {mode!r}"
+    )
 
 
-def _parse_action(
-    text: str, candidates_per_round: int, prior_refs: set[str],
-) -> dict:
+def _parse_proposal(value) -> ResearchProposal:
+    if not isinstance(value, dict):
+        raise ProposerError("proposal must be an object")
+    if set(value) - {"instruction", "research_target"}:
+        raise ProposerError(
+            f"proposal has unexpected keys: {sorted(value)}"
+        )
+    instruction = value.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise ProposerError("proposal.instruction must be non-empty")
+    target = _parse_research_target(value.get("research_target"))
+    return ResearchProposal(
+        instruction=instruction.strip(),
+        research_target=target,
+    )
+
+
+def _parse_action(text: str, candidates_per_round: int) -> dict:
     try:
         action = json.loads(text)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -276,6 +334,68 @@ def _parse_action(
         if not isinstance(ref, str) or not ref.strip():
             raise ProposerError("episode ref must be non-empty")
         return {"action": name, "ref": ref.strip()}
+    if name == "list_findings":
+        _require_keys(action, {"action"}, {"state", "limit"})
+        state = action.get("state", "active")
+        if state not in {"active", "open", "dormant", "archived", "all"}:
+            raise ProposerError(
+                "list_findings.state must be one of active/open/dormant/"
+                "archived/all"
+            )
+        limit = action.get("limit", 20)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ProposerError("list_findings.limit must be a positive integer")
+        return {"action": name, "state": state, "limit": limit}
+    if name == "search_findings":
+        _require_keys(action, {"action", "query"}, {"limit"})
+        query = action["query"]
+        if not isinstance(query, str) or not query.strip():
+            raise ProposerError("search_findings.query must be non-empty")
+        limit = action.get("limit", 5)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ProposerError(
+                "search_findings.limit must be a positive integer"
+            )
+        return {"action": name, "query": query.strip(), "limit": limit}
+    if name == "inspect_finding":
+        _require_keys(action, {"action", "finding_id"})
+        fid = action["finding_id"]
+        if not isinstance(fid, str) or not fid.strip():
+            raise ProposerError("inspect_finding.finding_id must be non-empty")
+        return {"action": name, "finding_id": fid.strip()}
+    if name == "search_experiments":
+        _require_keys(
+            action, {"action", "query"},
+            {"filters", "limit", "buckets"},
+        )
+        query = action["query"]
+        if not isinstance(query, str) or not query.strip():
+            raise ProposerError("search_experiments.query must be non-empty")
+        filters = action.get("filters")
+        if filters is not None and not isinstance(filters, dict):
+            raise ProposerError("search_experiments.filters must be an object")
+        allowed_filters = {
+            "gate_passed", "eligible", "selected", "finding_id",
+            "changed_path", "round_min", "round_max", "status",
+        }
+        if filters:
+            unknown = set(filters) - allowed_filters
+            if unknown:
+                raise ProposerError(
+                    f"search_experiments.filters has unknown keys: {sorted(unknown)}"
+                )
+        limit = action.get("limit", 10)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ProposerError(
+                "search_experiments.limit must be a positive integer"
+            )
+        buckets = action.get("buckets", True)
+        if not isinstance(buckets, bool):
+            raise ProposerError("search_experiments.buckets must be a bool")
+        return {
+            "action": name, "query": query.strip(),
+            "filters": filters or {}, "limit": limit, "buckets": buckets,
+        }
     if name == "frame_research":
         _require_keys(
             action, {"action", "observations", "research_questions"},
@@ -335,26 +455,15 @@ def _parse_action(
             "observation_scope": scope.strip(),
         }
     if name == "submit_proposals":
-        _require_keys(action, {"action", "proposals", "annotations"})
+        _require_keys(action, {"action", "proposals"})
         proposals = action["proposals"]
         if (not isinstance(proposals, list)
                 or len(proposals) != candidates_per_round):
             raise ProposerError(
                 f"expected exactly {candidates_per_round} proposals"
             )
-        normalized = []
-        for proposal in proposals:
-            if not isinstance(proposal, str) or not proposal.strip():
-                raise ProposerError("proposals must be nonblank strings")
-            normalized.append(proposal.strip())
-        annotations = _parse_annotations(
-            action["annotations"], expected_refs=prior_refs,
-        )
-        return {
-            "action": name,
-            "proposals": normalized,
-            "annotations": annotations,
-        }
+        parsed = [_parse_proposal(item) for item in proposals]
+        return {"action": name, "proposals": parsed}
     raise ProposerError(f"unknown proposer action: {name}")
 
 
@@ -403,30 +512,32 @@ class ProposerAgent:
         goal: str,
         editable: list[str],
         frozen: list[str],
-        history: list[dict],
+        memory_service,
         base_sha: str,
         source_path: Path,
         repo_path: Path,
         run_dir: Path,
+        current_round: int,
         candidates_per_round: int,
         gate_block: str,
         prompt_dir: Path | None,
+        hints: list[str] | None = None,
     ) -> ProposerResult:
-        prior_refs = _prior_candidate_refs(history)
         system_prompt = (
             f"{load_semantic('proposer', prompt_dir).rstrip()}\n\n"
             f"{_runtime_protocol()}"
         )
         messages = [{
             "role": "user",
-            "content": _initial_context(
+            "content": memory_service.build_startup_pack(
                 goal=goal,
                 editable=editable,
                 frozen=frozen,
-                history=history,
                 base_sha=base_sha,
-                candidates_per_round=candidates_per_round,
                 gate_block=gate_block,
+                candidates_per_round=candidates_per_round,
+                hints=hints,
+                current_round=current_round,
             ),
         }]
         started = time.monotonic()
@@ -443,9 +554,10 @@ class ProposerAgent:
                 repo=repo_path,
                 history_dir=run_dir,
                 scratch=Path(scratch),
-                history=history,
+                memory_service=memory_service,
                 command_timeout_seconds=self.command_timeout_seconds,
                 command_output_cap_chars=self.command_output_cap_chars,
+                current_round=current_round,
             )
             for _step in range(self.max_steps):
                 step = _step + 1
@@ -476,7 +588,6 @@ class ProposerAgent:
                         action = _parse_action(
                             reply.text,
                             candidates_per_round=candidates_per_round,
-                            prior_refs=prior_refs,
                         )
                     except ProposerError as exc:
                         if repair == _MAX_PROTOCOL_REPAIRS:
@@ -544,7 +655,6 @@ class ProposerAgent:
                     )
                     return ProposerResult(
                         proposals=action["proposals"],
-                        annotations=action["annotations"],
                         usage=usages,
                     )
 
@@ -588,48 +698,3 @@ class ProposerAgent:
                     )},
                 ])
         raise ProposerError("proposer exceeded researcher.max_steps")
-
-
-def _prior_candidate_refs(history: list[dict]) -> set[str]:
-    """Refs of every candidate in the most recent recorded round, or empty
-    on the first round. Annotations must cover exactly these refs."""
-    if not history:
-        return set()
-    last = max(
-        (r for r in history if isinstance(r, dict)),
-        key=lambda r: r.get("round", 0),
-    )
-    refs: set[str] = set()
-    for candidate in last.get("candidates") or []:
-        refs.add(f"r{last.get('round', 0)}c{candidate.get('candidate', 0)}")
-    return refs
-
-
-def _initial_context(
-    *,
-    goal: str,
-    editable: list[str],
-    frozen: list[str],
-    history: list[dict],
-    base_sha: str,
-    candidates_per_round: int,
-    gate_block: str,
-) -> str:
-    return f"""Research objective:
-{goal}
-
-Harness Gates:
-{gate_block or "(declared in factual records)"}
-
-Current accepted revision: {base_sha}
-Editable paths: {json.dumps(editable, ensure_ascii=False)}
-Frozen paths: {json.dumps(frozen, ensure_ascii=False)}
-
-Lab notebook directory (every prior experiment as `ref: note`; the latest
-round has no notes yet — that is this round's job. inspect_episode by ref for
-full detail):
-{render_history_directory(history)}
-
-Submit exactly {candidates_per_round} nonblank executable proposal(s).
-Every candidate begins from the accepted revision above.
-"""

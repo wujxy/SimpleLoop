@@ -42,6 +42,17 @@ from .base import ExecutionBackend, InfraRoundError, RoundJournal
 from ..config import _CPU_MODEL_REQUIREMENTS
 from ..loop import BaselineAcceptanceError
 
+
+def _requirements_expr(cfg: dict) -> str | None:
+    """Build the condor Requirements expression from cpu_model and/or
+    machine_constraint. Returns None if neither is set."""
+    parts: list[str] = []
+    if cfg.get("cpu_model"):
+        parts.append(_CPU_MODEL_REQUIREMENTS[cfg["cpu_model"]])
+    if cfg.get("machine_constraint"):
+        parts.append(cfg["machine_constraint"])
+    return " && ".join(parts) if parts else None
+
 # condor JobStatus codes (from a successful `condor_q -af JobStatus` query)
 _JOB_IDLE = 1
 _JOB_RUNNING = 2
@@ -62,6 +73,7 @@ class _Job:
     candidate_id: int
     worktree_id: str
     result_dir: Path
+    finding_id: str | None = None
     job_id: str | None = None
     attempt: int = 1
     state: str = "SUBMITTED"        # SUBMITTED | COMPLETED | INFRA_FAILED | TIMEOUT
@@ -194,14 +206,23 @@ class HEPJobBackend(ExecutionBackend):
 
     def run_candidates(self, *, proposals: list[str], round_id: int,
                        parent_sha: str,
-                       journal: RoundJournal | None = None) -> list[dict]:
+                       journal: RoundJournal | None = None,
+                       finding_ids: list[str | None] | None = None
+                       ) -> list[dict]:
         self._round_id = round_id
         self._parent_sha = parent_sha
         self._journal = journal
         self._ensure_job_env()
+        if finding_ids is None:
+            finding_ids = [None] * len(proposals)
+        if len(finding_ids) != len(proposals):
+            raise ValueError(
+                "finding_ids must have the same length as proposals"
+            )
         jobs = []
-        for i, proposal in enumerate(proposals):
-            job = self._prepare(i, proposal, round_id, parent_sha)
+        for i, (proposal, fid) in enumerate(zip(proposals, finding_ids)):
+            job = self._prepare(i, proposal, round_id, parent_sha,
+                                finding_id=fid)
             self._submit(job)
             jobs.append(job)
         self._save(jobs)
@@ -209,7 +230,9 @@ class HEPJobBackend(ExecutionBackend):
 
     def resume_round(self, jobs_payload: list[dict], *, round_id: int,
                      parent_sha: str,
-                     journal: RoundJournal | None = None) -> list[dict]:
+                     journal: RoundJournal | None = None,
+                     finding_ids: list[str | None] | None = None
+                     ) -> list[dict]:
         """Re-enter the poll loop for an in-flight round after a frontend
         restart. Job state is rebuilt from the journal's jobs table; the
         proposer is NOT called again."""
@@ -222,6 +245,7 @@ class HEPJobBackend(ExecutionBackend):
                 candidate_id=int(jd["candidate_id"]),
                 worktree_id=str(jd["worktree_id"]),
                 result_dir=Path(jd["result_dir"]),
+                finding_id=jd.get("finding_id"),
                 job_id=jd.get("job_id"),
                 attempt=int(jd.get("attempt") or 1),
                 state=str(jd.get("state") or "SUBMITTED"),
@@ -266,9 +290,9 @@ class HEPJobBackend(ExecutionBackend):
             f"accounting_group_user = {self.cfg['accounting_group_user']}",
             f'+HepJob_RequestOS = "{self.cfg["request_os"]}"',
         ]
-        if self.cfg.get("cpu_model"):
-            lines.append(
-                f"Requirements = {_CPU_MODEL_REQUIREMENTS[self.cfg['cpu_model']]}")
+        _req = _requirements_expr(self.cfg)
+        if _req:
+            lines.append(f"Requirements = {_req}")
         if self.cfg.get("ihep_group"):
             lines.append(f'+IHEP_RealGroup = "{self.cfg["ihep_group"]}"')
         else:
@@ -339,14 +363,16 @@ class HEPJobBackend(ExecutionBackend):
         return {}
 
     def _prepare(self, candidate_id: int, proposal: str,
-                 round_id: int, parent_sha: str) -> _Job:
+                 round_id: int, parent_sha: str,
+                 *, finding_id: str | None = None) -> _Job:
         worktree_id = f"{round_id}-c{candidate_id}"
         result_dir = (self.run_dir / "rounds" / f"r{round_id}"
                       / "candidates" / f"c{candidate_id}")
         result_dir.mkdir(parents=True, exist_ok=True)
         worktree = self.ctx.workspace.add_worktree(worktree_id, parent_sha)
         job = _Job(candidate_id=candidate_id,
-                   worktree_id=worktree_id, result_dir=result_dir)
+                   worktree_id=worktree_id, result_dir=result_dir,
+                   finding_id=finding_id)
         self._write_manifest(job, proposal, round_id, parent_sha, worktree)
         return job
 
@@ -355,6 +381,7 @@ class HEPJobBackend(ExecutionBackend):
         spec = candidate_worker.CandidateSpec(
             round_id=round_id, candidate_id=job.candidate_id,
             parent_sha=parent_sha, proposal=proposal,
+            finding_id=job.finding_id,
             run_dir=str(self.run_dir),
             worktree_path=str(worktree), result_dir=str(job.result_dir),
             prompt_dir=str(getattr(self.ctx, "prompt_dir", None) or ""),
@@ -390,9 +417,9 @@ class HEPJobBackend(ExecutionBackend):
             f"accounting_group_user = {self.cfg['accounting_group_user']}",
             f'+HepJob_RequestOS = "{self.cfg["request_os"]}"',
         ]
-        if self.cfg.get("cpu_model"):
-            lines.append(
-                f"Requirements = {_CPU_MODEL_REQUIREMENTS[self.cfg['cpu_model']]}")
+        _req = _requirements_expr(self.cfg)
+        if _req:
+            lines.append(f"Requirements = {_req}")
         if self.cfg.get("ihep_group"):
             lines.append(f'+IHEP_RealGroup = "{self.cfg["ihep_group"]}"')
         else:
@@ -658,6 +685,7 @@ class HEPJobBackend(ExecutionBackend):
         self._journal.save([
             {
                 "candidate_id": job.candidate_id,
+                "finding_id": job.finding_id,
                 "job_id": job.job_id,
                 "attempt": job.attempt,
                 "state": job.state,

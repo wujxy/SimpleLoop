@@ -18,6 +18,8 @@ def _parallel_history() -> list[dict]:
         "candidates": [
             {
                 "candidate": 0,
+                "experiment_id": "r2c0",
+                "finding_id": "F-001",
                 "proposal": "hoist lookup",
                 "parent_sha": "parent",
                 "sha": "sha-0",
@@ -32,6 +34,8 @@ def _parallel_history() -> list[dict]:
             },
             {
                 "candidate": 1,
+                "experiment_id": "r2c1",
+                "finding_id": "F-002",
                 "proposal": "pack values",
                 "parent_sha": "parent",
                 "sha": "sha-1",
@@ -64,6 +68,8 @@ def test_resolve_parallel_episode_returns_complete_bounded_facts():
 
     assert episode == {
         "ref": "r2c1",
+        "experiment_id": "r2c1",
+        "finding_id": "F-002",
         "proposal": "pack values",
         "parent_sha": "parent",
         "candidate_sha": "sha-1",
@@ -97,8 +103,8 @@ def test_memory_show_cli_resolves_from_explicit_run_dir(
     output = json.loads(capsys.readouterr().out)
     assert output["ref"] == "r2c1"
     assert output["candidate_sha"] == "sha-1"
+    assert output["finding_id"] == "F-002"
     assert output["gates"]["PATHS"]["passed"] is True
-    assert "feedback" not in output
     assert output["eval_block"] == "objective=90\nphysics_gate=1"
 
 

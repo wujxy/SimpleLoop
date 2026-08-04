@@ -11,9 +11,12 @@ own round-level harness state:
 
   - proposals are plain strings so the execution layer never imports the
     Researcher role;
+  - ``finding_ids`` (parallel to proposals) rides alongside so the Ledger
+    can stamp each candidate with the research question it belongs to;
   - in-flight persistence goes through a RoundJournal supplied by the loop,
     which owns the file, the round meta, and the clear-on-success decision.
 """
+from __future__ import annotations
 
 
 class InfraRoundError(RuntimeError):
@@ -41,7 +44,9 @@ class RoundJournal:
 class ExecutionBackend:
     def run_candidates(self, *, proposals: list[str], round_id: int,
                        parent_sha: str,
-                       journal: "RoundJournal | None" = None) -> list[dict]:
+                       journal: "RoundJournal | None" = None,
+                       finding_ids: list[str | None] | None = None
+                       ) -> list[dict]:
         raise NotImplementedError
 
     def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
@@ -53,7 +58,9 @@ class ExecutionBackend:
 
     def resume_round(self, jobs: list[dict], *, round_id: int,
                      parent_sha: str,
-                     journal: "RoundJournal | None" = None) -> list[dict]:
+                     journal: "RoundJournal | None" = None,
+                     finding_ids: list[str | None] | None = None
+                     ) -> list[dict]:
         """Re-enter the poll loop for an in-flight round after a frontend
         restart. `jobs` is the opaque job table the backend previously passed
         to journal.save(); the proposer is NOT called again. The default

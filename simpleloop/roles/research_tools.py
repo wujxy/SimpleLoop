@@ -1,4 +1,13 @@
-"""Read-only factual lookup for the Proposer's research phase."""
+"""Read-only factual lookup for the Proposer's research phase.
+
+Two families of tools:
+  - ``ResearchCommandRunner`` runs a bounded shell command in a sandboxed
+    Apptainer boundary (source read-only, scratch writable, no network).
+  - ``ScientificMemoryTools`` dispatches the Proposer's memory operations to
+    ``MemoryService``.
+
+``ResearchTools`` is the façade the Proposer's runtime speaks to.
+"""
 from __future__ import annotations
 
 import os
@@ -8,8 +17,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
-
-from ..harness.memory import resolve_episode
 
 
 @dataclass(frozen=True)
@@ -37,13 +44,67 @@ RESEARCH_TOOL_SPECS = (
         action="inspect_episode",
         schema='{"action":"inspect_episode","ref":"r<round>c<candidate>"}',
         description=(
-            "Resolve one candidate episode by ref (e.g. r0c1). Returns "
-            "proposal, status, gates, metrics, eval output, parent_sha, and "
-            "candidate_sha. Use run_research_command with "
-            "`git diff parent_sha..candidate_sha` to see code changes."
+            "Resolve one candidate experiment by ref (e.g. r0c1). Returns "
+            "proposal, status, gates, metrics, eval output, parent/candidate "
+            "shas, and its finding_id. Pair with run_research_command + "
+            "'git diff parent_sha..candidate_sha' to see the code change."
+        ),
+    ),
+    ResearchToolSpec(
+        action="list_findings",
+        schema=(
+            '{"action":"list_findings","state":"active|open|dormant|'
+            'archived|all","limit":1-20}'
+        ),
+        description=(
+            "List Findings (research question containers) by operational "
+            "state. Returns id, question, mechanisms, code_regions, "
+            "experiment_refs, and stats."
+        ),
+    ),
+    ResearchToolSpec(
+        action="search_findings",
+        schema='{"action":"search_findings","query":"...","limit":1-20}',
+        description=(
+            "Rank existing Findings by BM25+MMR against the query. Use to "
+            "check whether your candidate research question is already open."
+        ),
+    ),
+    ResearchToolSpec(
+        action="inspect_finding",
+        schema='{"action":"inspect_finding","finding_id":"F-NNN"}',
+        description=(
+            "Return the full record for one Finding: question, scope, "
+            "operational state, experiment_refs, and derived stats. Never "
+            "contains an LLM-authored conclusion."
+        ),
+    ),
+    ResearchToolSpec(
+        action="search_experiments",
+        schema=(
+            '{"action":"search_experiments","query":"...",'
+            '"filters":{"gate_passed":bool,"selected":bool,'
+            '"finding_id":"F-NNN","changed_path":"path/prefix",'
+            '"round_min":int,"round_max":int,"status":"..."},'
+            '"limit":1-50,"buckets":true|false}'
+        ),
+        description=(
+            "Retrieve prior experiments. Default buckets=true returns "
+            "{relevant, contrasting, diverse}; buckets=false returns a flat "
+            "top-K list. Filters stack as AND. Each hit includes finding_id "
+            "(if any) so you can chain into inspect_finding."
         ),
     ),
 )
+
+
+MEMORY_TOOL_ACTIONS = frozenset({
+    "inspect_episode",
+    "list_findings",
+    "search_findings",
+    "inspect_finding",
+    "search_experiments",
+})
 
 
 def render_research_tool_prompt() -> str:
@@ -51,32 +112,6 @@ def render_research_tool_prompt() -> str:
         f"- {spec.schema}\n  {spec.description}"
         for spec in RESEARCH_TOOL_SPECS
     )
-
-
-def render_history_directory(history: list[dict]) -> str:
-    """Compact experiment directory rendered from history for the proposer
-    context — not a stored artifact.
-
-    Every prior candidate is listed as ``ref: note``. Notes are the previous
-    round's proposer's frozen summary; the most recent round's notes are blank
-    because that round's proposer writes them. Treat notes as navigation, not
-    fact — verify with inspect_episode.
-    """
-    if not history:
-        return "(no prior experiments)"
-    rounds = sorted(
-        (record for record in history if isinstance(record, dict)),
-        key=lambda r: r.get("round", 0),
-    )
-    lines: list[str] = []
-    for record in rounds:
-        round_id = record.get("round", 0)
-        for candidate in record.get("candidates") or []:
-            cid = candidate.get("candidate", 0)
-            ref = f"r{round_id}c{cid}"
-            note = (candidate.get("note") or "").strip()
-            lines.append(f"  {ref}: {note}" if note else f"  {ref}:")
-    return "\n".join(lines) or "(no prior experiments)"
 
 
 class ResearchCommandRunner:
@@ -243,7 +278,11 @@ def _kill_process_group(pid: int) -> None:
 
 
 class ResearchTools:
-    """Dispatch the Proposer's non-terminal research actions."""
+    """Dispatch the Proposer's non-terminal research actions.
+
+    Command execution is delegated to ``ResearchCommandRunner``. All memory
+    lookups (findings, experiments, episodes) go through ``MemoryService``.
+    """
 
     def __init__(
         self,
@@ -253,11 +292,13 @@ class ResearchTools:
         repo: Path,
         history_dir: Path,
         scratch: Path,
-        history: list[dict],
+        memory_service,
         command_timeout_seconds: int,
         command_output_cap_chars: int,
+        current_round: int,
     ):
-        self.history = history
+        self.memory = memory_service
+        self.current_round = int(current_round)
         self.command_timeout_seconds = command_timeout_seconds
         self.command_runner = ResearchCommandRunner(
             runtime=runtime,
@@ -286,7 +327,41 @@ class ResearchTools:
             if name == "inspect_episode":
                 return {
                     "ok": True,
-                    "result": resolve_episode(self.history, action["ref"]),
+                    "result": self.memory.inspect_episode(action["ref"]),
+                }
+            if name == "list_findings":
+                return {
+                    "ok": True,
+                    "result": self.memory.list_findings(
+                        state=action.get("state", "active"),
+                        limit=action.get("limit", 20),
+                        current_round=self.current_round,
+                    ),
+                }
+            if name == "search_findings":
+                return {
+                    "ok": True,
+                    "result": self.memory.search_findings(
+                        query=action["query"],
+                        limit=action.get("limit", 5),
+                    ),
+                }
+            if name == "inspect_finding":
+                return {
+                    "ok": True,
+                    "result": self.memory.inspect_finding(
+                        action["finding_id"],
+                    ),
+                }
+            if name == "search_experiments":
+                return {
+                    "ok": True,
+                    "result": self.memory.search_experiments(
+                        query=action["query"],
+                        filters=action.get("filters") or None,
+                        limit=action.get("limit", 10),
+                        buckets=bool(action.get("buckets", True)),
+                    ),
                 }
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}

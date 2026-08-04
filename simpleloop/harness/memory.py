@@ -1,8 +1,8 @@
-"""Per-run Search Memory primitives.
+"""Per-run Experiment Ledger primitives.
 
-`history.jsonl` remains the complete episodic record. This module gives those
-records stable `r<round>c<candidate>` references and resolves one complete,
-bounded factual candidate episode.
+``history.jsonl`` is the immutable episodic record of every candidate the
+harness has evaluated. This module gives those records stable
+``r<round>c<candidate>`` refs and resolves one bounded factual episode.
 """
 from __future__ import annotations
 
@@ -24,20 +24,24 @@ def read_history(path: Path) -> list[dict]:
             rows = [json.loads(line) for line in stream if line.strip()]
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"could not read history memory {path}: {exc}") from exc
-    required = {"status", "gate_passed", "eligible"}
-    if any(
-        not isinstance(row, dict)
-        or not isinstance(row.get("candidates"), list)
-        or any(
-            not isinstance(candidate, dict)
-            or not required <= candidate.keys()
-            for candidate in row["candidates"]
-        )
-        for row in rows
-    ):
-        raise ValueError(
-            f"history memory {path} does not use the current candidate schema"
-        )
+    required_candidate = {"status", "gate_passed", "eligible"}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"history memory {path} contains a non-object row"
+            )
+        cands = row.get("candidates")
+        if not isinstance(cands, list):
+            raise ValueError(
+                f"history memory {path} row is missing 'candidates' list"
+            )
+        for cand in cands:
+            if (not isinstance(cand, dict)
+                    or not required_candidate <= cand.keys()):
+                raise ValueError(
+                    f"history memory {path} does not use the current "
+                    "candidate schema"
+                )
     return rows
 
 
@@ -71,8 +75,13 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
     if candidate is None:
         raise ValueError(f"memory reference not found: {ref}")
 
+    experiment_id = str(
+        candidate.get("experiment_id") or f"r{round_id}c{candidate_id}"
+    )
     return {
-        "ref": f"r{round_id}c{candidate_id}",
+        "ref": experiment_id,
+        "experiment_id": experiment_id,
+        "finding_id": candidate.get("finding_id"),
         "proposal": candidate.get("proposal") or "",
         "parent_sha": candidate.get("parent_sha") or record.get("parent_sha"),
         "candidate_sha": candidate.get("sha"),

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import io
 import os
 import subprocess
@@ -11,7 +10,6 @@ from simpleloop.roles.research_tools import (
     RESEARCH_TOOL_SPECS,
     ResearchCommandRunner,
     ResearchTools,
-    render_history_directory,
     render_research_tool_prompt,
 )
 
@@ -60,65 +58,35 @@ class _RepeatingStream:
         return self.char * count
 
 
-def _candidate(round_id: int, *, proposal: str = "cache values",
-               note: str = "") -> dict:
-    return {
-        "candidate": 0,
-        "proposal": proposal,
-        "parent_sha": f"parent-{round_id}",
-        "sha": f"sha-{round_id}",
-        "status": "COMPLETED",
-        "selected": True,
-        "gate_passed": True,
-        "eligible": True,
-        "gates": {"physics_gate": {"passed": True}},
-        "metrics": {"SPEED_MS": 100 - round_id},
-        "changed_paths": [f"src/r{round_id}.cc"],
-        "eval_block": f"SPEED_MS={100 - round_id}",
-        "note": note,
-    }
+class _FakeMemoryService:
+    def __init__(self):
+        self.calls = []
 
+    def inspect_episode(self, ref):
+        self.calls.append(("inspect_episode", ref))
+        return {"ref": ref, "eval_block": f"body for {ref}"}
 
-def _history(count: int = 3, *, note: str = "") -> list[dict]:
-    return [
-        {"round": round_id, "parent_sha": f"parent-{round_id}",
-         "candidates": [_candidate(round_id, note=note)]}
-        for round_id in range(count)
-    ]
+    def list_findings(self, *, state, limit, current_round):
+        self.calls.append(("list_findings", state, limit, current_round))
+        return [{"id": "F-001", "state": state}]
 
+    def search_findings(self, *, query, limit):
+        self.calls.append(("search_findings", query, limit))
+        return [{"id": "F-001", "score": 1.0}]
 
-# --- render_history_directory --------------------------------------------
+    def inspect_finding(self, finding_id):
+        self.calls.append(("inspect_finding", finding_id))
+        if finding_id == "MISSING":
+            raise ValueError(f"unknown finding: {finding_id}")
+        return {"id": finding_id}
 
-def test_render_history_directory_empty():
-    assert render_history_directory([]) == "(no prior experiments)"
-
-
-def test_render_history_directory_lists_every_round_with_note():
-    history = _history(3, note="cache helped")
-    out = render_history_directory(history)
-    # Every prior candidate is listed as ref: note — no window, no collapse.
-    assert "r0c0: cache helped" in out
-    assert "r1c0: cache helped" in out
-    assert "r2c0: cache helped" in out
-    assert "Older experiments" not in out
-
-
-def test_render_history_directory_blank_note_shows_bare_ref():
-    history = _history(1, note="")
-    out = render_history_directory(history)
-    assert "r0c0:" in out
-    assert "Older experiments" not in out
-
-
-def test_render_history_directory_mixes_noted_and_blank_latest():
-    # Older round carries a note; the latest round is still blank (written next
-    # round) — both appear, with no collapsing to bare refs.
-    history = _history(2, note="x")
-    history[1]["candidates"][0]["note"] = ""
-    out = render_history_directory(history)
-    assert "r0c0: x" in out
-    assert "r1c0:" in out
-    assert "r1c0: x" not in out
+    def search_experiments(self, *, query, filters, limit, buckets):
+        self.calls.append(
+            ("search_experiments", query, filters, limit, buckets),
+        )
+        if buckets:
+            return {"relevant": [], "contrasting": [], "diverse": []}
+        return []
 
 
 # --- tool prompt ---------------------------------------------------------
@@ -129,6 +97,10 @@ def test_research_tool_prompt_is_composed_from_tool_specs():
     assert {spec.action for spec in RESEARCH_TOOL_SPECS} == {
         "run_research_command",
         "inspect_episode",
+        "list_findings",
+        "search_findings",
+        "inspect_finding",
+        "search_experiments",
     }
     for spec in RESEARCH_TOOL_SPECS:
         assert spec.schema in prompt
@@ -305,31 +277,91 @@ def test_research_command_rejects_invalid_input(tmp_path, command, cwd):
         runner.run(command, cwd=cwd)
 
 
-def test_research_tools_inspect_episode(tmp_path):
+# --- ResearchTools memory-tool dispatch ----------------------------------
+
+def _tools(tmp_path, *, memory=None, current_round=0):
     runner, runtime = _runner(tmp_path)
-    tools = ResearchTools(
+    return ResearchTools(
         runtime=runtime, source=runner.source, repo=runner.repo,
         history_dir=runner.history_dir, scratch=runner.scratch,
-        history=_history(), command_timeout_seconds=12,
+        memory_service=memory or _FakeMemoryService(),
+        command_timeout_seconds=12,
         command_output_cap_chars=100,
+        current_round=current_round,
     )
 
-    episode = tools.execute(
+
+def test_research_tools_inspect_episode_goes_through_memory(tmp_path):
+    memory = _FakeMemoryService()
+    tools = _tools(tmp_path, memory=memory)
+
+    result = tools.execute(
         {"action": "inspect_episode", "ref": "r2c0"}, deadline=1000,
     )
 
-    assert episode["ok"]
-    assert episode["result"]["eval_block"] == "SPEED_MS=98"
+    assert result["ok"]
+    assert result["result"]["ref"] == "r2c0"
+    assert memory.calls == [("inspect_episode", "r2c0")]
+
+
+def test_research_tools_list_findings_passes_current_round(tmp_path):
+    memory = _FakeMemoryService()
+    tools = _tools(tmp_path, memory=memory, current_round=7)
+
+    result = tools.execute(
+        {"action": "list_findings", "state": "active", "limit": 10},
+        deadline=1000,
+    )
+
+    assert result["ok"]
+    assert memory.calls == [("list_findings", "active", 10, 7)]
+
+
+def test_research_tools_search_findings(tmp_path):
+    memory = _FakeMemoryService()
+    tools = _tools(tmp_path, memory=memory)
+
+    result = tools.execute(
+        {"action": "search_findings", "query": "cache", "limit": 3},
+        deadline=1000,
+    )
+
+    assert result["ok"]
+    assert memory.calls == [("search_findings", "cache", 3)]
+
+
+def test_research_tools_inspect_finding_reports_missing(tmp_path):
+    memory = _FakeMemoryService()
+    tools = _tools(tmp_path, memory=memory)
+
+    result = tools.execute(
+        {"action": "inspect_finding", "finding_id": "MISSING"},
+        deadline=1000,
+    )
+
+    assert result == {"ok": False, "error": "unknown finding: MISSING"}
+
+
+def test_research_tools_search_experiments_default_buckets(tmp_path):
+    memory = _FakeMemoryService()
+    tools = _tools(tmp_path, memory=memory)
+
+    result = tools.execute(
+        {
+            "action": "search_experiments", "query": "cache",
+            "filters": {"gate_passed": True}, "limit": 5, "buckets": True,
+        },
+        deadline=1000,
+    )
+
+    assert result["ok"]
+    assert memory.calls == [
+        ("search_experiments", "cache", {"gate_passed": True}, 5, True),
+    ]
 
 
 def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
-    runner, runtime = _runner(tmp_path)
-    tools = ResearchTools(
-        runtime=runtime, source=runner.source, repo=runner.repo,
-        history_dir=runner.history_dir, scratch=runner.scratch,
-        history=_history(), command_timeout_seconds=12,
-        command_output_cap_chars=100,
-    )
+    tools = _tools(tmp_path)
     calls = []
     tools.command_runner.run = lambda command, **kwargs: (
         calls.append((command, kwargs)) or {"ok": True}

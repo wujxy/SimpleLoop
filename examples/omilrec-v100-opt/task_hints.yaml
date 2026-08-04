@@ -5,6 +5,32 @@ task:
     Minimize reconstruction SPEED_MS while satisfying every configured gate.
     The current implementation is the starting artifact, not a constraint on
     the form or scale of a valid solution.
+  hints:
+    # --- where the time goes ---
+    - "SPEED_MS is dominated by per-event work in Calculate_EVLikelihood and the Minuit FCN; the FCN is called many times per event, so anything hoisted out of it is amplified."
+    - "Pure allocation/refactor changes (TH1D→stack, vector.assign) have already been tried and give ~0 gain — spend budget on algorithmic/loop-structure changes instead."
+
+    # --- data-layout flattening (bit-identical-safe) ---
+    - "Flatten per-LPMT constants (position, radius, isDyn, LPDE, gain, Q1, QRes, timeOffset) into contiguous arrays in OMILRECV2 init; removes TVector3 access and tool virtual calls, improves cache locality."
+    - "In Load_ExpectedPEQTime, cache the nPE map / charge PDF / time PDF as raw array pointers; eliminates ROOT histogram accessor and pointer-chasing in the hot loop."
+
+    # --- hoist Minuit-invariant work (bit-identical-safe) ---
+    - "Precompute per-event invariants (PMT_Hit, hitTime, hitNPE, dmu, fdmu, QPDF params) once after RemoveDN and before FCN — cache charge AFTER RemoveDN, which changes hit charge."
+    - "Reuse the geometry-pass PMT-vertex distance Rsp to compute LTOF inside FCN, instead of recomputing sqrt via CalLTOF on every call."
+    - "Precompute reciprocals and scalar constants once (1/(LPMTCalibEnergy*nHESF), grid inverse widths, PMT_R/LS_R powers, 1e6/c) instead of repeating divides in FCN."
+
+    # --- per-vertex / bin-finding hoist (bit-identical-safe) ---
+    - "For the trial vertex, precompute expected nPE over the 1440 theta bins once; the per-PMT inner loop then does only a linear blend. Invalidate cache correctly on Use3DMap / isMixingPhase / R / theta changes."
+    - "Compute QPDF and time-PDF x/y bins + interpolation weights once per fired PMT; reuse across the Poisson k-loop and time-PDF interpolation instead of re-doing floor/clamp/bin-search."
+
+    # --- loop-structure / fast path (bit-identical-safe) ---
+    - "Split the PMT loop by fit phase: QMLE charge-only, TMLE time-only, QTMLE combined — removes inner phase branches and dead work."
+    - "Prebuild per-event index lists (unfired_idx, fired_idx, time_eligible_idx) so FCN skips per-PMT threshold/eligibility checks; TMLE-only then iterates ~1.7k time-eligible PMTs, not all 17k."
+    - "RecNpe==1 && !enableQTimePdf fast path: compute only the two needed Ge time-PDF interpolations, skip integral PDFs and the general path."
+
+    # --- arithmetic-changing (require FCN drift <= 1e-13 gate) ---
+    - "Unfired charge likelihood can switch from exp(-pe)*(1+ProbQ*pe) to 2*pe - 2*log1p(ProbQ*pe), removing an exp() per unfired PMT — but this changes FP rounding, so verify against the FCN gate."
+    - "A better QMLE seed (online/OEC energy-radius estimate, old fixed seed as fallback) cuts Minuit iterations ~20-30%, but changes the minimizer path — watch the 4 mm / 7 keV gate on near-boundary events."
 
 safety:
   editable_paths:
@@ -95,8 +121,9 @@ execution:
     schedd_name: scheduler@schedd12.ihep.ac.cn
     collector: cm01.ihep.ac.cn
     accounting_group: JUNO.juno.default
-    cpu_model: skylake
-    memory_mb: 6000
+    cpu_model: zen5
+    machine_constraint: 'Machine == "lhws316.ihep.ac.cn"'
+    memory_mb: 4096
     poll_seconds: 15
     max_attempts: 2
     run_timeout_seconds: 7200

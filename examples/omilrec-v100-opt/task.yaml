@@ -8,8 +8,8 @@ task:
 
 safety:
   editable_paths:
-    - "OMILRECV2/src/**"
-    - "OMILRECV2/CMakeLists.txt"
+    - "OMILRECV2/src/**/*.cc"
+    - "OMILRECV2/src/**/*.h"
   frozen_paths:
     - "tests/**"
     - "scripts/**"
@@ -17,6 +17,7 @@ safety:
     - "benchmarks/**"
     - "reference/**"
     - "CMakeLists.txt"
+    - "OMILRECV2/CMakeLists.txt"
     - "pyproject.toml"
     - "docs/**"
     - "CLAUDE.md"
@@ -24,10 +25,13 @@ safety:
     - ".gitignore"
 
 loop:
-  max_rounds: 20
+  max_rounds: 30
   candidates_per_round: 3
   max_workers: 3
-  agent_timeout_seconds: 4500
+  agent_timeout_seconds: 7200
+
+# self_improvement:
+#   interval_rounds: 10
 
 roles:
   researcher:
@@ -39,20 +43,25 @@ roles:
     command_output_cap_chars: 12000
   executor:
     api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
+    model: glm-5.2
+    base_url: https://aiapi.ihep.ac.cn/apiv2
 
 runtime:
   image: ../junosw-apptainer.sif
   definition: ../junosw-apptainer.def
   binds:
     - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
+    - /lustrefs/juno26/users/lidian
 
 eval:
   commands:
-    - "bash scripts/sl_eval_v100.sh --evtmax 10"
+    # RecMap (4 LFS .root files, ~979MB) lives in the source pkg and is shared
+    # read-only across all candidate/baseline worktrees instead of being
+    # smudged (and duplicated) into each worktree. OMILRECV2_BENCH_RECMAP
+    # defaults to OMILRECV2_TEST_RECMAP inside sl_eval_v100.sh, so one var
+    # covers both the pytest gates and the benchmark. The path is visible
+    # inside the container because /lustrefs/juno26/users/lidian is bound.
+    - "OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash scripts/sl_eval_v100.sh --evtmax 100"
   metrics:
     objective:
       key: SPEED_MS
@@ -77,5 +86,18 @@ eval:
           finishes successfully and emits every required metric.
 
 source:
-  path: ../../../omilrec-v100-gated
+  path: ../../../omilrec-v100-opt-pkg 
   baseline_ref: simpleloop-v100-gated-baseline
+
+execution:
+  backend: hepjob
+  hepjob:
+    schedd_name: scheduler@schedd12.ihep.ac.cn
+    collector: cm01.ihep.ac.cn
+    accounting_group: JUNO.juno.default
+    cpu_model: zen5
+    machine_constraint: 'Machine == "lhws316.ihep.ac.cn"'
+    memory_mb: 4096
+    poll_seconds: 15
+    max_attempts: 2
+    run_timeout_seconds: 7200

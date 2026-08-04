@@ -20,6 +20,12 @@ from . import config as config_mod
 from .execution import build_backend
 from .execution.base import InfraRoundError, RoundJournal
 from .harness import evals
+from .memory import (
+    ExistingFindingTarget,
+    MemoryService,
+    NewFindingTarget,
+    ResearchProposal,
+)
 from .reporting import plot as plot_mod
 from .roles import proposer as proposer_mod
 from .harness import views
@@ -43,12 +49,12 @@ INFLIGHT_NAME = "inflight_round.json"
 class _InflightJournal(RoundJournal):
     """The loop-owned in-flight round file: ONE atomic unit carrying
     everything a --continue needs — the round meta (round_id, parent_sha,
-    proposer outputs and proposals) plus the backend's
-    opaque jobs table. The backend calls save(jobs) on every job-state
-    transition but never sees the meta; clear() happens only when the round
-    produced business-terminal candidates. The file appears at the first
-    save (after job submission), so a crash before that simply re-proposes
-    the round — there is no half-written meta to reconcile."""
+    proposals with their finding targets) plus the backend's opaque jobs
+    table. The backend calls save(jobs) on every job-state transition but
+    never sees the meta; clear() happens only when the round produced
+    business-terminal candidates. The file appears at the first save (after
+    job submission), so a crash before that simply re-proposes the round —
+    there is no half-written meta to reconcile."""
 
     def __init__(self, path: Path, meta: dict):
         self.path = path
@@ -81,6 +87,7 @@ class RunContext:
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
     execution_backend: object | None = None
+    memory_service: MemoryService | None = None
 
     @property
     def metrics_schema(self) -> dict | None:
@@ -272,11 +279,21 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             journal = _InflightJournal(
                 ctx.run_dir / INFLIGHT_NAME,
                 meta={k: v for k, v in inflight.items() if k != "jobs"})
-            round_annotations = inflight.get("annotations") or []
+            proposals_meta = inflight.get("proposals") or []
+            proposals_batch = [
+                str(item["instruction"])
+                if isinstance(item, dict) else str(item)
+                for item in proposals_meta
+            ]
+            finding_ids = [
+                item.get("finding_id") if isinstance(item, dict) else None
+                for item in proposals_meta
+            ]
             try:
                 candidates = ctx.execution_backend.resume_round(
                     inflight.get("jobs") or [], round_id=round_id,
-                    parent_sha=inflight["parent_sha"], journal=journal)
+                    parent_sha=inflight["parent_sha"], journal=journal,
+                    finding_ids=finding_ids)
             except InfraRoundError as exc:
                 print(f"[{stamp()}] {exc}", flush=True)
                 print(f"[{stamp()}] round {round_id + 1} still not complete; "
@@ -286,20 +303,30 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         else:
             proposal_result = _next_proposals(
                 ctx, static_proposals, round_id, parent_sha)
-            proposals_batch = proposal_result.proposals
-            round_annotations = proposal_result.annotations
+            proposals_batch = [p.instruction for p in proposal_result.proposals]
+            finding_ids = (
+                ctx.memory_service.resolve_targets(
+                    proposal_result.proposals, round_id=round_id,
+                )
+                if ctx.memory_service is not None
+                else [None] * len(proposals_batch)
+            )
+            proposals_meta = [
+                {"instruction": inst, "finding_id": fid}
+                for inst, fid in zip(proposals_batch, finding_ids)
+            ]
             journal = _InflightJournal(
                 ctx.run_dir / INFLIGHT_NAME,
                 meta={
                     "round_id": round_id,
                     "parent_sha": parent_sha,
-                    "proposals": proposals_batch,
-                    "annotations": round_annotations,
+                    "proposals": proposals_meta,
                 })
             try:
                 candidates = ctx.execution_backend.run_candidates(
                     proposals=proposals_batch, round_id=round_id,
-                    parent_sha=parent_sha, journal=journal)
+                    parent_sha=parent_sha, journal=journal,
+                    finding_ids=finding_ids)
             except InfraRoundError as exc:
                 # The round is not consumed: inflight_round.json stays on
                 # disk so --continue can resume; exit for human recovery.
@@ -346,11 +373,14 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             candidates=candidates,
             telemetry=ctx.telemetry.snapshot(persist=True),
         )
-        # The proposer's annotations summarize the PREVIOUS round's results;
-        # backfill them into that round's candidate records now that this
-        # round is durably recorded.
-        if round_annotations and round_id > 0:
-            ctx.store.backfill_notes(round_id - 1, round_annotations)
+        # Update the Finding Archive with the round's outcomes: bump
+        # attempts/eligible/selected/best_objective and append experiment refs
+        # to each involved Finding. Nothing is written for candidates without
+        # a finding_id (e.g. static-proposal mode).
+        if ctx.memory_service is not None:
+            ctx.memory_service.link_completed_experiments(
+                round_id=round_id, candidates=candidates,
+            )
         journal.clear()
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         parent_sha = next_base_sha
@@ -438,6 +468,10 @@ def _build_context(
     )
     store = Store(run_dir_path, metrics_schema=cfg["metrics"],
                   history_eval_cap=cfg.get("eval_history_cap_chars", 6000))
+    memory_service = MemoryService(
+        run_dir=run_dir_path,
+        metrics_schema=cfg["metrics"],
+    )
     # Same gate bullet lines go into both the proposer's and executor's prompt.
     gate_lines = views.gate_block(cfg.get("metrics"))
     ctx = RunContext(
@@ -445,6 +479,7 @@ def _build_context(
         store=store, telemetry=telemetry, proposer_agent=proposer_agent,
         executor_agent=executor_agent,
         prompt_dir=prompt_dir, gate_lines=gate_lines,
+        memory_service=memory_service,
     )
     ctx.execution_backend = build_backend(ctx)
     return ctx
@@ -471,7 +506,6 @@ def _starting_state(ctx: RunContext, continue_run: bool,
             f"--continue: run-dir {ctx.run_dir} has no history.jsonl rounds; "
             "drop --continue and start a fresh run."
         )
-    _reconcile_completed_inflight(ctx, done)
     start_round = len(done)
     if start_round >= n_rounds:
         print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
@@ -493,57 +527,45 @@ def _starting_state(ctx: RunContext, continue_run: bool,
     return start_round, parent_sha, prior_metrics
 
 
-def _reconcile_completed_inflight(ctx: RunContext, history: list[dict]) -> None:
-    """Finish an interrupted history -> notes backfill -> journal commit.
-
-    The round's candidates were durably recorded before the crash; the only
-    unfinished step is backfilling the proposer's annotations into the prior
-    round and clearing the inflight file."""
-    inflight = _load_inflight(ctx.run_dir)
-    if inflight is None:
-        return
-    round_id = inflight.get("round_id")
-    last_round = history[-1].get("round") if history else None
-    if round_id == len(history):
-        return
-    if round_id != last_round:
-        raise ValueError(
-            f"--continue: inflight file is for round {round_id}, but history "
-            f"ends at round {last_round}"
-        )
-    annotations = inflight.get("annotations") or []
-    if annotations and round_id > 0:
-        ctx.store.backfill_notes(round_id - 1, annotations)
-    _InflightJournal(ctx.run_dir / INFLIGHT_NAME, meta={}).clear()
-
-
 def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
                     round_id: int, parent_sha: str,
                     ) -> proposer_mod.ProposerResult:
-    """Return one round's executable experiment instructions.
+    """Return one round's structured research proposals.
 
-    Normal mode calls the Proposer Agent against a parent snapshot (read-only);
-    static mode takes the proposal verbatim as a one-candidate generation."""
+    Normal mode calls the Proposer Agent against a parent snapshot (read-only)
+    with the MemoryService as its persistent context source; static mode
+    wraps each supplied instruction in a proposal with no research target."""
     if static_proposals is not None:
         proposal_text = static_proposals[round_id]
         print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
-        return proposer_mod.ProposerResult([proposal_text], [])
+        return proposer_mod.ProposerResult(
+            proposals=[
+                ResearchProposal(
+                    instruction=proposal_text,
+                    research_target=NewFindingTarget(
+                        question=proposal_text[:200],
+                    ),
+                ),
+            ],
+        )
 
     cfg = ctx.cfg
-    history = ctx.store.history()
     worktree_id = f"proposer-{round_id}"
     source_path = ctx.workspace.add_worktree(worktree_id, parent_sha)
     try:
         proposal_obj = ctx.proposer_agent.run(
             goal=cfg["goal"], editable=cfg["editable_paths"],
-            frozen=cfg["frozen_paths"], history=history,
+            frozen=cfg["frozen_paths"],
+            memory_service=ctx.memory_service,
             base_sha=parent_sha,
             source_path=source_path,
             repo_path=ctx.workspace.repo,
             run_dir=ctx.run_dir,
+            current_round=round_id,
             candidates_per_round=cfg.get("candidates_per_round", 1),
             gate_block=ctx.gate_lines,
             prompt_dir=ctx.prompt_dir,
+            hints=cfg.get("hints") or None,
         )
     except (model_mod.ModelError, proposer_mod.ProposerError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.
@@ -621,20 +643,25 @@ def _finalize_candidates(ctx: RunContext, candidates: list[dict]) -> None:
 
 
 def _run_candidates(ctx: RunContext, proposals: list[str],
-                    round_id: int, parent_sha: str) -> list[dict]:
+                    round_id: int, parent_sha: str,
+                    finding_ids: list[str | None] | None = None
+                    ) -> list[dict]:
     """Run one generation's proposal strings, possibly concurrently."""
+    if finding_ids is None:
+        finding_ids = [None] * len(proposals)
     max_workers = min(ctx.cfg.get("max_workers", 1), max(1, len(proposals)))
     if max_workers <= 1 or len(proposals) <= 1:
         return [
             _run_candidate_guarded(
-                ctx, i, proposal, round_id, parent_sha)
+                ctx, i, proposal, round_id, parent_sha,
+                finding_id=finding_ids[i])
             for i, proposal in enumerate(proposals)
         ]
     results: list[dict | None] = [None] * len(proposals)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_run_candidate_guarded, ctx, i, proposal, round_id,
-                        parent_sha): i
+                        parent_sha, finding_id=finding_ids[i]): i
             for i, proposal in enumerate(proposals)
         }
         for future in as_completed(futures):
@@ -648,7 +675,8 @@ def _run_candidates(ctx: RunContext, proposals: list[str],
                 results[i] = _candidate_failure(
                     i, proposals[i], f"candidate worker failed: {exc}",
                     parent_sha, round_id=round_id,
-                    metrics_schema=ctx.metrics_schema)
+                    metrics_schema=ctx.metrics_schema,
+                    finding_id=finding_ids[i])
     return [r for r in results if r is not None]
 
 
@@ -658,10 +686,13 @@ def _run_candidate_guarded(
     proposal: str,
     round_id: int,
     parent_sha: str,
+    *,
+    finding_id: str | None = None,
 ) -> dict:
     try:
         return _run_one_candidate(
             ctx, candidate_id, proposal, round_id, parent_sha,
+            finding_id=finding_id,
         )
     except Exception as exc:
         print(
@@ -673,6 +704,7 @@ def _run_candidate_guarded(
             candidate_id, proposal, f"candidate worker failed: {exc}",
             parent_sha, round_id=round_id,
             metrics_schema=ctx.metrics_schema,
+            finding_id=finding_id,
         )
 
 
@@ -688,7 +720,8 @@ def _deps_from_ctx(ctx: RunContext) -> candidate_worker.CandidateDeps:
 
 def _run_one_candidate(ctx: RunContext, candidate_id: int,
                        proposal: str,
-                       round_id: int, parent_sha: str) -> dict:
+                       round_id: int, parent_sha: str,
+                       *, finding_id: str | None = None) -> dict:
     """LocalBackend's per-candidate path: the backend owns the worktree
     lifecycle; the business logic lives in candidate_worker.run_candidate."""
     worktree_id = f"{round_id}-c{candidate_id}"
@@ -698,6 +731,7 @@ def _run_one_candidate(ctx: RunContext, candidate_id: int,
         spec = candidate_worker.CandidateSpec(
             round_id=round_id, candidate_id=candidate_id,
             parent_sha=parent_sha, proposal=proposal,
+            finding_id=finding_id,
             run_dir=str(ctx.run_dir),
             worktree_path=str(worktree),
             prompt_dir=str(ctx.prompt_dir or ""),
@@ -713,10 +747,11 @@ def _candidate_failure(candidate_id: int, proposal: str,
                        sha: str | None = None,
                        eval_block: str = "", eval_metrics: dict | None = None,
                        changed_paths: list[str] | None = None,
-                       metrics_schema: dict | None = None) -> dict:
+                       metrics_schema: dict | None = None,
+                       finding_id: str | None = None) -> dict:
     spec = candidate_worker.CandidateSpec(
         round_id=round_id, candidate_id=candidate_id, parent_sha=parent_sha,
-        proposal=proposal)
+        proposal=proposal, finding_id=finding_id)
     return candidate_worker.candidate_failure(
         candidate_id, spec, reason, parent_sha, sha=sha,
         eval_block=eval_block, eval_metrics=eval_metrics,

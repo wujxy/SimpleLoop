@@ -415,6 +415,22 @@ def test_no_cpu_model_omits_requirements(tmp_path, monkeypatch):
     assert "Requirements" not in sub
 
 
+def test_machine_constraint_appended_to_requirements(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install_condor_stubs(bin_dir, query_lines=[""])
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
+    backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(
+        tmp_path, cpu_model="icelake",
+        machine_constraint='Machine == "slot1@herdws001.ihep.ac.cn"'))
+    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    backend._submit(job)
+    sub = (job.result_dir / "job.sub").read_text()
+    assert ('Requirements = CpuFamily==6 && CpuModelNumber==106 '
+            '&& Machine == "slot1@herdws001.ihep.ac.cn"') in sub
+
+
 def test_collect_filters_infra_keeps_business(tmp_path, monkeypatch):
     # Two candidates, both HELD+exhausted -> all infra -> InfraRoundError
     bin_dir = tmp_path / "bin"

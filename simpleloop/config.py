@@ -29,6 +29,7 @@ Minimal schema:
   execution.hepjob.ihep_group: str    (optional; +IHEP_RealGroup job attribute)
   execution.hepjob.request_os: str    (optional, default AlmaLinux9)
   execution.hepjob.cpu_model: str    (optional; target a CPU model — zen4/genoa or zen5/turin — emitted as a condor Requirements expression)
+  execution.hepjob.machine_constraint: str  (optional; extra condor Requirements clause appended to cpu_model, e.g. 'Machine == "slot1@herdws001.ihep.ac.cn"' to pin all jobs to one host so SPEED_MS is comparable across candidates)
   execution.hepjob.memory_mb: int     (optional, default 6000)
   execution.hepjob.cpus: int          (optional, default 1)
   execution.hepjob.poll_seconds: int  (optional, default 30)
@@ -164,6 +165,13 @@ def _resolve(
     goal = task.get("goal")
     if not goal:
         raise ConfigError("task.goal: required and must be non-empty")
+    hints = task.get("hints", [])
+    if hints is not None and not isinstance(hints, list):
+        raise ConfigError("task.hints: must be a list of strings")
+    if hints:
+        for i, h in enumerate(hints):
+            if not isinstance(h, str) or not h.strip():
+                raise ConfigError(f"task.hints[{i}]: must be a non-empty string")
 
     editable = safety.get("editable_paths")
     if not isinstance(editable, list) or not editable:
@@ -237,6 +245,7 @@ def _resolve(
 
     return {
         "goal": str(goal),
+        "hints": [str(h) for h in hints] if hints else [],
         "editable_paths": [str(g) for g in editable],
         "frozen_paths": [str(g) for g in frozen],
         "max_rounds": int(max_rounds),
@@ -494,6 +503,7 @@ _HEPJOB_DEFAULTS = {
     "ihep_group": None,
     "request_os": "AlmaLinux9",
     "cpu_model": None,
+    "machine_constraint": None,
     "memory_mb": 6000,
     "cpus": 1,
     "poll_seconds": 30,
@@ -583,6 +593,7 @@ def _resolve_execution(raw: object) -> tuple[str, dict]:
                 f"execution.hepjob.{key}: required when backend is hepjob")
     for key in ("schedd_name", "collector", "accounting_group",
                 "accounting_group_user", "ihep_group", "request_os", "cpu_model",
+                "machine_constraint",
                 "python_executable", "submit_cmd", "query_cmd", "remove_cmd"):
         value = hepjob.get(key)
         if value is not None and not isinstance(value, str):

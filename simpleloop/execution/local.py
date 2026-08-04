@@ -14,10 +14,14 @@ class LocalBackend(ExecutionBackend):
         self.ctx = ctx
 
     def run_candidates(self, *, proposals: list[str], round_id: int,
-                       parent_sha: str, journal=None) -> list[dict]:
+                       parent_sha: str, journal=None,
+                       finding_ids: list[str | None] | None = None
+                       ) -> list[dict]:
         from .. import loop as loop_mod
         return loop_mod._run_candidates(
-            self.ctx, proposals, round_id, parent_sha)
+            self.ctx, proposals, round_id, parent_sha,
+            finding_ids=finding_ids,
+        )
 
     def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
         """Run the baseline eval locally on the baseline worktree.
