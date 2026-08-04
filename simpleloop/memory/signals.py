@@ -103,6 +103,99 @@ _FEASIBILITY_RISK_MIN_FAILURES = 2
 _MECHANISM_CHALLENGE_MIN_NEUTRAL = 2
 _CONTRADICTORY_MIN_REGRESSIONS = 1
 
+# Global (cross-finding) stall detection — see plan §修复 1.
+_GLOBAL_STALL_WINDOW = 3          # look at the last N rounds
+_GLOBAL_STALL_MIN_ELIGIBLE = 3    # need this many classifiable experiments
+_GLOBAL_STALL_MIN_REGRESSIONS = 3  # regression_run threshold
+
+
+# --- cross-finding global stall -------------------------------------------
+
+def _compute_global_signal(
+    findings: dict,
+    experiments: list[Experiment],
+    sha_obj: dict[str, float],
+    *,
+    objective_key: str,
+    lower_is_better: bool,
+) -> dict | None:
+    """Compute a cross-finding view of the most recent rounds.
+
+    Per-finding signals can be evaded by opening a fresh Finding each round
+    (each finding then has only one experiment, so per-finding neutral counts
+    never reach the mechanism_challenge threshold). This global view looks at
+    the *sequence* of eligible results across all findings in a time window,
+    so it cannot be bypassed by renaming the question.
+
+    Returns ``None`` when there is not enough classifiable history (early
+    rounds, or too few eligible experiments). Otherwise returns ``{recent_window,
+    recent_eligible, recent_improvements, recent_neutral, recent_regressions,
+    recent_mechanisms, policy_signals}``.
+    """
+    if not experiments:
+        return None
+    # Round range of the last _GLOBAL_STALL_WINDOW rounds.
+    max_round = max(e.round for e in experiments)
+    min_round = max_round - _GLOBAL_STALL_WINDOW + 1
+    # Map finding_id -> mechanisms for mechanism collection.
+    finding_mechs: dict[str, tuple[str, ...]] = {}
+    if isinstance(findings, dict):
+        for fid, f in findings.items():
+            finding_mechs[fid] = getattr(f, "mechanisms", ()) or ()
+
+    recent_eligible = [
+        e for e in experiments
+        if e.eligible and e.round >= min_round
+    ]
+    improvements = neutral = regressions = 0
+    mechs_seen: dict[str, int] = {}
+    for e in recent_eligible:
+        obj = e.metrics.get(objective_key)
+        parent_obj = sha_obj.get(e.parent_sha)
+        if not isinstance(obj, (int, float)) or parent_obj is None:
+            continue
+        kind = _classify_objective(
+            float(obj), float(parent_obj), lower_is_better=lower_is_better,
+        )
+        if kind == "improvement":
+            improvements += 1
+        elif kind == "regression":
+            regressions += 1
+        else:
+            neutral += 1
+        for m in finding_mechs.get(e.finding_id or "", ()):
+            mechs_seen[m] = mechs_seen.get(m, 0) + 1
+
+    classifiable = improvements + neutral + regressions
+    if classifiable < _GLOBAL_STALL_MIN_ELIGIBLE:
+        return None
+
+    # Top-5 mechanisms by frequency, to keep the startup pack compact.
+    top_mechs = sorted(mechs_seen, key=lambda m: (-mechs_seen[m], m))[:5]
+
+    return {
+        "recent_window": _GLOBAL_STALL_WINDOW,
+        "recent_eligible": classifiable,
+        "recent_improvements": improvements,
+        "recent_neutral": neutral,
+        "recent_regressions": regressions,
+        "recent_mechanisms": top_mechs,
+        "policy_signals": {
+            "global_stall": {
+                "active": improvements == 0,
+                "rule": f"recent_improvements == 0 and "
+                        f"recent_eligible >= {_GLOBAL_STALL_MIN_ELIGIBLE}",
+            },
+            "regression_run": {
+                "active": regressions >= _GLOBAL_STALL_MIN_REGRESSIONS
+                          and improvements == 0,
+                "rule": f"recent_regressions >= "
+                        f"{_GLOBAL_STALL_MIN_REGRESSIONS} and "
+                        f"recent_improvements == 0",
+            },
+        },
+    }
+
 
 def compute_deliberation_signals(
     findings: dict,
@@ -113,9 +206,17 @@ def compute_deliberation_signals(
     objective_key: str | None,
     lower_is_better: bool,
 ) -> dict:
-    """Return ``{first_round, hints_present, findings: [...]}`` where each
-    finding entry carries ``facts`` (ledger counts) and ``policy_signals``
-    (threshold booleans with their rule).
+    """Return ``{first_round, hints_present, findings: [...], global}`` where
+    each finding entry carries ``facts`` (ledger counts) and ``policy_signals``
+    (threshold booleans with their rule), and ``global`` carries a
+    cross-finding view of the most recent rounds (``None`` on early rounds).
+
+    The global signal exists because per-finding signals can be evaded by
+    opening a fresh Finding each round — each finding then has only one
+    experiment, so per-finding neutral counts never reach the
+    ``mechanism_challenge`` threshold. The global view looks at the sequence
+    of eligible results across *all* findings in a time window, so it cannot
+    be bypassed by renaming the question.
 
     Brand-new findings with no experiments are omitted: they have no signal
     yet. Findings are returned with policy-signal findings first, then by
@@ -200,8 +301,16 @@ def compute_deliberation_signals(
         return any(v["active"] for v in entry["policy_signals"].values())
 
     entries.sort(key=lambda e: (not any_active(e), -e["facts"]["attempts"], e["id"]))
+
+    global_signal = _compute_global_signal(
+        findings, experiments, sha_obj,
+        objective_key=objective_key,
+        lower_is_better=lower_is_better,
+    )
+
     return {
         "first_round": False,
         "hints_present": hints_present,
         "findings": entries,
+        "global": global_signal,
     }

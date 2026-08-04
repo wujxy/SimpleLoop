@@ -104,7 +104,44 @@ def _render_signals(signals: dict | None) -> str:
                 f"{k} ({v['rule']})" for k, v in active.items()
             )
             lines.append(f"    policy signal: {tags}")
+
+    global_block = _render_global_signal(signals.get("global"))
+    if global_block:
+        lines.append(global_block)
+
     return "\n".join(lines) + "\n"
+
+
+def _render_global_signal(g: dict | None) -> str:
+    """Render the cross-finding global stall block. Returns empty when the
+    global signal is absent (early rounds) or inactive."""
+    if not g:
+        return ""
+    gps = g.get("policy_signals") or {}
+    active = {k: v for k, v in gps.items() if (v or {}).get("active")}
+    if not active:
+        return ""
+    mechs = g.get("recent_mechanisms") or []
+    mechs_str = ", ".join(mechs) if mechs else "(none tagged)"
+    lines = [
+        f"  GLOBAL  recent_window={g.get('recent_window', 0)}  "
+        f"eligible={g.get('recent_eligible', 0)}  "
+        f"imp/neutral/reg="
+        f"{g.get('recent_improvements', 0)}/"
+        f"{g.get('recent_neutral', 0)}/{g.get('recent_regressions', 0)}  "
+        f"mechanisms_tried=[{mechs_str}]",
+    ]
+    tags = ", ".join(f"{k} ({v['rule']})" for k, v in active.items())
+    lines.append(f"    policy signal: {tags}")
+    lines.append(
+        "    POLICY: The evidence shows your recent direction is not "
+        "advancing the objective. You must either (a) reframe to a "
+        "genuinely different mechanism family and explain why it is not a "
+        "variant of what you have tried, or (b) abandon this round (zero "
+        "proposals) if no direction clears the bar. Do not submit another "
+        "small variant of the same mechanism family."
+    )
+    return "\n".join(lines)
 
 
 def _render_abstentions(recent_abstentions: list[dict] | None) -> str:

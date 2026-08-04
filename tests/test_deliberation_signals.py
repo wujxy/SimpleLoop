@@ -168,3 +168,183 @@ def test_tokenize_and_jaccard():
     assert jaccard_overlap("", "x") == 0.0
     assert jaccard_overlap("a b c", "a b c") == 1.0
     assert 0.0 < jaccard_overlap("a b c", "b c d") < 1.0
+
+
+# --- global (cross-finding) stall detection --------------------------------
+
+def _chain_exp(candidate, *, round, parent_sha, sha, finding_id="F-001",
+               eligible=True, objective=100.0, selected=False) -> Experiment:
+    """Convenience: an eligible, gate-passing experiment in a parent chain."""
+    return _exp(candidate, round=round, parent_sha=parent_sha, sha=sha,
+                finding_id=finding_id, eligible=eligible, objective=objective,
+                selected=selected)
+
+
+def test_global_signal_none_on_early_rounds():
+    # Only 2 experiments — below _GLOBAL_STALL_MIN_ELIGIBLE (3).
+    exps = [
+        _exp(0, round=0, parent_sha="root", sha="s0", objective=100.0,
+             selected=True),
+        _exp(0, round=1, parent_sha="s0", sha="s1", objective=90.0),
+    ]
+    sig = _signals(exps)
+    assert sig["global"] is None
+
+
+def test_global_stall_triggers_when_no_recent_improvements():
+    # 4 rounds, each a different finding (simulating the bypass pattern).
+    # r0: improvement (90, selected).  r0 is outside the 3-round window
+    # when we wake at r3, so it doesn't count.
+    # r1-r3: all neutral (same objective as parent), each a new finding.
+    fids = [f"F-{i+1}" for i in range(4)]
+    findings = [_finding(fid=fids[i], round=i) for i in range(4)]
+    exps = [
+        _chain_exp(0, round=0, parent_sha="root", sha="s0",
+                   finding_id=fids[0], objective=90.0, selected=True),
+        _chain_exp(0, round=1, parent_sha="s0", sha="s1",
+                   finding_id=fids[1], objective=90.0, selected=True),
+        _chain_exp(0, round=2, parent_sha="s1", sha="s2",
+                   finding_id=fids[2], objective=90.0),
+        _chain_exp(0, round=3, parent_sha="s2", sha="s3",
+                   finding_id=fids[3], objective=90.0),
+    ]
+    sig = _signals(exps, findings=findings)
+    g = sig["global"]
+    assert g is not None
+    assert g["recent_improvements"] == 0
+    assert g["recent_neutral"] == 3
+    assert g["policy_signals"]["global_stall"]["active"] is True
+    assert g["policy_signals"]["regression_run"]["active"] is False
+
+
+def test_global_stall_does_not_trigger_with_recent_improvement():
+    # 4 rounds; the most recent one is an improvement.
+    # r0: 90 (baseline, outside window). r1-r2: 90 (neutral).
+    # r3: 80 (improvement, inside window).
+    fids = [f"F-{i+1}" for i in range(4)]
+    findings = [_finding(fid=fids[i], round=i) for i in range(4)]
+    exps = [
+        _chain_exp(0, round=0, parent_sha="root", sha="s0",
+                   finding_id=fids[0], objective=90.0, selected=True),
+        _chain_exp(0, round=1, parent_sha="s0", sha="s1",
+                   finding_id=fids[1], objective=90.0, selected=True),
+        _chain_exp(0, round=2, parent_sha="s1", sha="s2",
+                   finding_id=fids[2], objective=90.0),
+        _chain_exp(0, round=3, parent_sha="s2", sha="s3",
+                   finding_id=fids[3], objective=80.0),  # improvement
+    ]
+    sig = _signals(exps, findings=findings)
+    g = sig["global"]
+    assert g is not None
+    assert g["recent_improvements"] == 1
+    assert g["policy_signals"]["global_stall"]["active"] is False
+
+
+def test_regression_run_triggers():
+    # 5 rounds; 3 regressions and 0 improvements in the window (r2-r4).
+    # r0-r1 are improvements (outside window when waking at r4).
+    fids = [f"F-{i+1}" for i in range(5)]
+    findings = [_finding(fid=fids[i], round=i) for i in range(5)]
+    exps = [
+        _chain_exp(0, round=0, parent_sha="root", sha="s0",
+                   finding_id=fids[0], objective=100.0, selected=True),
+        _chain_exp(0, round=1, parent_sha="s0", sha="s1",
+                   finding_id=fids[1], objective=90.0, selected=True),
+        _chain_exp(0, round=2, parent_sha="s1", sha="s2",
+                   finding_id=fids[2], objective=90.0, selected=True),
+        _chain_exp(0, round=3, parent_sha="s2", sha="s3",
+                   finding_id=fids[3], objective=100.0),  # regression
+        _chain_exp(0, round=4, parent_sha="s3", sha="s4",
+                   finding_id=fids[4], objective=110.0),  # regression
+    ]
+    sig = _signals(exps, findings=findings)
+    g = sig["global"]
+    assert g is not None
+    assert g["recent_regressions"] == 2
+    assert g["recent_improvements"] == 0
+    # Only 2 regressions but window=3, so regression_run (needs 3) is False.
+    assert g["policy_signals"]["regression_run"]["active"] is False
+    assert g["policy_signals"]["global_stall"]["active"] is True
+
+
+def test_regression_run_triggers_with_three():
+    # 6 rounds; 3 regressions in the window (r3-r5).
+    fids = [f"F-{i+1}" for i in range(6)]
+    findings = [_finding(fid=fids[i], round=i) for i in range(6)]
+    exps = [
+        _chain_exp(0, round=0, parent_sha="root", sha="s0",
+                   finding_id=fids[0], objective=100.0, selected=True),
+        _chain_exp(0, round=1, parent_sha="s0", sha="s1",
+                   finding_id=fids[1], objective=90.0, selected=True),
+        _chain_exp(0, round=2, parent_sha="s1", sha="s2",
+                   finding_id=fids[2], objective=90.0, selected=True),
+        _chain_exp(0, round=3, parent_sha="s2", sha="s3",
+                   finding_id=fids[3], objective=100.0),  # regression
+        _chain_exp(0, round=4, parent_sha="s3", sha="s4",
+                   finding_id=fids[4], objective=110.0),  # regression
+        _chain_exp(0, round=5, parent_sha="s4", sha="s5",
+                   finding_id=fids[5], objective=120.0),  # regression
+    ]
+    sig = _signals(exps, findings=findings)
+    g = sig["global"]
+    assert g is not None
+    assert g["recent_regressions"] == 3
+    assert g["policy_signals"]["regression_run"]["active"] is True
+    assert g["policy_signals"]["global_stall"]["active"] is True
+
+
+def test_global_signal_collects_mechanisms():
+    # Findings carry mechanisms; global signal should surface the top ones.
+    f1 = Finding(id="F-1", question="q1",
+                 mechanisms=("invariant-hoisting", "cache"),
+                 code_regions=(), state="active",
+                 created_round=0, last_touched_round=0)
+    f2 = Finding(id="F-2", question="q2",
+                 mechanisms=("branch-specialization",),
+                 code_regions=(), state="active",
+                 created_round=1, last_touched_round=1)
+    exps = [
+        _chain_exp(0, round=0, parent_sha="root", sha="s0",
+                   finding_id="F-1", objective=100.0, selected=True),
+        _chain_exp(0, round=1, parent_sha="s0", sha="s1",
+                   finding_id="F-2", objective=100.0),
+        _chain_exp(0, round=2, parent_sha="s1", sha="s2",
+                   finding_id="F-1", objective=100.0),
+        _chain_exp(0, round=3, parent_sha="s2", sha="s3",
+                   finding_id="F-1", objective=100.0),
+    ]
+    sig = _signals(exps, findings=[f1, f2])
+    g = sig["global"]
+    assert g is not None
+    assert "invariant-hoisting" in g["recent_mechanisms"]
+    assert "cache" in g["recent_mechanisms"]
+    assert "branch-specialization" in g["recent_mechanisms"]
+
+
+def test_global_signal_bypassed_by_new_findings_per_round():
+    # This is the core scenario from the omilrec run: each round opens a new
+    # finding, so per-finding signals never fire, but the global signal does.
+    # 5 rounds: r0 is the baseline improvement (outside the 3-round window
+    # when waking at r4). r1-r4: all neutral, new finding each.
+    fids = [f"F-{i+1}" for i in range(5)]
+    findings = [_finding(fid=fids[i], round=i) for i in range(5)]
+    exps = [
+        _chain_exp(0, round=0, parent_sha="root", sha="s0",
+                   finding_id=fids[0], objective=100.0, selected=True),
+    ]
+    parent = "s0"
+    obj = 90.0
+    for i in range(1, 5):
+        sha = f"s{i}"
+        exps.append(_chain_exp(0, round=i, parent_sha=parent, sha=sha,
+                               finding_id=fids[i], objective=obj))
+        parent = sha
+    sig = _signals(exps, findings=findings)
+    # Per-finding: each finding has 1 experiment → mechanism_challenge inactive.
+    for entry in sig["findings"]:
+        assert entry["policy_signals"]["mechanism_challenge"]["active"] is False
+    # Global: 0 improvements in the window → global_stall active.
+    g = sig["global"]
+    assert g is not None
+    assert g["policy_signals"]["global_stall"]["active"] is True
+    assert g["recent_neutral"] >= 3

@@ -935,6 +935,10 @@ def _render_state_header(state: WorkingState, signals: dict | None) -> str:
             for k, v in (entry.get("policy_signals") or {}).items():
                 if (v or {}).get("active"):
                     active.append(f"{entry['id']}:{k}")
+        g = signals.get("global") or {}
+        for k, v in (g.get("policy_signals") or {}).items():
+            if (v or {}).get("active"):
+                active.append(f"global:{k}")
     lines = ["Working state (your current epistemic position):"]
     lines.append(f"  phase={state.phase.value}  "
                  f"verification={state.verification_status.value}"
@@ -1407,6 +1411,19 @@ class ProposerAgent:
                         f"finding {entry['id']} shows repeated eligible-neutral "
                         "attempts — consider challenging the mechanism or reframing")
                     break
+            # Cross-finding global stall: cannot be bypassed by opening a
+            # fresh Finding each round (per-finding signals can).
+            g = signals.get("global") or {}
+            gps = g.get("policy_signals") or {}
+            if (gps.get("global_stall") or {}).get("active"):
+                mechs = ", ".join((g.get("recent_mechanisms") or [])[:5])
+                notes.append(
+                    f"GLOBAL STALL: {g.get('recent_improvements', 0)} "
+                    f"improvements in last {g.get('recent_window', 0)} rounds. "
+                    f"Mechanisms tried: {mechs}. Reframe to a different "
+                    "mechanism family or abandon — do not submit another "
+                    "variant of the same approach."
+                )
         return "; ".join(notes) if notes else None
 
 
