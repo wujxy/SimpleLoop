@@ -265,6 +265,8 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             )
 
         inflight = _load_inflight(ctx.run_dir)
+        abstention = None
+        deliberation_telemetry = None
         if inflight is not None:
             if inflight.get("round_id") != round_id:
                 raise ValueError(
@@ -303,39 +305,63 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         else:
             proposal_result = _next_proposals(
                 ctx, static_proposals, round_id, parent_sha)
-            proposals_batch = [p.instruction for p in proposal_result.proposals]
-            finding_ids = (
-                ctx.memory_service.resolve_targets(
-                    proposal_result.proposals, round_id=round_id,
+            _write_proposer_trace(ctx, round_id, proposal_result)
+            deliberation_telemetry = proposal_result.deliberation_telemetry
+            if proposal_result.abstained:
+                # Zero-candidate round: the Scientist judged no experiment
+                # worth its execution cost. Skip the executor entirely and
+                # record the abstention so --continue counts the round as
+                # consumed and the next round can see why nothing ran.
+                abstention = {
+                    "reason": proposal_result.abstain_reason,
+                    "blocking_unknown": proposal_result.abstain_blocking_unknown,
+                }
+                print(f"[{stamp()}] proposer abstained round {round_id + 1}: "
+                      f"{proposal_result.abstain_reason}", flush=True)
+                candidates = []
+                journal = None
+            else:
+                abstention = None
+                proposals_batch = [p.instruction for p in proposal_result.proposals]
+                finding_ids = (
+                    ctx.memory_service.resolve_targets(
+                        proposal_result.proposals, round_id=round_id,
+                    )
+                    if ctx.memory_service is not None
+                    else [None] * len(proposals_batch)
                 )
-                if ctx.memory_service is not None
-                else [None] * len(proposals_batch)
-            )
-            proposals_meta = [
-                {"instruction": inst, "finding_id": fid}
-                for inst, fid in zip(proposals_batch, finding_ids)
-            ]
-            journal = _InflightJournal(
-                ctx.run_dir / INFLIGHT_NAME,
-                meta={
-                    "round_id": round_id,
-                    "parent_sha": parent_sha,
-                    "proposals": proposals_meta,
-                })
-            try:
-                candidates = ctx.execution_backend.run_candidates(
-                    proposals=proposals_batch, round_id=round_id,
-                    parent_sha=parent_sha, journal=journal,
-                    finding_ids=finding_ids)
-            except InfraRoundError as exc:
-                # The round is not consumed: inflight_round.json stays on
-                # disk so --continue can resume; exit for human recovery.
-                print(f"[{stamp()}] {exc}", flush=True)
-                print(f"[{stamp()}] round {round_id + 1} not recorded; "
-                      "fix the infrastructure issue and re-run with "
-                      "--continue (or delete inflight_round.json to "
-                      "re-propose).", flush=True)
-                return _summary(ctx, run_dir_path)
+                proposals_meta = [
+                    {
+                        "instruction": prop.instruction,
+                        "finding_id": fid,
+                        "evidence_refs": list(prop.evidence_refs),
+                        "material_difference": prop.material_difference,
+                    }
+                    for prop, fid in zip(
+                        proposal_result.proposals, finding_ids,
+                    )
+                ]
+                journal = _InflightJournal(
+                    ctx.run_dir / INFLIGHT_NAME,
+                    meta={
+                        "round_id": round_id,
+                        "parent_sha": parent_sha,
+                        "proposals": proposals_meta,
+                    })
+                try:
+                    candidates = ctx.execution_backend.run_candidates(
+                        proposals=proposals_batch, round_id=round_id,
+                        parent_sha=parent_sha, journal=journal,
+                        finding_ids=finding_ids)
+                except InfraRoundError as exc:
+                    # The round is not consumed: inflight_round.json stays on
+                    # disk so --continue can resume; exit for human recovery.
+                    print(f"[{stamp()}] {exc}", flush=True)
+                    print(f"[{stamp()}] round {round_id + 1} not recorded; "
+                          "fix the infrastructure issue and re-run with "
+                          "--continue (or delete inflight_round.json to "
+                          "re-propose).", flush=True)
+                    return _summary(ctx, run_dir_path)
         _finalize_candidates(ctx, candidates)
         if static_proposals is not None:
             # Controlled-experiment rule: hard gates alone decide, so a
@@ -349,9 +375,10 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 ctx.metrics_schema,
                 prior_metrics=prior_metrics,
             )
-        _print_round_performance(
-            round_id, candidates, ctx.metrics_schema, prior_metrics,
-        )
+        if abstention is None:
+            _print_round_performance(
+                round_id, candidates, ctx.metrics_schema, prior_metrics,
+            )
         selected_candidate = winner.get("candidate") if winner else None
         selected_sha = winner.get("sha") if winner else None
         for candidate in candidates:
@@ -362,15 +389,20 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                   f"{selected_sha[:10]}", flush=True)
             prior_metrics = winner.get("metrics") or prior_metrics
         else:
-            reason = ("candidate rejected by hard gates"
-                      if static_proposals is not None
-                      else "no eligible candidate improved the incumbent")
+            if abstention is not None:
+                reason = "proposer abstained (no experiment worth its cost)"
+            else:
+                reason = ("candidate rejected by hard gates"
+                          if static_proposals is not None
+                          else "no eligible candidate improved the incumbent")
             print(f"[{stamp()}] {reason}; parent stays {parent_sha[:10]}",
                   flush=True)
         ctx.store.append_generation(
             round_id, parent_sha=parent_sha,
             selected_candidate=selected_candidate, selected_sha=selected_sha,
             candidates=candidates,
+            abstention=abstention,
+            deliberation_telemetry=deliberation_telemetry,
             telemetry=ctx.telemetry.snapshot(persist=True),
         )
         # Update the Finding Archive with the round's outcomes: bump
@@ -381,7 +413,8 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             ctx.memory_service.link_completed_experiments(
                 round_id=round_id, candidates=candidates,
             )
-        journal.clear()
+        if journal is not None:
+            journal.clear()
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         parent_sha = next_base_sha
 
@@ -525,6 +558,26 @@ def _starting_state(ctx: RunContext, continue_run: bool,
     if last_selected is None:
         prior_metrics = baseline_metrics
     return start_round, parent_sha, prior_metrics
+
+
+def _write_proposer_trace(ctx: RunContext, round_id: int,
+                          proposal_result: proposer_mod.ProposerResult) -> None:
+    """Persist the round's non-authoritative proposer trajectory. This is
+    behavioral telemetry for offline analysis only — it is NEVER injected into
+    a future round's startup pack and carries no fact authority over the
+    immutable Experiment Ledger."""
+    trace = getattr(proposal_result, "trace", None)
+    if not trace:
+        return  # static-proposal mode produces no deliberation trace
+    trace_dir = ctx.run_dir / "proposer_traces"
+    try:
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        (trace_dir / f"r{round_id}.json").write_text(
+            json.dumps(trace, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"[{stamp()}] proposer trace write skipped: {exc}", flush=True)
 
 
 def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,

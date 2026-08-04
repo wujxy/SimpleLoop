@@ -41,10 +41,19 @@ ResearchTarget = Union[ExistingFindingTarget, NewFindingTarget]
 @dataclass(frozen=True)
 class ResearchProposal:
     """One structured proposal: an executor instruction plus the research
-    target that gives it scientific meaning."""
+    target that gives it scientific meaning.
+
+    ``evidence_refs`` and ``material_difference`` are round-local justification
+    surfaced by the Proposer's deliberation: pointers to evidence actually
+    examined this round, and (when the proposal resembles a prior one) what
+    makes it materially different. They never become Ledger facts; the Loop
+    records them only in the non-authoritative proposer trace.
+    """
 
     instruction: str
     research_target: ResearchTarget
+    evidence_refs: tuple[str, ...] = ()
+    material_difference: str | None = None
 
 
 @dataclass(frozen=True)

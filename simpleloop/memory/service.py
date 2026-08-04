@@ -31,6 +31,7 @@ from .retrieval import (
     diverse_experiment_search,
     rank_findings,
 )
+from .signals import compute_deliberation_signals
 
 
 MEMORY_TOOL_CHEATSHEET = (
@@ -95,13 +96,35 @@ class MemoryService:
         current_round: int,
         recent_rounds: int = 2,
     ) -> str:
-        experiments = self.load_experiments()
+        history = read_history(self.history_path)
+        experiments = build_experiments(history)
+        findings = self.load_findings()
         frontier = compute_frontier(
-            self.load_findings(),
+            findings,
             experiments,
             current_round=current_round,
             dormancy_rounds=self.dormancy_rounds,
             editable_prefixes=tuple(editable or ()),
+        )
+        abstentions = [
+            {
+                "round": record.get("round", 0),
+                "reason": (record.get("abstention") or {}).get("reason"),
+                "blocking_unknown": (record.get("abstention") or {}).get(
+                    "blocking_unknown"
+                ),
+            }
+            for record in history
+            if isinstance(record, dict) and record.get("abstention")
+        ][-recent_rounds:]
+        objective = (self.metrics_schema or {}).get("objective") or {}
+        signals = compute_deliberation_signals(
+            findings,
+            experiments,
+            current_round=current_round,
+            hints_present=bool(hints),
+            objective_key=objective.get("key"),
+            lower_is_better=bool(objective.get("lower_is_better")),
         )
         return build_startup_pack(
             goal=goal,
@@ -115,6 +138,8 @@ class MemoryService:
             frontier=frontier,
             recent_rounds=recent_rounds,
             tool_cheatsheet=MEMORY_TOOL_CHEATSHEET,
+            recent_abstentions=abstentions,
+            signals=signals,
         )
 
     # --- Write path: target resolution & experiment linking ---------------

@@ -724,7 +724,9 @@ def _run_loop_integration(
             assert "annotations" not in journal.meta
             assert journal.meta["proposals"] == [
                 {"instruction": "test another sparse gather",
-                 "finding_id": "F-001"},
+                 "finding_id": "F-001",
+                 "evidence_refs": [],
+                 "material_difference": None},
             ]
             assert finding_ids == ["F-001"]
             return fake_run_candidates()

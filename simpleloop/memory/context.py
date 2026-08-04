@@ -23,6 +23,8 @@ def build_startup_pack(
     frontier: dict,
     recent_rounds: int = 2,
     tool_cheatsheet: str = "",
+    recent_abstentions: list[dict] | None = None,
+    signals: dict | None = None,
 ) -> str:
     """Return the plain-text user-turn content the Proposer wakes up with."""
     hints_block = ""
@@ -33,6 +35,8 @@ def build_startup_pack(
             f"{bullets}\n"
         )
     dashboard = _render_dashboard(experiments, recent_rounds=recent_rounds)
+    abstentions_block = _render_abstentions(recent_abstentions)
+    signals_block = _render_signals(signals)
     frontier_text = _render_frontier(frontier)
     tools_block = (
         f"\nMemory tools available (see the Runtime contract for schemas):\n"
@@ -51,15 +55,76 @@ Frozen paths: {json.dumps(frozen, ensure_ascii=False)}
 
 Recent factual dashboard (last {recent_rounds} round(s), authoritative harness output):
 {dashboard}
-
+{abstentions_block}{signals_block}
 Research frontier (open questions and search coverage — derived, not a summary):
 {frontier_text}
 {tools_block}
-Submit exactly {candidates_per_round} nonblank executable proposal(s).
+Submit between 1 and {candidates_per_round} proposal(s) — each one an
+experiment the evidence makes worth its execution cost; the budget is a
+ceiling, not a quota. If no direction clears that bar, abandon the round
+(zero proposals) rather than forcing a weak bet.
 Every candidate begins from the accepted revision above. For each proposal
 declare its research target: either an existing finding (F-NNN) or a new
 question you are opening.
 """
+
+
+def _render_signals(signals: dict | None) -> str:
+    """Render deliberation signals — ledger facts and threshold-derived policy
+    nudges, explicitly NOT scientific conclusions. Omitted entirely on the
+    first round or when no finding has any experiment yet."""
+    if not signals or signals.get("first_round"):
+        return ""
+    entries = signals.get("findings") or []
+    if not entries:
+        return ""
+    lines = [
+        "",
+        "Deliberation signals (ledger facts + harness policy signals, NOT "
+        "scientific conclusions):",
+    ]
+    for entry in entries:
+        facts = entry.get("facts") or {}
+        sig = entry.get("policy_signals") or {}
+        lines.append(
+            f"  {entry['id']}  attempts={facts.get('attempts', 0)}  "
+            f"impl_failures={facts.get('implementation_failures', 0)}  "
+            f"eligible_imp/neutral/reg="
+            f"{facts.get('eligible_improvements', 0)}/"
+            f"{facts.get('eligible_neutral', 0)}/"
+            f"{facts.get('eligible_regressions', 0)}  "
+            f"selected={facts.get('selected', 0)}"
+        )
+        q = (entry.get("question") or "").strip()
+        if q:
+            lines.append(f"    Q: {q}")
+        active = {k: v for k, v in sig.items() if (v or {}).get("active")}
+        if active:
+            tags = ", ".join(
+                f"{k} ({v['rule']})" for k, v in active.items()
+            )
+            lines.append(f"    policy signal: {tags}")
+    return "\n".join(lines) + "\n"
+
+
+def _render_abstentions(recent_abstentions: list[dict] | None) -> str:
+    """Surface recent zero-candidate rounds as plain facts, so the next
+    Scientist sees which directions were judged not worth executing (and
+    does not mistake silence for an unexplored gap)."""
+    if not recent_abstentions:
+        return ""
+    lines = [
+        "",
+        "Recent abstentions (rounds declined as not worth an experiment):",
+    ]
+    for entry in recent_abstentions:
+        round_no = int(entry.get("round", 0)) + 1
+        reason = str(entry.get("reason") or "").strip()
+        lines.append(f"  round {round_no}: {reason}")
+        unknown = (entry.get("blocking_unknown") or "").strip()
+        if unknown:
+            lines.append(f"    blocking unknown: {unknown}")
+    return "\n".join(lines) + "\n"
 
 
 def _render_dashboard(experiments, *, recent_rounds: int) -> str:

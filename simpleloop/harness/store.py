@@ -66,11 +66,18 @@ class Store:
                           selected_candidate: int | None,
                           selected_sha: str | None,
                           candidates: list[dict],
+                          abstention: dict | None = None,
+                          deliberation_telemetry: dict | None = None,
                           telemetry: dict | None = None) -> None:
         """Record a self-loop generation with multiple candidate attempts.
 
         Every candidate row carries a stable ``experiment_id`` (``r<N>c<M>``)
         and, when the proposal declared a research target, its ``finding_id``.
+        ``abstention`` (``reason`` + optional ``blocking_unknown``) marks a
+        zero-candidate round the Proposer deliberately abstained from.
+        ``deliberation_telemetry`` records behavioral facts only (steps, action
+        counts, verification outcome); the non-authoritative full trajectory
+        lives in proposer_traces/, never here.
         """
         normalized = []
         for i, c in enumerate(candidates):
@@ -106,6 +113,13 @@ class Store:
             "candidates": normalized,
             "telemetry": dict(telemetry or {}),
         }
+        if abstention is not None:
+            record["abstention"] = {
+                "reason": str(abstention.get("reason") or ""),
+                "blocking_unknown": abstention.get("blocking_unknown"),
+            }
+        if deliberation_telemetry:
+            record["deliberation_telemetry"] = dict(deliberation_telemetry)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

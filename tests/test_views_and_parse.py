@@ -52,6 +52,74 @@ def test_store_persists_only_factual_candidate_fields(tmp_path: Path):
                 & row["candidates"][0].keys())
 
 
+def test_append_generation_records_abstained_round(tmp_path: Path):
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+
+    store.append_generation(
+        0,
+        parent_sha="parent",
+        selected_candidate=None,
+        selected_sha=None,
+        candidates=[],
+        abstention={
+            "reason": "No mechanism had direct evidence.",
+            "blocking_unknown": "whether QPDF is still hot",
+        },
+    )
+
+    row = store.history()[0]
+    assert row["candidates"] == []
+    assert row["selected_sha"] is None
+    assert row["base_sha"] == "parent"
+    assert row["abstention"] == {
+        "reason": "No mechanism had direct evidence.",
+        "blocking_unknown": "whether QPDF is still hot",
+    }
+
+
+def test_append_generation_omits_abstention_key_for_normal_round(
+    tmp_path: Path,
+):
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+
+    store.append_generation(
+        0,
+        parent_sha="parent",
+        selected_candidate=None,
+        selected_sha=None,
+        candidates=[],
+    )
+
+    assert "abstention" not in store.history()[0]
+
+
+def test_append_generation_records_deliberation_telemetry(tmp_path: Path):
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+    store.append_generation(
+        0,
+        parent_sha="parent",
+        selected_candidate=None,
+        selected_sha=None,
+        candidates=[],
+        deliberation_telemetry={
+            "steps": 7, "tool_calls": 4, "verification_status": "supported",
+            "abandoned": False, "protocol_repairs": 1,
+        },
+    )
+    row = store.history()[0]
+    assert row["deliberation_telemetry"]["steps"] == 7
+    assert row["deliberation_telemetry"]["verification_status"] == "supported"
+
+
+def test_append_generation_omits_telemetry_when_absent(tmp_path: Path):
+    store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
+    store.append_generation(
+        0, parent_sha="parent", selected_candidate=None,
+        selected_sha=None, candidates=[],
+    )
+    assert "deliberation_telemetry" not in store.history()[0]
+
+
 def test_candidate_without_current_gate_facts_is_ineligible():
     incomplete = {
         "sha": "old",
