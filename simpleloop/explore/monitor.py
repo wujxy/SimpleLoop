@@ -54,9 +54,14 @@ FAMILY_OVEREXPLOITED_ATTEMPTS = 5
 FAMILY_FEASIBILITY_FAILURES = 2
 
 # global
-GLOBAL_STALL_CONSECUTIVE_NO_IMPROVE_ROUNDS = 3
+GLOBAL_STALL_CONSECUTIVE_NO_IMPROVE_ROUNDS = 2
 GLOBAL_REGRESSION_MIN = 3
 GLOBAL_RECENT_WINDOW = 5
+
+# An improvement smaller than this fraction of the parent objective does not
+# reset the stall counter — it decays by one instead. Prevents marginal
+# improvements from masking real stagnation.
+MARGINAL_IMPROVEMENT_FRACTION = 0.02
 
 # how many recent rounds a family reports in recent_rounds
 FAMILY_RECENT_ROUNDS = 5
@@ -358,26 +363,31 @@ def _consecutive_no_improve(
     exps_sorted: list[Experiment],
     cls_by_eid: dict[str, ObjectiveClassification],
 ) -> int:
-    """Walk attempts newest-first; stop at the first improvement.
+    """Walk attempts newest-first; stop at the first significant improvement.
 
-    ``unclassified`` attempts (unparseable parent) are *skipped* — they neither
-    reset nor increment the run. Everything else walked (neutral, regression,
-    non-eligible/gate-failed) counts +1. Gaps across rounds do not reset.
+    A marginal improvement (< MARGINAL_IMPROVEMENT_FRACTION of parent) decays
+    the counter by one instead of stopping. ``unclassified`` attempts
+    (unparseable parent) are *skipped* — they neither reset nor increment the
+    run. Everything else walked (neutral, regression, non-eligible/gate-failed)
+    counts +1. Gaps across rounds do not reset.
     """
     count = 0
     for e in reversed(exps_sorted):
         c = cls_by_eid.get(e.experiment_id)
         if c is None:
-            # No classification (analysis ineligible) — treat as neutral-ish
-            # no-improve but only when not an improvement we cannot see.
             count += 1
             continue
         if c.kind == KIND_IMPROVEMENT:
+            if (c.objective is not None and c.parent_objective
+                    and abs(c.parent_objective) > 1e-12):
+                frac = abs(c.objective - c.parent_objective) / abs(c.parent_objective)
+                if frac < MARGINAL_IMPROVEMENT_FRACTION:
+                    count = max(0, count - 1)
+                    continue
             break
         if c.kind == KIND_NEUTRAL or c.kind == KIND_REGRESSION:
             count += 1
             continue
-        # unclassified: skip without affecting the run.
         continue
     return count
 
@@ -420,9 +430,11 @@ def _build_global_health(
         for m in finding_mechs.get(c.finding_id or "", ()):
             mechs_seen[m] = mechs_seen.get(m, 0) + 1
 
-    # Run-length walk over rounds (latest first, stop at first round with any
-    # classifiable improvement). Rounds with no classifiable experiment are
-    # skipped (neither reset nor increment).
+    # Run-length walk over rounds (latest first). A *significant* improvement
+    # (>= MARGINAL_IMPROVEMENT_FRACTION of the parent objective) stops the walk.
+    # A *marginal* improvement decays the counter by one instead of stopping —
+    # it does not reset the stall, but it is not fully ignored either. Rounds
+    # with no classifiable experiment are skipped (neither reset nor increment).
     by_round: dict[int, list[ObjectiveClassification]] = {}
     for c in classifications:
         if c.kind in (KIND_IMPROVEMENT, KIND_NEUTRAL, KIND_REGRESSION):
@@ -431,7 +443,20 @@ def _build_global_health(
     for r in sorted(by_round.keys(), reverse=True):
         kinds = [c.kind for c in by_round[r]]
         if KIND_IMPROVEMENT in kinds:
-            break
+            # Check whether the best improvement this round is marginal.
+            best_frac = 0.0
+            for c in by_round[r]:
+                if (c.kind == KIND_IMPROVEMENT
+                        and c.objective is not None
+                        and c.parent_objective
+                        and abs(c.parent_objective) > 1e-12):
+                    frac = abs(c.objective - c.parent_objective) / abs(c.parent_objective)
+                    best_frac = max(best_frac, frac)
+            if best_frac >= MARGINAL_IMPROVEMENT_FRACTION:
+                break  # significant improvement — stop the walk
+            # marginal improvement — decay but continue
+            consecutive_rounds = max(0, consecutive_rounds - 1)
+            continue
         consecutive_rounds += 1
 
     top_mechs = sorted(

@@ -1,25 +1,29 @@
-"""Proposer Scientist: a metacognition-driven deliberation runtime.
+"""Proposer Scientist: a generative-basis-driven idea lifecycle runtime.
 
-The Scientist moves through one session in three frames of mind — FRAME,
-RESEARCH, DECIDE — carrying a round-local epistemic state. The 4+2 cognitive
-basis (C1 Research Target, C2 Evidence Discipline, C3 Evidence-Guided Inquiry,
-C4 Research Decision; X1 Challenge/Reframe, X2 Proposal Verification) is
-internalized in the prompt; this module is the machinery that enforces it:
+The Scientist moves through one session in three phases — GENERATE, VALIDATE,
+COMMIT — carrying a round-local epistemic state. The Generative Basis (G1–G9)
+is internalized in the prompt as thinking operations that help produce ideas;
+this module is the machinery that enforces the lifecycle:
 
-- submit cannot bypass real evidence (evidence-basis guard, verification must
-  be backed by references actually examined this round);
-- fixated failure cannot bypass re-judgment (deterministic deliberation
-  signals distinguish feasibility from mechanism stalls; near-duplicate
-  proposals must declare a material difference);
-- how the scientific explanation is formed remains the Scientist's own job.
+- submit cannot bypass real evidence (evidence-basis guard: at least one
+  decision-relevant fact must be examined this round before submitting);
+- a failed direction cannot be retried verbatim (reject_candidate opens a new
+  Generate episode: it compresses the failed direction into a taboo record,
+  truncates the conversation history, and re-enters Generate with the failure
+  as new input);
+- a submit that lands in a taboo family is refused unless it cites new evidence
+  examined this round that distinguishes it from the failed attempts;
+- how the idea is generated remains the Scientist's own job — the Generative
+  Basis never constrains what may be proposed.
 
-Doc reference: docs/simpleloop_scientist_deliberation_policy_design.md.
+Doc reference: docs/generator.md (Generative Basis).
 Continuity across rounds is supplied by the persistent Experiment Ledger,
 Finding Archive, and Frontier — NOT by this runtime's round-local state.
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -39,7 +43,8 @@ from ..memory.models import (
     ResearchProposal,
 )
 from ..explore.classify import jaccard_overlap
-from ..explore.models import ExploreReport
+from ..explore.models import ExploreReport, SEVERITY_CHALLENGE
+from ..explore.families import normalize_region, _bucket_path
 from ..explore.render import (
     render_challenge_repair_message,
     render_explore_for_state_header,
@@ -71,19 +76,33 @@ class ProposerResult:
     trace: dict = field(default_factory=dict)
 
 
-# --- Cognitive state machine ----------------------------------------------
+@dataclass(frozen=True)
+class BranchResult:
+    """One hypothesis branch's research outcome.
 
-class ResearchPhase(str, Enum):
-    FRAME = "frame"
-    RESEARCH = "research"
-    DECIDE = "decide"
+    The branch researcher (cognitive element, C1-C4) runs the generate→validate
+    →commit lifecycle on a single confirmed hypothesis. It produces 0 or 1
+    proposals — 0 when the hypothesis failed validation (abandoned or rejected
+    without a surviving candidate), 1 when a candidate held.
+    """
+    hypothesis: object  # HypothesisCard
+    proposal: ResearchProposal | None = None
+    abandoned: bool = False
+    abandon_reason: str | None = None
+    usage: object = None
+    deliberation_telemetry: dict = field(default_factory=dict)
+    trace: dict = field(default_factory=dict)
+    # Novel directions discovered during research (for the future feedback loop;
+    # not yet wired back to the generator in this iteration).
+    novel_directions: list[str] = field(default_factory=list)
 
 
-class VerificationStatus(str, Enum):
-    NOT_STARTED = "not_started"
-    NEEDS_EVIDENCE = "needs_evidence"
-    SUPPORTED = "supported"
-    FAILED = "failed"
+# --- Idea lifecycle state machine ------------------------------------------
+
+class IdeaPhase(str, Enum):
+    GENERATE = "generate"
+    VALIDATE = "validate"
+    COMMIT = "commit"
 
 
 class ResearchProgress(str, Enum):
@@ -99,30 +118,44 @@ _RESEARCH_TOOL_ACTIONS = frozenset(
 
 # Actions legal in each phase.
 _LEGAL_ACTIONS = {
-    ResearchPhase.FRAME: _RESEARCH_TOOL_ACTIONS | {"frame_research"},
-    ResearchPhase.RESEARCH: _RESEARCH_TOOL_ACTIONS | {"assess_research"},
-    ResearchPhase.DECIDE: {
-        "continue_research", "reframe_research", "begin_verification",
-        "submit_proposals", "abandon_direction",
+    IdeaPhase.GENERATE: _RESEARCH_TOOL_ACTIONS | {"generate"},
+    IdeaPhase.VALIDATE: _RESEARCH_TOOL_ACTIONS | {"assess_candidate"},
+    IdeaPhase.COMMIT: {
+        "reject_candidate", "submit_proposals", "abandon_round",
     },
 }
 
 # Where each control action lands.
 _TRANSITION_TARGET = {
-    ("frame", "frame_research"): ResearchPhase.RESEARCH,
-    ("research", "assess_research"): ResearchPhase.DECIDE,
-    ("decide", "continue_research"): ResearchPhase.RESEARCH,
-    ("decide", "reframe_research"): ResearchPhase.FRAME,
-    ("decide", "begin_verification"): ResearchPhase.RESEARCH,
-    ("decide", "submit_proposals"): None,   # terminal
-    ("decide", "abandon_direction"): None,  # terminal, zero proposals
+    ("generate", "generate"): IdeaPhase.VALIDATE,
+    ("validate", "assess_candidate"): IdeaPhase.COMMIT,
+    ("commit", "reject_candidate"): IdeaPhase.GENERATE,  # new episode
+    ("commit", "submit_proposals"): None,                # terminal
+    ("commit", "abandon_round"): None,                   # terminal, zero proposals
 }
 
 # Tunables.
-_STALL_THRESHOLD = 4          # RESEARCH tool calls without assess -> nudge
+_STALL_THRESHOLD = 4          # tool calls without assess -> nudge
 _JACCARD_DUP_THRESHOLD = 0.8  # soft near-duplicate nudge
 _DUP_WINDOW = 10              # how many recent ledger proposals to consider
 _MAX_EVIDENCE_REFS = 5        # cap shown in the state header
+
+
+@dataclass
+class TabooRecord:
+    """A failed direction, compressed. The taboo is on the mechanism family
+    (region + mechanism bucket), not the instruction text, so rewording does
+    not reset it. ``evidence_summary`` is the one fact that, had it been
+    known, might have saved the direction — shown to Generate as guidance."""
+
+    region: str
+    mechanism: str
+    reason: str
+    evidence_summary: str
+
+    @property
+    def family_id(self) -> str:
+        return f"{self.region}::{self.mechanism}"
 
 
 @dataclass
@@ -131,18 +164,17 @@ class WorkingState:
     to the Ledger or Finding archive. Drives control flow, guards, the compact
     state header, and the non-authoritative trace."""
 
-    phase: ResearchPhase = ResearchPhase.FRAME
-    verification_mode: bool = False
-    verification_status: VerificationStatus = VerificationStatus.NOT_STARTED
+    phase: IdeaPhase = IdeaPhase.GENERATE
     # Monotonic once True: the session has seen decision-relevant evidence
     # (from hints, history, or a tool call this round).
     evidence_basis: bool = False
-    # Arc-scoped counters (reset on each new frame/reframe).
+    # Arc-scoped counters (reset on each new Generate episode).
     tool_calls_this_arc: int = 0
-    research_steps_since_frame: int = 0
+    research_steps_since_generate: int = 0
     last_tool_fingerprint: str | None = None
     # Current judgment, rendered back each step.
-    research_question: str = ""
+    generative_operations: tuple[str, ...] = ()
+    candidate_directions: str = ""
     decision_relevant_unknown: str = ""
     current_judgment: str = ""
     current_information_goal: str = ""
@@ -153,21 +185,29 @@ class WorkingState:
     draft_resembles_history: bool = False
     # Evidence actually acquired this round (refs the Scientist may cite).
     session_evidence: set[str] = field(default_factory=set)
+    # Evidence acquired THIS round via a tool call (not startup-pack history).
+    # The taboo escape hatch requires new evidence, not a ref to something the
+    # startup pack already showed.
+    new_evidence: set[str] = field(default_factory=set)
+    # Taboo set: failed directions this round. A submit landing in a taboo
+    # family is refused unless it cites new evidence examined this round.
+    taboo_set: list[TabooRecord] = field(default_factory=list)
     # Telemetry / trace accumulation.
     action_log: list[dict] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     protocol_repairs: int = 0
     signals_fired: list[str] = field(default_factory=list)
     weakest_premise_log: str = ""
+    episode_count: int = 0  # how many Generate episodes this round
 
 
-def _legal_action_list(phase: ResearchPhase) -> str:
+def _legal_action_list(phase: IdeaPhase) -> str:
     return ", ".join(sorted(_LEGAL_ACTIONS[phase]))
 
 
 def _validate_phase_transition(
-    phase: ResearchPhase, action_name: str,
-) -> ResearchPhase | None:
+    phase: IdeaPhase, action_name: str,
+) -> IdeaPhase | None:
     """Return the next phase (or None for terminal), or raise ProposerError."""
     if action_name in _RESEARCH_TOOL_ACTIONS:
         return phase  # tools never change phase
@@ -196,84 +236,62 @@ _RESEARCH_PHASE_NOTE = (
     + render_research_tool_prompt()
 )
 
-_FRAME_ACTION_PROMPT = """Frame control action:
-- {"action":"frame_research","research_question":"...",
-  "decision_relevant_unknown":"...","known_evidence":["..."],
-  "working_inference":"...","next_information_goal":"...",
-  "alternative_explanations":["..."]}
-  Leave Frame for Research. research_question is the judgment whose answer
-  changes whether an experiment is worth spending; decision_relevant_unknown
-  is the single fact that would change that judgment. known_evidence is what
-  you directly read or observed (separate from inference). working_inference,
-  next_information_goal, alternative_explanations are optional.
+_GENERATE_ACTION_PROMPT = """Generate control action:
+- {"action":"generate","candidate_directions":"...",
+  "generative_operations":["G6","G2"],"decision_relevant_unknown":"...",
+  "known_evidence":["..."],"next_information_goal":"...",
+  "alternative_directions":["..."]}
+  Leave Generate for Validate. candidate_directions is the direction(s) you
+  want to take forward. generative_operations names the G1–G9 operations you
+  used (for traceability only — they do not constrain what you may propose).
+  decision_relevant_unknown is the single fact that would most change whether
+  this direction is worth an experiment. known_evidence is what you directly
+  read or observed. next_information_goal and alternative_directions are
+  optional.
 """
 
-_RESEARCH_ACTION_PROMPT = """Research control action:
-- {"action":"assess_research","current_judgment":"...",
+_VALIDATE_ACTION_PROMPT = """Validate control action:
+- {"action":"assess_candidate","current_judgment":"...",
   "supporting_evidence":["..."],"blocking_unknown":"...",
   "research_progress":"advancing|stalled|contradicted","draft_proposal":"...",
-  "verification":{"weakest_premise":"...","status":"supported|failed",
-                  "evidence_refs":["experiment:r3c0","source:src/foo.cc"]}}
-  Leave Research for Decide. State your judgment, what supports it, what still
-  blocks you, and whether you are advancing, stalled, or contradicted.
-  draft_proposal is optional. The optional "verification" block is how a
-  proposal becomes supported: status "supported" requires evidence_refs that
-  are real things you examined this round (at least one experiment: or source:;
-  a finding: alone is not enough). status "failed" means the premise did not
-  hold. Declaring status without real evidence_refs will be refused.
+  "weakest_premise":"...","evidence_refs":["experiment:r3c0","source:src/foo.cc"]}
+  Leave Validate for Commit. State your judgment of this candidate, what
+  supports it, what still blocks you, and whether you are advancing, stalled,
+  or contradicted. draft_proposal is optional. weakest_premise is the single
+  premise whose failure would sink the candidate. evidence_refs are real things
+  you examined this round (at least one experiment: or source:; a finding: alone
+  is not enough) — cite them so the runtime can confirm you actually looked.
 """
 
-_DECIDE_ACTION_PROMPT = """Decide control actions (phase transitions):
-- {"action":"continue_research","next_information_goal":"...",
-  "why_it_matters":"..."}
-  Return to Research when one decision-relevant unknown is still resolvable.
-- {"action":"reframe_research","what_failed":"...",
-  "new_research_question":"...","new_decision_relevant_unknown":"..."}
-  Return to Frame when the question itself was wrong or the direction keeps
-  failing. Reframing resets verification.
-- {"action":"begin_verification","draft_proposal":"...",
-  "weakest_premise":"...","verification_question":"...",
-  "next_information_goal":"..."}
-  When you have a concrete change worth testing, enter Research in
-  verification mode to test its weakest premise against source / Ledger /
-  metrics. This does NOT mark the proposal supported — only a later
-  assess_research with real evidence_refs does.
+_COMMIT_ACTION_PROMPT = """Commit control actions (phase transitions):
+- {"action":"reject_candidate","what_failed":"...",
+  "failed_mechanism":"...","failed_region":"...",
+  "evidence_summary":"...","new_information_goal":"..."}
+  The candidate failed validation. This OPENS A NEW GENERATE EPISODE: the
+  failed direction is compressed into a taboo record (region + mechanism),
+  the conversation history is truncated to the startup pack plus the taboo
+  summary, and you re-enter Generate with the failure as new input. Use this
+  to pivot to a genuinely different direction — do not retry the same family.
+  failed_mechanism and failed_region should match the candidate's mechanism
+  family so the taboo is enforceable.
+- {"action":"submit_proposals","proposals":[
+    {"instruction":"...",
+     "research_target":{"mode":"existing","finding_id":"F-NNN"},
+     "evidence_refs":["experiment:r3c0"],"material_difference":"..."},
+    {"instruction":"...",
+     "research_target":{"mode":"new","question":"...","mechanisms":["..."],
+     "code_regions":["..."]}}
+  ]}
+  Submit when a candidate holds. 1..N proposals — the budget is a ceiling, not
+  a quota. evidence_refs and material_difference are optional unless the
+  proposal resembles a prior one. Each proposal declares an existing finding
+  (mode=existing, F-NNN) or a new question (mode=new). There is NO annotations
+  field.
+- {"action":"abandon_round","reason":"...","blocking_unknown":"..."}
+  End the round with zero proposals when no direction clears the bar.
+  blocking_unknown is optional: the one fact that, had you known it, would
+  have changed the decision.
 """
-
-_TERMINAL_ACTION_PROMPT = (
-    "Terminal actions (only legal from Decide):\n"
-    '- {"action":"submit_proposals","proposals":[\n'
-    '    {"instruction":"...", '
-    '"research_target":{"mode":"existing","finding_id":"F-NNN"},'
-    '"evidence_refs":["experiment:r3c0"],"material_difference":"..."},\n'
-    '    {"instruction":"...", '
-    '"research_target":{"mode":"new","question":"...","mechanisms":["..."],'
-    '"code_regions":["..."]}}\n'
-    '  ],"challenge_response":{"triggered_policy":"...",'
-    '"stalled_family":"...","what_was_exhausted":"...",'
-    '"null_hypothesis":"...","why_this_is_not_same_family_variant":"...",'
-    '"why_worth_one_more_experiment":"...","evidence_refs":['
-    '"experiment:r3c0"]}}\n'
-    "  Submit only after a proposal is verified (assess_research with a "
-    "supported verification block backed by real evidence_refs). 1..N "
-    "proposals — the budget is a ceiling, not a quota. evidence_refs and "
-    "material_difference are optional unless the proposal resembles a prior "
-    "one. Each proposal declares an existing finding (mode=existing, F-NNN) "
-    "or a new question (mode=new). There is NO annotations field.\n"
-    "  challenge_response is OPTIONAL — but REQUIRED when Explore health "
-    "marks challenge_required (active family/global stagnation). It must "
-    "name the stalled family, the null hypothesis, why this proposal is not "
-    "another same-family variant, why one more experiment is worth its cost, "
-    "and real evidence_refs you examined this round (at least one "
-    "experiment:/source:). If you cannot honestly fill it, reframe_research "
-    "or abandon_direction instead. reframe_research and abandon_direction "
-    "never need a challenge_response.\n"
-    '- {"action":"abandon_direction","reason":"...",'
-    '"blocking_unknown":"..."}\n'
-    "  End the round with zero proposals when no experiment is worth its "
-    "cost. blocking_unknown is optional: the one fact that, had you known "
-    "it, would have changed the decision."
-)
 
 _RUNTIME_BOUNDARIES = """Runtime boundaries:
 - /source is the accepted revision, /repo is its read-only Git repository,
@@ -284,11 +302,10 @@ _RUNTIME_BOUNDARIES = """Runtime boundaries:
 """.strip()
 
 _BUDGET_REMINDER = (
-    "Research budget is nearly exhausted. Choose one of: verify and submit "
-    "the proposal the evidence justifies (only if its weakest premise is "
-    "backed by real evidence you examined); continue only if one concrete "
-    "unanswered question can still be resolved within budget; or abandon the "
-    "direction if no experiment is worth its execution cost."
+    "Research budget is nearly exhausted. Choose one of: submit the proposal "
+    "the evidence justifies (only if you have examined real evidence this "
+    "round); reject the candidate if it is not worth more time; or abandon the "
+    "round if no experiment is worth its execution cost."
 )
 
 
@@ -296,10 +313,9 @@ def _runtime_protocol() -> str:
     return "\n\n".join((
         _PROTOCOL_ENVELOPE,
         _RESEARCH_PHASE_NOTE,
-        _FRAME_ACTION_PROMPT,
-        _RESEARCH_ACTION_PROMPT,
-        _DECIDE_ACTION_PROMPT,
-        _TERMINAL_ACTION_PROMPT,
+        _GENERATE_ACTION_PROMPT,
+        _VALIDATE_ACTION_PROMPT,
+        _COMMIT_ACTION_PROMPT,
         _RUNTIME_BOUNDARIES,
     ))
 
@@ -311,43 +327,44 @@ _GUARD_REASONS = {
         "You have not yet examined any decision-relevant evidence this round. "
         "Investigate (call a research tool) before assessing toward a decision."
     ),
-    "needs_verification": (
-        "submit_proposals requires a verified proposal. Run assess_research "
-        "with a verification block (status supported, real evidence_refs you "
-        "examined this round) first; or begin_verification to test the "
-        "weakest premise."
-    ),
     "near_duplicate": (
         "A submitted proposal is a near-duplicate of a prior experiment. "
-        "Either cite a prior experiment ref in evidence_refs and state a "
-        "concrete material_difference, or reframe to a genuinely different "
-        "question."
+        "Reframe to a genuinely different direction via reject_candidate, or "
+        "cite a prior experiment ref in evidence_refs and state a concrete "
+        "material_difference."
     ),
-    "unverified_evidence": (
-        "The verification block claims 'supported' but its evidence_refs are "
-        "not real things examined this round (each must be an experiment: or "
-        "source: you actually looked at, plus optionally finding:; at least "
-        "one experiment:/source: is required). Gather the evidence first."
+    "taboo_family": (
+        "This proposal lands in a mechanism family that already failed this "
+        "round (recorded in the taboo set). To submit in a taboo family you "
+        "must cite NEW evidence examined this round (in evidence_refs) that "
+        "distinguishes this attempt from the failed ones. If you have no such "
+        "evidence, reject_candidate and pivot to a different family."
     ),
     "repeated_tool": (
         "That tool call is identical to the previous one and would add no new "
         "information. Change the query, inspect a different episode/finding, "
-        "or move on via assess_research."
+        "or move on via assess_candidate."
     ),
     "challenge_response_required": (
         "Explore health shows active family/global stagnation "
-        "(challenge_required). Either reframe_research, abandon_direction, or "
+        "(challenge_required). Either reject_candidate, abandon_round, or "
         "submit_proposals with a challenge_response object naming the stalled "
         "family, the null hypothesis, why this is not another same-family "
         "variant, why one more experiment is worth its cost, and real "
         "evidence_refs you examined this round."
+    ),
+    "stalled_family_excluded": (
+        "A family with an active challenge-severity signal is stalled. "
+        "Submitting another proposal in the same region is not permitted — "
+        "reframe_research or abandon_direction. A challenge_response cannot "
+        "buy back into an exhausted family."
     ),
 }
 
 
 # Text fields a challenge_response must carry (each non-empty) when the
 # Explore report marks challenge_required. evidence_refs is validated
-# separately via _validate_verification_refs (needs empirical evidence).
+# separately via _validate_evidence_refs (needs empirical evidence).
 _CHALLENGE_TEXT_FIELDS = (
     "triggered_policy",
     "stalled_family",
@@ -370,21 +387,21 @@ def _guard_repair_message(reason: str, *, explore: ExploreReport | None = None) 
     )
 
 
-def _phase_repair_message(phase: ResearchPhase) -> str:
+def _phase_repair_message(phase: IdeaPhase) -> str:
     return (
-        f"Protocol correction required (phase_illegal). Current research "
-        f"phase is {phase.value}. Legal actions in this phase: "
-        f"{_legal_action_list(phase)}. submit_proposals and abandon_direction "
-        "are only legal from Decide, which you reach via frame_research then "
-        "assess_research. Return exactly one JSON action object matching the "
-        "Runtime contract, with no prose or additional JSON."
+        f"Protocol correction required (phase_illegal). Current phase "
+        f"is {phase.value}. Legal actions in this phase: "
+        f"{_legal_action_list(phase)}. submit_proposals and abandon_round "
+        "are only legal from Commit, which you reach via generate then "
+        "assess_candidate. Return exactly one JSON action object matching "
+        "the Runtime contract, with no prose or additional JSON."
     )
 
 
 # --- Logging summaries (never leak raw content) ----------------------------
 
-def _action_summary(action: dict, *, phase: ResearchPhase,
-                    next_phase: ResearchPhase | None) -> str:
+def _action_summary(action: dict, *, phase: IdeaPhase,
+                    next_phase: IdeaPhase | None) -> str:
     name = action["action"]
     if name == "run_research_command":
         return (
@@ -404,7 +421,7 @@ def _action_summary(action: dict, *, phase: ResearchPhase,
     tgt = next_phase.value if next_phase is not None else "exit"
     if name == "submit_proposals":
         return f"phase={phase.value}->exit action={name} count={len(action['proposals'])}"
-    if name == "abandon_direction":
+    if name == "abandon_round":
         return f"phase={phase.value}->exit action={name}"
     return f"phase={phase.value}->{tgt} action={name}"
 
@@ -538,13 +555,13 @@ def _parse_challenge_response(value) -> dict:
             f"challenge_response has unexpected keys: {sorted(value)}"
         )
     out: dict[str, object] = {}
-    for field in _CHALLENGE_TEXT_FIELDS:
-        v = value.get(field, "")
+    for field_name in _CHALLENGE_TEXT_FIELDS:
+        v = value.get(field_name, "")
         if not isinstance(v, str) or not v.strip():
             raise ProposerError(
-                f"challenge_response.{field} must be a non-empty string"
+                f"challenge_response.{field_name} must be a non-empty string"
             )
-        out[field] = v.strip()
+        out[field_name] = v.strip()
     out["evidence_refs"] = _require_string_list(
         value.get("evidence_refs", []),
         name="challenge_response.evidence_refs", allow_empty=True,
@@ -562,27 +579,22 @@ def _parse_progress(value: str) -> ResearchProgress:
         ) from None
 
 
-def _parse_verification(value) -> dict:
-    if not isinstance(value, dict):
-        raise ProposerError("verification must be an object")
-    allowed = {"weakest_premise", "status", "evidence_refs"}
-    if set(value) - allowed:
-        raise ProposerError(f"verification has unexpected keys: {sorted(value)}")
-    status = value.get("status")
-    if status not in ("supported", "failed"):
-        raise ProposerError("verification.status must be 'supported' or 'failed'")
-    premise = value.get("weakest_premise", "")
-    if not isinstance(premise, str):
-        raise ProposerError("verification.weakest_premise must be a string")
-    refs = _require_string_list(
-        value.get("evidence_refs", []),
-        name="verification.evidence_refs", allow_empty=(status == "failed"),
-    )
-    return {
-        "weakest_premise": premise.strip(),
-        "status": status,
-        "evidence_refs": refs,
-    }
+def _parse_premise(value) -> str:
+    """weakest_premise may be a string or a list of strings (joined by '; ')."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        if not value:
+            raise ProposerError("weakest_premise list must be non-empty")
+        parts = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ProposerError(
+                    "weakest_premise list items must be non-empty strings"
+                )
+            parts.append(item.strip())
+        return "; ".join(parts)
+    raise ProposerError("weakest_premise must be a string or list of strings")
 
 
 def _parse_action(text: str, candidates_per_round: int) -> dict:
@@ -671,45 +683,56 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             "action": name, "query": query.strip(),
             "filters": filters or {}, "limit": limit, "buckets": buckets,
         }
-    if name == "frame_research":
+    if name == "generate":
         _require_keys(
-            action, {"action", "research_question", "decision_relevant_unknown"},
-            {"known_evidence", "working_inference", "next_information_goal",
-             "alternative_explanations"},
+            action, {"action", "candidate_directions"},
+            {"generative_operations", "decision_relevant_unknown",
+             "known_evidence", "next_information_goal",
+             "alternative_directions"},
         )
-        rq = action["research_question"]
-        dru = action["decision_relevant_unknown"]
-        for label, val in (("research_question", rq),
-                           ("decision_relevant_unknown", dru)):
-            if not isinstance(val, str) or not val.strip():
-                raise ProposerError(f"frame_research.{label} must be non-empty")
+        cd = action["candidate_directions"]
+        if not isinstance(cd, str) or not cd.strip():
+            raise ProposerError(
+                "generate.candidate_directions must be non-empty"
+            )
         return {
             "action": name,
-            "research_question": rq.strip(),
-            "decision_relevant_unknown": dru.strip(),
+            "candidate_directions": cd.strip(),
+            "generative_operations": tuple(_require_string_list(
+                action.get("generative_operations", []),
+                name="generative_operations", allow_empty=True,
+            )),
+            "decision_relevant_unknown": _opt_str(
+                action.get("decision_relevant_unknown")),
             "known_evidence": _require_string_list(
                 action.get("known_evidence", []),
                 name="known_evidence", allow_empty=True,
             ),
-            "working_inference": _opt_str(action.get("working_inference")),
-            "next_information_goal": _opt_str(action.get("next_information_goal")),
-            "alternative_explanations": _require_string_list(
-                action.get("alternative_explanations", []),
-                name="alternative_explanations", allow_empty=True,
+            "next_information_goal": _opt_str(
+                action.get("next_information_goal")),
+            "alternative_directions": _require_string_list(
+                action.get("alternative_directions", []),
+                name="alternative_directions", allow_empty=True,
             ),
         }
-    if name == "assess_research":
+    if name == "assess_candidate":
         _require_keys(
             action, {"action", "current_judgment", "research_progress"},
             {"supporting_evidence", "blocking_unknown", "draft_proposal",
-             "verification"},
+             "weakest_premise", "evidence_refs"},
         )
         cj = action["current_judgment"]
         if not isinstance(cj, str) or not cj.strip():
-            raise ProposerError("assess_research.current_judgment must be non-empty")
-        verification = None
-        if "verification" in action:
-            verification = _parse_verification(action["verification"])
+            raise ProposerError(
+                "assess_candidate.current_judgment must be non-empty"
+            )
+        weakest = action.get("weakest_premise", "")
+        if weakest:
+            weakest = _parse_premise(weakest)
+        refs = _require_string_list(
+            action.get("evidence_refs", []),
+            name="evidence_refs", allow_empty=True,
+        )
         return {
             "action": name,
             "current_judgment": cj.strip(),
@@ -720,70 +743,38 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             "blocking_unknown": _opt_str(action.get("blocking_unknown")),
             "research_progress": _parse_progress(action["research_progress"]),
             "draft_proposal": _opt_str(action.get("draft_proposal")),
-            "verification": verification,
+            "weakest_premise": weakest,
+            "evidence_refs": refs,
         }
-    if name == "continue_research":
-        _require_keys(action, {"action", "next_information_goal", "why_it_matters"})
-        goal = action["next_information_goal"]
-        why = action["why_it_matters"]
-        for label, val in (("next_information_goal", goal),
-                           ("why_it_matters", why)):
-            if not isinstance(val, str) or not val.strip():
-                raise ProposerError(f"continue_research.{label} must be non-empty")
-        return {
-            "action": name,
-            "next_information_goal": goal.strip(),
-            "why_it_matters": why.strip(),
-        }
-    if name == "reframe_research":
+    if name == "reject_candidate":
         _require_keys(
             action,
-            {"action", "what_failed", "new_research_question",
-             "new_decision_relevant_unknown"},
+            {"action", "what_failed", "failed_mechanism", "failed_region"},
+            {"evidence_summary", "new_information_goal"},
         )
-        wf = action["what_failed"]
-        nrq = action["new_research_question"]
-        ndru = action["new_decision_relevant_unknown"]
-        for label, val in (("what_failed", wf), ("new_research_question", nrq),
-                           ("new_decision_relevant_unknown", ndru)):
+        for label in ("what_failed", "failed_mechanism", "failed_region"):
+            val = action[label]
             if not isinstance(val, str) or not val.strip():
-                raise ProposerError(f"reframe_research.{label} must be non-empty")
+                raise ProposerError(f"reject_candidate.{label} must be non-empty")
         return {
             "action": name,
-            "what_failed": wf.strip(),
-            "new_research_question": nrq.strip(),
-            "new_decision_relevant_unknown": ndru.strip(),
+            "what_failed": action["what_failed"].strip(),
+            "failed_mechanism": action["failed_mechanism"].strip(),
+            "failed_region": action["failed_region"].strip(),
+            "evidence_summary": _opt_str(action.get("evidence_summary")),
+            "new_information_goal": _opt_str(
+                action.get("new_information_goal")),
         }
-    if name == "begin_verification":
-        _require_keys(
-            action,
-            {"action", "draft_proposal", "weakest_premise", "verification_question"},
-            {"next_information_goal"},
-        )
-        dp = action["draft_proposal"]
-        wp = action["weakest_premise"]
-        vq = action["verification_question"]
-        for label, val in (("draft_proposal", dp), ("weakest_premise", wp),
-                           ("verification_question", vq)):
-            if not isinstance(val, str) or not val.strip():
-                raise ProposerError(f"begin_verification.{label} must be non-empty")
-        return {
-            "action": name,
-            "draft_proposal": dp.strip(),
-            "weakest_premise": wp.strip(),
-            "verification_question": vq.strip(),
-            "next_information_goal": _opt_str(action.get("next_information_goal")),
-        }
-    if name == "abandon_direction":
+    if name == "abandon_round":
         _require_keys(action, {"action", "reason"}, {"blocking_unknown"})
         reason = action["reason"]
         if not isinstance(reason, str) or not reason.strip():
-            raise ProposerError("abandon_direction reason must be non-empty")
+            raise ProposerError("abandon_round reason must be non-empty")
         unknown = action.get("blocking_unknown")
         if unknown is not None and (
                 not isinstance(unknown, str) or not unknown.strip()):
             raise ProposerError(
-                "abandon_direction blocking_unknown must be a non-empty "
+                "abandon_round blocking_unknown must be a non-empty "
                 "string when present"
             )
         return {
@@ -798,7 +789,7 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
                 or not 1 <= len(proposals) <= candidates_per_round):
             raise ProposerError(
                 f"expected 1..{candidates_per_round} proposals; to submit "
-                "none, use abandon_direction from Decide"
+                "none, use abandon_round from Commit"
             )
         parsed = [_parse_proposal(item) for item in proposals]
         challenge_response = None
@@ -831,32 +822,47 @@ def _protocol_reason(exc: ProposerError) -> str:
 # --- Evidence tracking & guards -------------------------------------------
 
 def _register_evidence(state: WorkingState, action: dict, observation: dict) -> None:
-    """Record the references a successful tool call made available to cite."""
+    """Record the references a successful tool call made available to cite.
+
+    Tool-acquired evidence is added to BOTH ``session_evidence`` (citable) and
+    ``new_evidence`` (acquired this round, not from the startup pack). The
+    taboo escape hatch checks ``new_evidence`` — citing a startup-pack ref does
+    not distinguish a new attempt from the failed one.
+    """
     if not observation.get("ok"):
         return
     name = action["action"]
     if name == "run_research_command":
         state.session_evidence.add("__source_examined__")
+        state.new_evidence.add("__source_examined__")
         return
     result = observation.get("result")
     if name == "inspect_episode":
         eid = (result or {}).get("experiment_id")
         if eid:
-            state.session_evidence.add(f"experiment:{eid}")
+            ref = f"experiment:{eid}"
+            state.session_evidence.add(ref)
+            state.new_evidence.add(ref)
     elif name == "inspect_finding":
         fid = (result or {}).get("id")
         if fid:
-            state.session_evidence.add(f"finding:{fid}")
+            ref = f"finding:{fid}"
+            state.session_evidence.add(ref)
+            state.new_evidence.add(ref)
     elif name in ("search_findings", "list_findings"):
         for item in result or []:
             fid = item.get("id") if isinstance(item, dict) else None
             if fid:
-                state.session_evidence.add(f"finding:{fid}")
+                ref = f"finding:{fid}"
+                state.session_evidence.add(ref)
+                state.new_evidence.add(ref)
     elif name == "search_experiments":
         for exp in _iter_experiment_hits(result):
             eid = exp.get("experiment_id") if isinstance(exp, dict) else None
             if eid:
-                state.session_evidence.add(f"experiment:{eid}")
+                ref = f"experiment:{eid}"
+                state.session_evidence.add(ref)
+                state.new_evidence.add(ref)
 
 
 def _iter_experiment_hits(result) -> list:
@@ -884,11 +890,11 @@ def _source_path_exists(relpath: str, source_root: Path) -> bool:
     return False
 
 
-def _validate_verification_refs(
+def _validate_evidence_refs(
     refs: list[str], state: WorkingState, source_root: Path,
 ) -> bool:
-    """A supported verification must rest on real evidence examined this round:
-    each ref resolvable, and at least one empirical/source ref (not findings only)."""
+    """True when each ref resolves to real evidence examined this round, and at
+    least one empirical/source ref (not findings only) is present."""
     if not refs:
         return False
     has_empirical = False
@@ -905,6 +911,38 @@ def _validate_verification_refs(
                 return False
         elif kind == "source":
             if "__source_examined__" not in state.session_evidence:
+                return False
+            if not _source_path_exists(rest, source_root):
+                return False
+            has_empirical = True
+        else:
+            return False
+    return has_empirical
+
+
+def _validate_new_evidence_refs(
+    refs: list[str], state: WorkingState, source_root: Path,
+) -> bool:
+    """True when each ref resolves to evidence acquired via a tool call THIS
+    round (not startup-pack history), and at least one empirical/source ref is
+    present. Used by the taboo escape hatch — citing a startup-pack ref does
+    not distinguish a new attempt from the failed one."""
+    if not refs:
+        return False
+    has_empirical = False
+    for ref in refs:
+        if ":" not in ref:
+            return False
+        kind, _, rest = ref.partition(":")
+        if kind == "experiment":
+            if ref not in state.new_evidence:
+                return False
+            has_empirical = True
+        elif kind == "finding":
+            if ref not in state.new_evidence:
+                return False
+        elif kind == "source":
+            if "__source_examined__" not in state.new_evidence:
                 return False
             if not _source_path_exists(rest, source_root):
                 return False
@@ -967,6 +1005,85 @@ def _draft_resembles_history(draft: str, history: list[dict]) -> bool:
     )
 
 
+def _proposal_family(
+    prop: ResearchProposal, findings_by_id: dict,
+) -> tuple[str, str]:
+    """Return (region_bucket, mechanism_bucket) for a proposal, matching the
+    Explore family-key scheme so taboo enforcement is consistent."""
+    target = prop.research_target
+    if isinstance(target, ExistingFindingTarget):
+        finding = findings_by_id.get(target.finding_id)
+        mechs = tuple(sorted(finding.mechanisms)) if finding else ()
+        regions = tuple(sorted(finding.code_regions)) if finding else ()
+    else:
+        mechs = tuple(sorted(target.mechanisms))
+        regions = tuple(sorted(target.code_regions))
+    region = regions[0] if regions else "unknown-region"
+    mechanism = mechs[0] if mechs else "unknown-mechanism"
+    return region, mechanism
+
+
+def _proposal_in_taboo(
+    prop: ResearchProposal, findings_by_id: dict,
+    taboo_set: list[TabooRecord],
+) -> TabooRecord | None:
+    """Return the matching TabooRecord if the proposal's family is taboo, else
+    None. Matches on region + mechanism bucket (the family, not the wording)."""
+    region, mechanism = _proposal_family(prop, findings_by_id)
+    for taboo in taboo_set:
+        if taboo.region == region and taboo.mechanism == mechanism:
+            return taboo
+    return None
+
+
+def _proposal_region_buckets(prop: ResearchProposal) -> set[str]:
+    """Region buckets a proposal targets — from research_target code_regions
+    and source paths in the instruction. Matched against stalled family
+    regions to hard-exclude same-region submits."""
+    buckets: set[str] = set()
+    target = prop.research_target
+    if isinstance(target, NewFindingTarget):
+        for r in target.code_regions:
+            b = normalize_region(r)
+            if b:
+                buckets.add(b)
+    for m in re.finditer(r'[A-Za-z0-9_./-]+\.(?:cc|h|cpp|hpp)', prop.instruction):
+        buckets.add(_bucket_path(m.group()))
+    return buckets
+
+
+def _stalled_family_regions(explore: ExploreReport) -> set[str]:
+    """Region buckets of all families with an active challenge-severity signal."""
+    out: set[str] = set()
+    for fam in explore.families:
+        if any(s.active and s.severity == SEVERITY_CHALLENGE
+               for s in fam.policy_signals):
+            out.add(fam.code_region)
+    return out
+
+
+def _global_stall_hot_regions(explore: ExploreReport) -> set[str]:
+    """When global stall is active but no specific family is, find the regions
+    that account for the most recent attempts — these are the local-exploitation
+    traps the global stall is signaling. Submitting in them is hard-excluded."""
+    out: set[str] = set()
+    gh = explore.global_health
+    if gh is None:
+        return out
+    # Collect (region, attempts) from families that have been touched recently.
+    fams = sorted(explore.families, key=lambda f: -f.attempts)
+    total = sum(f.attempts for f in fams)
+    if total == 0:
+        return out
+    # Regions covering >= 30% of all attempts are "hot" — the proposer has
+    # been spending most of its budget there.
+    threshold = max(1, int(0.3 * total))
+    for f in fams:
+        if f.attempts >= threshold:
+            out.add(f.code_region)
+    return out
+
+
 def _validate_action_guard(
     state: WorkingState, action: dict, history: list[dict],
     findings_by_id: dict, source_root: Path,
@@ -977,43 +1094,48 @@ def _validate_action_guard(
     if name in _RESEARCH_TOOL_ACTIONS:
         # Exact-repeat only: an identical tool call back-to-back adds nothing.
         fp = _fingerprint(action)
-        if state.last_tool_fingerprint is not None and fp == state.last_tool_fingerprint:
+        if (state.last_tool_fingerprint is not None
+                and fp == state.last_tool_fingerprint):
             return "repeated_tool"
         return None
-    if name == "assess_research":
-        ver = action.get("verification")
-        if ver and ver["status"] == "supported":
-            if not _validate_verification_refs(
-                ver["evidence_refs"], state, source_root,
-            ):
-                return "unverified_evidence"
+    if name == "assess_candidate":
         if not state.evidence_basis:
             return "needs_evidence"
         return None
     if name == "submit_proposals":
-        if state.verification_status != VerificationStatus.SUPPORTED:
-            return "needs_verification"
+        # Evidence-basis: must have examined something decision-relevant.
+        if not state.evidence_basis:
+            return "needs_evidence"
+        # Near-duplicate: a proposal matching a recent ledger experiment must
+        # cite a real experiment ref AND state a material_difference. This is
+        # a hard gate — without both, the submit is refused.
         dup_idx = _find_deterministic_duplicate(
             action["proposals"], history, findings_by_id,
         )
         if dup_idx is not None:
             prop = action["proposals"][dup_idx]
             if not prop.evidence_refs or not (
-                    prop.material_difference and prop.material_difference.strip()):
+                    prop.material_difference
+                    and prop.material_difference.strip()):
                 return "near_duplicate"
-        # Explore challenge: a stalled family/global state must be answered with
-        # a challenge_response whose evidence_refs resolve to real evidence this
-        # round. This never forbids submit — it forces the Scientist to state,
-        # on the record, why the next experiment is not another exhausted
-        # variant. reframe_research and abandon_direction remain free of it.
-        if explore is not None and explore.challenge_required:
-            cr = action.get("challenge_response")
-            if cr is None:
-                return "challenge_response_required"
-            if not _validate_verification_refs(
-                cr["evidence_refs"], state, source_root,
-            ):
-                return "challenge_response_required"
+        # Taboo family: a proposal landing in a family that failed this round
+        # must cite NEW evidence examined this round (via a tool call, not the
+        # startup pack) that distinguishes it from the failed attempts.
+        # material_difference alone is NOT enough.
+        for prop in action["proposals"]:
+            taboo = _proposal_in_taboo(prop, findings_by_id, state.taboo_set)
+            if taboo is not None:
+                if not _validate_new_evidence_refs(
+                    list(prop.evidence_refs), state, source_root,
+                ):
+                    return "taboo_family"
+        # Explore challenge gate REMOVED: in the branch-then-deepen
+        # architecture, Explore's negative feedback steers the GENERATOR
+        # (via the generation boundary), not the submit gate. A branch that
+        # reaches submit has already passed evidence_basis + taboo checks;
+        # the orchestrator's list-wise comparison handles cross-branch
+        # selection. The challenge_required field is retained on
+        # ExploreReport for telemetry only.
         return None
     return None
 
@@ -1026,29 +1148,47 @@ def _render_state_header(
     """Compact, delta-only epistemic state, injected so the Scientist keeps its
     own judgment in view without re-reading the whole history."""
     lines = ["Working state (your current epistemic position):"]
-    lines.append(f"  phase={state.phase.value}  "
-                 f"verification={state.verification_status.value}"
-                 f"{' (mode)' if state.verification_mode else ''}"
-                 f"  progress="
-                 f"{state.research_progress.value if state.research_progress else '-'}")
-    if state.research_question:
-        lines.append(f"  research_question: {_truncate(state.research_question, 160)}")
+    lines.append(
+        f"  phase={state.phase.value}  "
+        f"progress="
+        f"{state.research_progress.value if state.research_progress else '-'}"
+        f"  episode={state.episode_count}"
+    )
+    if state.candidate_directions:
+        lines.append(
+            f"  candidate_directions: "
+            f"{_truncate(state.candidate_directions, 160)}")
+    if state.generative_operations:
+        lines.append(
+            f"  generative_operations: {', '.join(state.generative_operations)}")
     if state.decision_relevant_unknown:
         lines.append(
             f"  decision_relevant_unknown: "
             f"{_truncate(state.decision_relevant_unknown, 160)}")
     if state.blocking_unknown:
-        lines.append(f"  blocking_unknown: {_truncate(state.blocking_unknown, 120)}")
+        lines.append(
+            f"  blocking_unknown: {_truncate(state.blocking_unknown, 120)}")
     if state.current_information_goal:
         lines.append(
             f"  current_information_goal: "
             f"{_truncate(state.current_information_goal, 120)}")
     if state.draft_proposal:
-        lines.append(f"  draft_proposal: {_truncate(state.draft_proposal, 160)}")
+        lines.append(
+            f"  draft_proposal: {_truncate(state.draft_proposal, 160)}")
     if state.draft_resembles_history:
         lines.append(
             "  possible_near_duplicate: this draft resembles a prior proposal "
-            "— be sure it is materially different before verifying")
+            "— be sure it is materially different before submitting")
+    if state.taboo_set:
+        lines.append(
+            f"  taboo_set ({len(state.taboo_set)} failed direction(s)):")
+        for t in state.taboo_set:
+            lines.append(
+                f"    {t.family_id}  reason={_truncate(t.reason, 80)}  "
+                f"evidence={_truncate(t.evidence_summary, 80)}")
+        lines.append(
+            "  A submit in a taboo family must cite NEW evidence examined this "
+            "round that distinguishes it from the failed attempt(s).")
     explore_block = render_explore_for_state_header(explore)
     if explore_block:
         lines.append(explore_block)
@@ -1070,11 +1210,11 @@ def _build_telemetry(
     return {
         "steps": steps,
         "tool_calls": state.counts.get("tool", 0),
-        "frame_count": state.counts.get("frame_research", 0),
-        "continue_count": state.counts.get("continue_research", 0),
-        "reframe_count": state.counts.get("reframe_research", 0),
-        "verification_attempts": state.counts.get("begin_verification", 0),
-        "verification_status": state.verification_status.value,
+        "generate_count": state.counts.get("generate", 0),
+        "assess_count": state.counts.get("assess_candidate", 0),
+        "reject_count": state.counts.get("reject_candidate", 0),
+        "episode_count": state.episode_count,
+        "taboo_count": len(state.taboo_set),
         "abandoned": abandoned,
         "protocol_repairs": state.protocol_repairs,
         "signals_fired": list(state.signals_fired),
@@ -1106,13 +1246,16 @@ def _build_trace(
         }
     return {
         "round": round_id,
-        "research_question": state.research_question,
+        "candidate_directions": state.candidate_directions,
         "decision_relevant_unknown": state.decision_relevant_unknown,
         "blocking_unknown": state.blocking_unknown,
         "draft_proposal": state.draft_proposal,
         "weakest_premise": state.weakest_premise_log,
-        "verification_status": state.verification_status.value,
         "actions": list(state.action_log),
+        "taboo_set": [
+            {"family": t.family_id, "reason": t.reason}
+            for t in state.taboo_set
+        ],
         "explore": explore_block,
         "authority": "non_authoritative",
         "inject_into_future_context": False,
@@ -1172,20 +1315,24 @@ class ProposerAgent:
             explore = memory_service.analyze_explore(current_round=current_round)
         except Exception:
             explore = None
+        startup_pack = memory_service.build_startup_pack(
+            goal=goal,
+            editable=editable,
+            frozen=frozen,
+            base_sha=base_sha,
+            gate_block=gate_block,
+            candidates_per_round=candidates_per_round,
+            hints=hints,
+            current_round=current_round,
+            explore=explore,
+        )
         messages = [{
             "role": "user",
-            "content": memory_service.build_startup_pack(
-                goal=goal,
-                editable=editable,
-                frozen=frozen,
-                base_sha=base_sha,
-                gate_block=gate_block,
-                candidates_per_round=candidates_per_round,
-                hints=hints,
-                current_round=current_round,
-                explore=explore,
-            ),
+            "content": startup_pack,
         }]
+        # Keep the startup pack boundary so reject_candidate can truncate
+        # back to it when opening a new Generate episode.
+        startup_len = 1
         started = time.monotonic()
         deadline = started + self.timeout_seconds
         usages = []
@@ -1196,9 +1343,12 @@ class ProposerAgent:
             f"experiment:{e.experiment_id}" for e in experiments
         } | {f"finding:{fid}" for fid in findings}
         # Recent ledger proposals for near-duplicate checks.
-        recent = sorted(experiments, key=lambda e: (e.round, e.candidate))[-_DUP_WINDOW:]
+        recent = sorted(
+            experiments, key=lambda e: (e.round, e.candidate)
+        )[-_DUP_WINDOW:]
         history_props = [
-            {"instruction": e.proposal, "proposal_obj": _experiment_to_proposal(e)}
+            {"instruction": e.proposal,
+             "proposal_obj": _experiment_to_proposal(e)}
             for e in recent if e.proposal
         ]
         budget_reminder_step = int(0.8 * self.max_steps)
@@ -1231,8 +1381,8 @@ class ProposerAgent:
                     reminded = True
                 action, next_phase, reply_text = self._step(
                     state, messages, system_prompt, deadline, usages,
-                    candidates_per_round, history_props, findings, source_path,
-                    step, explore,
+                    candidates_per_round, history_props, findings,
+                    source_path, step, explore,
                 )
                 name = action["action"]
 
@@ -1260,7 +1410,7 @@ class ProposerAgent:
                         ),
                     )
                     break
-                if name == "abandon_direction":
+                if name == "abandon_round":
                     _bump(state, name)
                     state.action_log.append({"action": name, "step": step})
                     print(
@@ -1285,48 +1435,46 @@ class ProposerAgent:
                     break
 
                 # Control actions: internal state transitions, no tool call.
-                if name == "frame_research":
-                    self._apply_frame(state, action)
+                if name == "generate":
+                    self._apply_generate(state, action)
                     _bump(state, name)
                     state.phase = next_phase
-                    messages.append({"role": "assistant", "content": reply_text})
+                    messages.append(
+                        {"role": "assistant", "content": reply_text})
                     self._note_state(messages, state, explore)
                     continue
-                if name == "assess_research":
+                if name == "assess_candidate":
                     self._apply_assess(state, action, history_props)
                     _bump(state, name)
                     state.phase = next_phase
-                    messages.append({"role": "assistant", "content": reply_text})
+                    messages.append(
+                        {"role": "assistant", "content": reply_text})
                     self._note_state(messages, state, explore)
                     continue
-                if name == "continue_research":
-                    state.current_information_goal = action["next_information_goal"]
+                if name == "reject_candidate":
                     _bump(state, name)
+                    # Open a new Generate episode: compress the failed
+                    # direction into a taboo record, truncate the conversation
+                    # history to the startup pack, and inject the taboo summary
+                    # as the sole prior context. This is the pivot mechanism —
+                    # without truncation the model re-derives the same
+                    # conclusion from the old reasoning chain (the r8→r9
+                    # failure mode).
+                    taboo = TabooRecord(
+                        region=action["failed_region"],
+                        mechanism=action["failed_mechanism"],
+                        reason=action["what_failed"],
+                        evidence_summary=action.get("evidence_summary") or "",
+                    )
+                    state.taboo_set.append(taboo)
+                    self._reset_arc(state)
+                    state.episode_count += 1
                     state.phase = next_phase
-                    state.research_steps_since_frame = 0
-                    messages.append({"role": "assistant", "content": reply_text})
-                    self._note_state(messages, state, explore)
-                    continue
-                if name == "reframe_research":
-                    _bump(state, name)
-                    self._reset_arc(state, research_question=action["new_research_question"],
-                                    decision_relevant_unknown=action["new_decision_relevant_unknown"])
-                    state.phase = next_phase
-                    messages.append({"role": "assistant", "content": reply_text})
-                    self._note_state(messages, state, explore)
-                    continue
-                if name == "begin_verification":
-                    _bump(state, name)
-                    state.verification_mode = True
-                    state.verification_status = VerificationStatus.NEEDS_EVIDENCE
-                    state.draft_proposal = action["draft_proposal"]
-                    state.weakest_premise = action["weakest_premise"]
-                    state.weakest_premise_log = action["weakest_premise"]
-                    state.current_information_goal = action.get(
-                        "next_information_goal") or action["verification_question"]
-                    state.phase = next_phase
-                    state.research_steps_since_frame = 0
-                    messages.append({"role": "assistant", "content": reply_text})
+                    # Truncate: keep only the startup pack, then inject the
+                    # compressed failure summary as the new context.
+                    del messages[startup_len:]
+                    summary = self._render_episode_summary(state)
+                    messages.append({"role": "user", "content": summary})
                     self._note_state(messages, state, explore)
                     continue
 
@@ -1334,7 +1482,7 @@ class ProposerAgent:
                 observation = tools.execute(action, deadline=deadline)
                 _bump(state, "tool")
                 state.tool_calls_this_arc += 1
-                state.research_steps_since_frame += 1
+                state.research_steps_since_generate += 1
                 state.evidence_basis = True
                 _register_evidence(state, action, observation)
                 state.last_tool_fingerprint = _fingerprint(action)
@@ -1361,6 +1509,290 @@ class ProposerAgent:
             if final is None:
                 raise ProposerError("proposer exceeded researcher.max_steps")
             return final
+
+    def research_branch(
+        self,
+        *,
+        hypothesis,  # HypothesisCard
+        goal: str,
+        editable: list[str],
+        frozen: list[str],
+        memory_service,
+        base_sha: str,
+        source_path: Path,
+        repo_path: Path,
+        run_dir: Path,
+        current_round: int,
+        gate_block: str,
+        prompt_dir: Path | None,
+        probe_evidence_ref: str | None = None,
+        hints: list[str] | None = None,
+        explore=None,
+        max_steps: int | None = None,
+    ) -> BranchResult:
+        """Research one confirmed hypothesis in isolation (branch-then-deepen).
+
+        This is the cognitive element (C1-C4) demoted from global proposer to
+        per-branch researcher. It starts in VALIDATE (the hypothesis is the
+        generate output — the direction is already chosen by the generator),
+        so the "0 tool calls then declare direction" failure mode of the old
+        single-track proposer cannot occur. The branch runs its own
+        generate→validate→commit lifecycle with its own context, can reframe
+        within the branch, and produces 0 or 1 proposals.
+        """
+        from .hypothesis import HypothesisCard  # avoid top-level cycle
+        assert isinstance(hypothesis, HypothesisCard)
+
+        system_prompt = (
+            f"{load_semantic('proposer', prompt_dir).rstrip()}\n\n"
+            f"{_runtime_protocol()}"
+        )
+        experiments = memory_service.load_experiments()
+        findings = memory_service.load_findings()
+        if explore is None:
+            try:
+                explore = memory_service.analyze_explore(
+                    current_round=current_round)
+            except Exception:
+                explore = None
+        startup_pack = memory_service.build_startup_pack(
+            goal=goal, editable=editable, frozen=frozen,
+            base_sha=base_sha, gate_block=gate_block,
+            candidates_per_round=1, hints=hints,
+            current_round=current_round, explore=explore,
+        )
+        # Inject the hypothesis as the branch's initial direction. The branch
+        # starts in VALIDATE — the generator already did Generate.
+        branch_intro = (
+            "You are researching ONE hypothesis in isolation. The direction "
+            "was chosen by the generator; your job is to validate it deeply, "
+            "not to re-choose.\n\n"
+            f"Hypothesis (from {hypothesis.generative_op}):\n"
+            f"  region: {hypothesis.region}\n"
+            f"  mechanism: {hypothesis.mechanism}\n"
+            f"  intervention_family: {hypothesis.intervention_family}\n"
+            f"  why_plausible: {hypothesis.why_plausible}\n"
+            f"  critical_unknown: {hypothesis.critical_unknown}\n"
+        )
+        if probe_evidence_ref:
+            branch_intro += (
+                f"\nProbe confirmed the mechanism exists: {probe_evidence_ref}\n"
+            )
+        branch_intro += (
+            "\nStart in VALIDATE. Investigate the critical_unknown, read the "
+            "source, then assess_candidate. You may reject_candidate to reframe "
+            "within this branch, or submit_proposals (at most 1) if the "
+            "evidence supports it, or abandon if it does not."
+        )
+        messages = [
+            {"role": "user", "content": startup_pack},
+            {"role": "user", "content": branch_intro},
+        ]
+        startup_len = len(messages)
+        steps_budget = max_steps or self.max_steps
+        started = time.monotonic()
+        deadline = started + self.timeout_seconds
+        usages = []
+        state = WorkingState()
+        # Start in VALIDATE — the hypothesis IS the generate output.
+        state.phase = IdeaPhase.VALIDATE
+        state.candidate_directions = (
+            f"{hypothesis.mechanism} → {hypothesis.intervention_family} "
+            f"in {hypothesis.region}")
+        state.decision_relevant_unknown = hypothesis.critical_unknown
+        state.evidence_basis = (
+            bool(hints) or bool(experiments) or bool(findings)
+            or bool(probe_evidence_ref))
+        state.session_evidence = {
+            f"experiment:{e.experiment_id}" for e in experiments
+        } | {f"finding:{fid}" for fid in findings}
+        if probe_evidence_ref and probe_evidence_ref.startswith("source:"):
+            state.session_evidence.add("__source_examined__")
+            state.new_evidence.add("__source_examined__")
+        recent = sorted(
+            experiments, key=lambda e: (e.round, e.candidate)
+        )[-_DUP_WINDOW:]
+        history_props = [
+            {"instruction": e.proposal,
+             "proposal_obj": _experiment_to_proposal(e)}
+            for e in recent if e.proposal
+        ]
+        budget_reminder_step = int(0.8 * steps_budget)
+        reminded = False
+        print(
+            f"[branch {hypothesis.generative_op} "
+            f"{hypothesis.signature()}] started max_steps={steps_budget}",
+            flush=True,
+        )
+        with TemporaryDirectory(prefix="simpleloop-branch-") as scratch:
+            tools = ResearchTools(
+                runtime=self.runtime,
+                source=source_path,
+                repo=repo_path,
+                history_dir=run_dir,
+                scratch=Path(scratch),
+                memory_service=memory_service,
+                command_timeout_seconds=self.command_timeout_seconds,
+                command_output_cap_chars=self.command_output_cap_chars,
+                current_round=current_round,
+            )
+            final: ProposerResult | None = None
+            for _step in range(steps_budget):
+                step = _step + 1
+                print(
+                    f"[branch step {step}/{steps_budget}] thinking",
+                    flush=True,
+                )
+                if (not reminded and budget_reminder_step > 0
+                        and step >= budget_reminder_step):
+                    messages.append({
+                        "role": "user", "content": _BUDGET_REMINDER,
+                    })
+                    reminded = True
+                action, next_phase, reply_text = self._step(
+                    state, messages, system_prompt, deadline, usages,
+                    1, history_props, findings,
+                    source_path, step, explore,
+                )
+                name = action["action"]
+
+                if name == "submit_proposals":
+                    _bump(state, name)
+                    state.action_log.append({"action": name, "step": step})
+                    print(
+                        f"[branch] finished steps={step} "
+                        f"elapsed={time.monotonic() - started:.1f}s",
+                        flush=True,
+                    )
+                    final = ProposerResult(
+                        proposals=action["proposals"],
+                        usage=usages,
+                        deliberation_telemetry=_build_telemetry(
+                            state, steps=step, abandoned=False,
+                            explore=explore,
+                        ),
+                        trace=_build_trace(
+                            state, round_id=current_round, explore=explore,
+                        ),
+                    )
+                    break
+                if name == "abandon_round":
+                    _bump(state, name)
+                    state.action_log.append({"action": name, "step": step})
+                    print(
+                        f"[branch] abandoned steps={step} "
+                        f"elapsed={time.monotonic() - started:.1f}s "
+                        f"reason_chars={len(action['reason'])}",
+                        flush=True,
+                    )
+                    final = ProposerResult(
+                        proposals=[],
+                        usage=usages,
+                        abstained=True,
+                        abstain_reason=action["reason"],
+                        abstain_blocking_unknown=action["blocking_unknown"],
+                        deliberation_telemetry=_build_telemetry(
+                            state, steps=step, abandoned=True, explore=explore,
+                        ),
+                        trace=_build_trace(
+                            state, round_id=current_round, explore=explore,
+                        ),
+                    )
+                    break
+
+                if name == "generate":
+                    self._apply_generate(state, action)
+                    _bump(state, name)
+                    state.phase = next_phase
+                    messages.append(
+                        {"role": "assistant", "content": reply_text})
+                    self._note_state(messages, state, explore)
+                    continue
+                if name == "assess_candidate":
+                    self._apply_assess(state, action, history_props)
+                    _bump(state, name)
+                    state.phase = next_phase
+                    messages.append(
+                        {"role": "assistant", "content": reply_text})
+                    self._note_state(messages, state, explore)
+                    continue
+                if name == "reject_candidate":
+                    _bump(state, name)
+                    taboo = TabooRecord(
+                        region=action["failed_region"],
+                        mechanism=action["failed_mechanism"],
+                        reason=action["what_failed"],
+                        evidence_summary=action.get("evidence_summary") or "",
+                    )
+                    state.taboo_set.append(taboo)
+                    self._reset_arc(state)
+                    state.episode_count += 1
+                    state.phase = next_phase
+                    del messages[startup_len:]
+                    summary = self._render_episode_summary(state)
+                    messages.append({"role": "user", "content": summary})
+                    self._note_state(messages, state, explore)
+                    continue
+
+                observation = tools.execute(action, deadline=deadline)
+                _bump(state, "tool")
+                state.tool_calls_this_arc += 1
+                state.research_steps_since_generate += 1
+                state.evidence_basis = True
+                _register_evidence(state, action, observation)
+                state.last_tool_fingerprint = _fingerprint(action)
+                print(
+                    f"[branch step {step}/{steps_budget}] "
+                    f"{_result_summary(action, observation)}",
+                    flush=True,
+                )
+                envelope = {
+                    "state": _render_state_header(state, explore),
+                    "tool_result": observation,
+                }
+                nudge = self._maybe_nudge(state, explore)
+                if nudge:
+                    envelope["note"] = nudge
+                    state.signals_fired.append(nudge[:48])
+                messages.extend([
+                    {"role": "assistant", "content": reply_text},
+                    {"role": "user", "content": json.dumps(
+                        envelope, ensure_ascii=False,
+                    )},
+                ])
+            if final is None:
+                # Budget exhausted without a terminal action — treat as abandon.
+                print(
+                    f"[branch] budget exhausted without conclusion "
+                    f"(steps={steps_budget})", flush=True,
+                )
+                return BranchResult(
+                    hypothesis=hypothesis, abandoned=True,
+                    abandon_reason="branch budget exhausted",
+                    usage=usages,
+                    deliberation_telemetry=_build_telemetry(
+                        state, steps=steps_budget, abandoned=True,
+                        explore=explore,
+                    ),
+                    trace=_build_trace(
+                        state, round_id=current_round, explore=explore,
+                    ),
+                )
+            if final.abstained:
+                return BranchResult(
+                    hypothesis=hypothesis, abandoned=True,
+                    abandon_reason=final.abstain_reason,
+                    usage=usages,
+                    deliberation_telemetry=final.deliberation_telemetry,
+                    trace=final.trace,
+                )
+            return BranchResult(
+                hypothesis=hypothesis,
+                proposal=final.proposals[0] if final.proposals else None,
+                usage=usages,
+                deliberation_telemetry=final.deliberation_telemetry,
+                trace=final.trace,
+            )
 
     # -- helpers -----------------------------------------------------------
 
@@ -1430,7 +1862,8 @@ class ProposerAgent:
                 )
                 messages.extend([
                     {"role": "assistant", "content": reply.text},
-                    {"role": "user", "content": _phase_repair_message(state.phase)},
+                    {"role": "user",
+                     "content": _phase_repair_message(state.phase)},
                 ])
                 continue
             guard = _validate_action_guard(
@@ -1464,13 +1897,14 @@ class ProposerAgent:
             )
             return action, next_phase, reply.text
 
-    def _apply_frame(self, state: WorkingState, action: dict) -> None:
-        self._reset_arc(
-            state,
-            research_question=action["research_question"],
-            decision_relevant_unknown=action["decision_relevant_unknown"],
-        )
-        state.current_information_goal = action.get("next_information_goal") or ""
+    def _apply_generate(self, state: WorkingState, action: dict) -> None:
+        self._reset_arc(state)
+        state.candidate_directions = action["candidate_directions"]
+        state.generative_operations = action.get("generative_operations") or ()
+        state.decision_relevant_unknown = action.get(
+            "decision_relevant_unknown") or ""
+        state.current_information_goal = action.get(
+            "next_information_goal") or ""
 
     def _apply_assess(self, state: WorkingState, action: dict,
                       history_props: list[dict]) -> None:
@@ -1483,29 +1917,39 @@ class ProposerAgent:
         )
         if state.draft_resembles_history:
             state.signals_fired.append("possible_near_duplicate")
-        ver = action.get("verification")
-        if ver:
-            state.weakest_premise = ver["weakest_premise"]
-            state.weakest_premise_log = ver["weakest_premise"]
-            if ver["status"] == "supported":
-                state.verification_status = VerificationStatus.SUPPORTED
-                state.signals_fired.append("verification_supported")
-            else:
-                state.verification_status = VerificationStatus.FAILED
+        state.weakest_premise = action.get("weakest_premise") or ""
+        state.weakest_premise_log = action.get("weakest_premise") or ""
 
-    def _reset_arc(self, state: WorkingState, *, research_question: str,
-                   decision_relevant_unknown: str) -> None:
+    def _reset_arc(self, state: WorkingState) -> None:
         state.tool_calls_this_arc = 0
-        state.research_steps_since_frame = 0
-        state.verification_mode = False
-        state.verification_status = VerificationStatus.NOT_STARTED
+        state.research_steps_since_generate = 0
         state.draft_proposal = ""
         state.weakest_premise = ""
-        state.research_question = research_question
-        state.decision_relevant_unknown = decision_relevant_unknown
         state.current_judgment = ""
         state.blocking_unknown = ""
         state.research_progress = None
+
+    def _render_episode_summary(self, state: WorkingState) -> str:
+        """Compress the taboo set into a summary injected as the sole prior
+        context after truncation. This is what makes reject_candidate a real
+        pivot instead of a no-op."""
+        lines = [
+            "New Generate episode. Prior direction(s) failed and are now "
+            "taboo — do NOT retry them or produce a reworded variant:",
+        ]
+        for t in state.taboo_set:
+            lines.append(
+                f"  TABOO  family={t.family_id}  reason={t.reason}  "
+                f"evidence={t.evidence_summary or '(none recorded)'}"
+            )
+        lines.append("")
+        lines.append(
+            "Use the Generative Basis to produce a genuinely different "
+            "direction. The taboo set is enforced: a submit landing in a taboo "
+            "family is refused unless it cites NEW evidence examined this "
+            "round that distinguishes it from the failed attempt(s)."
+        )
+        return "\n".join(lines)
 
     def _note_state(self, messages: list, state: WorkingState,
                     explore: ExploreReport | None) -> None:
@@ -1518,11 +1962,12 @@ class ProposerAgent:
         self, state: WorkingState, explore: ExploreReport | None,
     ) -> str | None:
         notes = []
-        if (state.phase == ResearchPhase.RESEARCH
-                and state.research_steps_since_frame >= _STALL_THRESHOLD):
+        if (state.phase == IdeaPhase.VALIDATE
+                and state.research_steps_since_generate >= _STALL_THRESHOLD):
             notes.append(
                 "investigation has run several steps without an assessment; "
-                "assess_research or reframe if the key unknown is stuck")
+                "assess_candidate or reject_candidate if the key premise is "
+                "stuck")
         if explore is not None and not explore.first_round:
             for fh in explore.findings:
                 mc = next(
@@ -1532,8 +1977,9 @@ class ProposerAgent:
                 )
                 if mc is not None:
                     notes.append(
-                        f"finding {fh.finding_id} shows repeated eligible-neutral "
-                        "attempts — consider challenging the mechanism or reframing")
+                        f"finding {fh.finding_id} shows repeated "
+                        "eligible-neutral attempts — consider challenging the "
+                        "mechanism or rejecting the candidate")
                     break
             # Family-level stall: opening a fresh Finding each round does NOT
             # reset the family evidence (the family aggregates across findings).
@@ -1549,9 +1995,10 @@ class ProposerAgent:
                         f"FAMILY {stall.name.upper()}: family "
                         f"{fam.code_region} has {fam.consecutive_no_improve} "
                         f"consecutive no-improve attempts across findings "
-                        f"{', '.join(fam.finding_ids)}. Reframe to a different "
-                        "mechanism family, abandon, or submit only with a "
-                        "challenge_response — do not submit another variant."
+                        f"{', '.join(fam.finding_ids)}. Reject the candidate "
+                        "and pivot to a different mechanism family, or submit "
+                        "only with a challenge_response — do not submit "
+                        "another variant."
                     )
                     break
             gh = explore.global_health
@@ -1566,9 +2013,9 @@ class ProposerAgent:
                     notes.append(
                         f"GLOBAL STALL: {gh.consecutive_no_improve_rounds} "
                         f"consecutive no-improve rounds. Mechanisms tried: "
-                        f"{mechs}. Reframe to a different mechanism family or "
-                        "abandon — do not submit another variant of the same "
-                        "approach."
+                        f"{mechs}. Reject the candidate and pivot to a "
+                        "different mechanism family or abandon — do not "
+                        "submit another variant of the same approach."
                     )
         return "; ".join(notes) if notes else None
 

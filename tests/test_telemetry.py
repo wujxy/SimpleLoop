@@ -263,6 +263,8 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
     monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FakeProposer)
+    from simpleloop.roles import orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "ProposerOrchestrator", FakeProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 

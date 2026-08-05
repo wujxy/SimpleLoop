@@ -68,6 +68,11 @@ _RESEARCHER_DEFAULTS = {
     "max_steps": 50,
     "command_timeout_seconds": 120,
     "command_output_cap_chars": 12000,
+    # Branch-then-deepen pipeline (PLAN.md):
+    "hypothesis_count": 8,       # generator produces this many cards
+    "branch_count": 3,           # max branches deep-researched per round
+    "frame_free_ratio": 0.33,    # fraction of cards ignoring Explore boundary
+    "probe_timeout_seconds": 30, # per-command timeout for the probe layer
 }
 
 # Only `api` carries a default; the executor's `model` and `base_url` are
@@ -289,6 +294,9 @@ def _resolve_researcher(raw: object) -> dict:
         ("max_steps", 1),
         ("command_timeout_seconds", 1),
         ("command_output_cap_chars", 1000),
+        ("hypothesis_count", 1),
+        ("branch_count", 1),
+        ("probe_timeout_seconds", 1),
     ):
         value = result[key]
         if (not isinstance(value, int) or isinstance(value, bool)
@@ -296,6 +304,12 @@ def _resolve_researcher(raw: object) -> dict:
             raise ConfigError(
                 f"researcher.{key}: must be an integer >= {minimum}"
             )
+    ratio = result["frame_free_ratio"]
+    if (not isinstance(ratio, (int, float)) or isinstance(ratio, bool)
+            or not 0.0 <= ratio <= 1.0):
+        raise ConfigError(
+            "researcher.frame_free_ratio: must be a number in [0.0, 1.0]"
+        )
     return result
 
 

@@ -63,9 +63,9 @@ def test_startup_render_contains_family_and_global_and_policy():
     assert "family" in text
     assert "consecutive_no_improve=" in text
     assert "consecutive_no_improve_rounds=" in text
-    # POLICY paragraph names the challenge_response fields up front.
-    assert "challenge_response" in text
-    assert "why_this_is_not_same_family_variant" in text
+    # POLICY paragraph is now informational (no submit gate).
+    assert "informational only" in text
+    assert "does not gate submit" in text
 
 
 def test_startup_render_empty_on_first_round():

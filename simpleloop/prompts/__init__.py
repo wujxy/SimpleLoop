@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-PROMPT_NAMES = ("proposer", "executor", "meta_optimizer")
+PROMPT_NAMES = ("proposer", "executor", "meta_optimizer", "generator")
 
 
 def load_semantic(

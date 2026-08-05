@@ -159,3 +159,41 @@ def test_assign_families_family_key_is_frozen_hashable():
     # Frozen dataclass must be hashable / usable as dict key.
     d = {k: 1}
     assert d[FamilyKey("x", "y")] == 1
+
+# --- changed_paths is the primary region dimension (anti-bypass) ----------
+
+def test_changed_paths_override_code_regions_tag():
+    """The proposer controls the code_regions tag and can rename it; the actual
+    changed_paths (deterministic file paths it cannot rename) must win.
+    """
+    finding = _finding("F-001", mechanisms=("m",),
+                       code_regions=("src/renamed-tag.cc",), round=1)
+    exps = [_exp(0, 1, "s1", "F-001", paths=("src/real.cc",))]
+    assert region_bucket_for(finding, exps) == "src/real.cc"
+
+
+def test_code_regions_tag_used_only_when_no_experiments():
+    """Before any experiment runs, the tag is the only signal available."""
+    finding = _finding("F-001", mechanisms=("m",),
+                       code_regions=("src/tag.cc::fn",), round=1)
+    assert region_bucket_for(finding, []) == "src/tag.cc::fn"
+
+
+def test_renamed_code_regions_tag_does_not_escape_same_region():
+    """Two findings with differently-worded code_regions tags but the same
+    actual changed_paths file must land in the same family.
+    """
+    findings = {
+        "F-001": _finding("F-001", mechanisms=("alpha",),
+                          code_regions=("src/clever-name.cc",), round=1),
+        "F-002": _finding("F-002", mechanisms=("alpha",),
+                          code_regions=("src/different-name.cc",), round=2),
+    }
+    exps = [
+        _exp(0, 1, "s1", "F-001", paths=("src/actual.cc",)),
+        _exp(1, 2, "s2", "F-002", paths=("src/actual.cc",)),
+    ]
+    keys = assign_families(findings, exps)
+    assert keys["F-001"].region_bucket == "src/actual.cc"
+    assert keys["F-002"].region_bucket == "src/actual.cc"
+    assert keys["F-001"].family_id == keys["F-002"].family_id

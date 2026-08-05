@@ -69,6 +69,10 @@ def test_researcher_defaults(tmp_path: Path):
         "max_steps": 50,
         "command_timeout_seconds": 120,
         "command_output_cap_chars": 12000,
+        "hypothesis_count": 8,
+        "branch_count": 3,
+        "frame_free_ratio": 0.33,
+        "probe_timeout_seconds": 30,
     }
 
 

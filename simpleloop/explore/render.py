@@ -67,16 +67,45 @@ def render_explore_for_startup(report: ExploreReport | None) -> str:
     if report.challenge_required:
         lines.append("")
         lines.append(
-            "POLICY: Before submitting in this state, either reframe_research "
-            "or abandon_direction, or submit_proposals with a "
-            "challenge_response object that names: triggered_policy, "
-            "stalled_family, what_was_exhausted, null_hypothesis, "
-            "why_this_is_not_same_family_variant, why_worth_one_more_experiment, "
-            "and real evidence_refs you examined this round. Do not treat this "
-            "as paperwork — use it to test whether you are about to spend an "
-            "experiment on another variant of an exhausted family."
+            "POLICY (informational only — does not gate submit): Explore "
+            "detects stagnation. The generation boundary steers the Generator "
+            "away from these families; you do not need a challenge_response "
+            "to submit. Use this as a signal to think harder, not as "
+            "paperwork."
         )
     return "\n".join(lines) + "\n"
+
+
+def render_generation_boundary(report: ExploreReport | None) -> str:
+    """Render the negative-feedback boundary for the Generator.
+
+    Lists (region, mechanism) families that are exhausted
+    (consecutive_no_improve >= threshold). This is the ONLY Explore signal the
+    Generator consumes — positive feedback ("the bottleneck is here") would
+    collapse diversity, so it is never emitted here. Returns a plain-text
+    block; the Generator wraps it into its prompt.
+    """
+    if report is None or report.first_round:
+        return "Generation boundary: (no history — first round, all open)."
+    exhausted = []
+    for fam in report.families:
+        if fam.consecutive_no_improve >= _BOUNDARY_NO_IMPROVE:
+            exhausted.append(
+                f"  {fam.code_region} :: {', '.join(fam.mechanisms or ['?'])} "
+                f"(no improvement for {fam.consecutive_no_improve} attempts)"
+            )
+    if not exhausted:
+        return "Generation boundary: (no exhausted regions — all directions open)."
+    return (
+        "Generation boundary — EXHAUSTED families (do not produce variants):\n"
+        + "\n".join(exhausted)
+    )
+
+
+# Threshold for the generation boundary. Higher than the stall threshold (4)
+# used for the old submit gate: as a steering signal a false positive is
+# costlier — it cuts a whole region from the generation space.
+_BOUNDARY_NO_IMPROVE = 5
 
 
 def _render_finding_line(fh: FindingExploreHealth) -> str:

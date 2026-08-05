@@ -83,7 +83,11 @@ def test_missing_objective_key_marks_not_eligible():
 # --- per-finding parity ----------------------------------------------------
 
 def test_two_neutrals_trigger_mechanism_challenge_but_not_challenge_required():
-    # baseline + 2 neutral attempts in one finding.
+    # baseline + 2 neutral attempts in one finding. Per-finding
+    # mechanism_challenge fires (neutral >= 2). With the global threshold at 2,
+    # two neutral rounds also trigger global_stall — that is the intended new
+    # behavior. The point of this test is that the *per-finding* signal itself
+    # never escalates to challenge severity; the challenge comes from global.
     exps = [
         _exp(0, round=0, parent_sha="root", sha="s0", objective=100.0),
         _exp(1, round=1, parent_sha="s0", sha="s1", objective=100.0),
@@ -92,7 +96,8 @@ def test_two_neutrals_trigger_mechanism_challenge_but_not_challenge_required():
     r = _report(exps)
     fh = r.findings[0]
     assert _signal(fh, "mechanism_challenge").active is True
-    assert r.challenge_required is False  # per-finding never escalates
+    # per-finding signal is watch-severity, never challenge
+    assert all(s.severity != "challenge" for s in fh.policy_signals)
 
 
 def test_per_finding_feasibility_risk_and_contradictory():
@@ -131,7 +136,7 @@ def test_family_stall_across_new_findings_each_round():
                  code_regions=("src/a.cc:calc",), round=3),
     ]
     r = _report(exps, findings=findings)
-    fam = _family(r, "calc")
+    fam = _family(r, "src/a.cc")
     assert fam is not None
     assert fam.consecutive_no_improve == 3
     assert _signal(fam, "family_stall").active is True
@@ -336,3 +341,62 @@ def test_report_to_dict_round_trips():
     assert d["challenge_required"] is True
     assert len(d["families"]) == 1
     assert d["global_health"] is not None
+
+# --- marginal improvement decay (new behavior) ----------------------------
+
+def test_marginal_improvement_does_not_reset_global_stall():
+    """A <2% improvement decays the counter by one, not reset to 0.
+    Sequence: regression, marginal-improvement, regression.
+    Without decay the counter would be 0 after the marginal improvement;
+    with decay it goes 1 -> 0 (decay) -> 1, so global_stall (threshold 2)
+    does not fire. But add one more regression and it should fire.
+    """
+    exps = [
+        _exp(0, round=0, parent_sha="root", sha="s0", finding_id=None),
+        _exp(1, round=1, parent_sha="s0", sha="s1", finding_id="F-001",
+             objective=100.0),
+        _exp(2, round=2, parent_sha="s1", sha="s2", finding_id="F-001",
+             objective=99.5),   # 0.5% improvement — marginal
+        _exp(3, round=3, parent_sha="s2", sha="s3", finding_id="F-001",
+             objective=100.0),   # regression
+    ]
+    findings = [_finding("F-001", code_regions=("src/a.cc",))]
+    r = _report(exps, findings=findings)
+    # counter: round3 reg (+1=1), round2 marginal (decay to 0), round1 neutral (+1=1)
+    # => 1, below threshold 2
+    assert r.global_health.consecutive_no_improve_rounds == 1
+    assert not any(s.name == "global_stall" and s.active
+                   for s in r.global_health.policy_signals)
+
+
+def test_significant_improvement_resets_global_stall():
+    """A >=2% improvement stops the walk (counter stays as-is for prior rounds)."""
+    exps = [
+        _exp(0, round=0, parent_sha="root", sha="s0", finding_id=None),
+        _exp(1, round=1, parent_sha="s0", sha="s1", finding_id="F-001",
+             objective=100.0),   # neutral
+        _exp(2, round=2, parent_sha="s1", sha="s2", finding_id="F-001",
+             objective=95.0),    # 5% improvement — significant
+        _exp(3, round=3, parent_sha="s2", sha="s3", finding_id="F-001",
+             objective=96.0),    # regression
+    ]
+    findings = [_finding("F-001", code_regions=("src/a.cc",))]
+    r = _report(exps, findings=findings)
+    # round3 reg (+1=1), round2 significant (stop) => 1
+    assert r.global_health.consecutive_no_improve_rounds == 1
+
+
+def test_global_stall_threshold_is_two():
+    """Two consecutive no-improve rounds trigger global_stall."""
+    exps = [
+        _exp(0, round=0, parent_sha="root", sha="s0", finding_id=None),
+        _exp(1, round=1, parent_sha="s0", sha="s1", finding_id="F-001",
+             objective=100.0),
+        _exp(2, round=2, parent_sha="s1", sha="s2", finding_id="F-001",
+             objective=100.0),
+    ]
+    findings = [_finding("F-001", code_regions=("src/a.cc",))]
+    r = _report(exps, findings=findings)
+    assert r.global_health.consecutive_no_improve_rounds == 2
+    assert any(s.name == "global_stall" and s.active
+               for s in r.global_health.policy_signals)

@@ -101,14 +101,11 @@ def region_bucket_for(
 ) -> str:
     """Derive the region bucket for a finding.
 
-    Order: (1) the first ``code_regions`` tag, normalized; (2) if none, the
-    most frequent file bucket among the finding's ``changed_paths``; (3) else
-    ``unknown-region``.
+    Order: (1) the most frequent file bucket among the finding's actual
+    ``changed_paths`` — deterministic file paths the proposer cannot rename,
+    so they are the primary stall dimension; (2) if no experiments yet, the
+    first ``code_regions`` tag, normalized; (3) else ``unknown-region``.
     """
-    regions = getattr(finding, "code_regions", ()) or ()
-    if regions:
-        return normalize_region(regions[0])
-    # Fall back to changed_paths of the finding's experiments.
     counts: dict[str, int] = {}
     for exp in finding_experiments:
         for path in (exp.changed_paths or ()):
@@ -117,6 +114,9 @@ def region_bucket_for(
                 counts[b] = counts.get(b, 0) + 1
     if counts:
         return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    regions = getattr(finding, "code_regions", ()) or ()
+    if regions:
+        return normalize_region(regions[0])
     return UNKNOWN_REGION
 
 
