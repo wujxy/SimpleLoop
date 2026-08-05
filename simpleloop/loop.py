@@ -479,7 +479,7 @@ def _build_context(
         researcher = roles["researcher"]
         from .roles.orchestrator import ProposerOrchestrator
         proposer_agent = ProposerOrchestrator(
-            model=model_mod.HepAIChatModel.from_config(researcher),
+            model=model_mod.build_chat_model(researcher),
             runtime=runtime,
             timeout_seconds=timeout,
             max_steps=researcher["max_steps"],

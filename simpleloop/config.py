@@ -282,8 +282,10 @@ def _resolve_researcher(raw: object) -> dict:
     if unknown:
         raise ConfigError(f"researcher: unknown key(s): {sorted(unknown)}")
     result = {**_RESEARCHER_DEFAULTS, **raw}
-    if result["api"] != "hepai":
-        raise ConfigError("researcher.api: first version supports only 'hepai'")
+    if result["api"] not in ("hepai", "zhipu"):
+        raise ConfigError(
+            "researcher.api: supported values are 'hepai' and 'zhipu'"
+        )
     for key in ("model", "base_url"):
         if not isinstance(result[key], str) or not result[key].strip():
             raise ConfigError(

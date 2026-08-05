@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,14 +20,47 @@ _METRICS_SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True}}
 
 
 class FakeModel:
-    """Returns canned ModelReply objects in order."""
-    def __init__(self, responses):
-        self.responses = list(responses)
+    """Thread-safe fake for the always-parallel orchestrator.
+
+    The generator runs once, serially, before any branch, so the first
+    ``complete()`` call returns ``gen``. Each later call belongs to a branch and
+    is routed to that branch's own response list, keyed by the hypothesis
+    mechanism embedded in the branch's intro message (``mechanism: <m>``). That
+    keeps each branch's scripted action sequence deterministic no matter how the
+    pool interleaves the branches.
+    """
+
+    def __init__(self, gen, by_mechanism=None):
+        self.gen = gen
+        self.by_mechanism = by_mechanism or {}
+        self._cursors = {}
+        self._gen_served = False
+        self._lock = threading.Lock()
         self.calls = []
 
-    def complete(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.responses.pop(0)
+    def complete(self, *, system, messages, timeout_seconds):
+        with self._lock:
+            self.calls.append(messages)
+            if not self._gen_served:
+                self._gen_served = True
+                return self.gen
+            mech = _mechanism_in(messages)
+            i = self._cursors.get(mech, 0)
+            self._cursors[mech] = i + 1
+            return self.by_mechanism[mech][i]
+
+
+def _mechanism_in(messages):
+    """Pull the hypothesis mechanism out of a branch's injected direction."""
+    for msg in messages:
+        text = msg.get("content", "")
+        if not isinstance(text, str):
+            continue
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("mechanism:"):
+                return s.split("mechanism:", 1)[1].strip()
+    return None
 
 
 class FakeTools:
@@ -121,6 +157,19 @@ def _orchestrator(model, *, max_steps=20, **kw):
     )
 
 
+def _branch_script(submit):
+    """A research -> assess -> (submit|abandon) response sequence for one
+    branch."""
+    return [
+        ModelReply(json.dumps({
+            "action": "run_research_command",
+            "command": "grep -r mechanism src/", "cwd": "source",
+        })),
+        ModelReply(json.dumps(_assess_action())),
+        ModelReply(json.dumps(_submit_action() if submit else _abandon_action())),
+    ]
+
+
 class TestSelectMode:
     def test_first_round_depth_first(self):
         m = _select_mode(first_round=True, n_experiments=0,
@@ -147,32 +196,15 @@ class TestOrchestratorRun:
         """Generator produces 2 cards, both enter branches, one submits."""
         FakeTools.instances.clear()
         monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-
         args = _run_args(tmp_path)
-        # Generator response: 2 cards
         gen = _gen_response([
             _card_json(mech="getter", interv="cache"),
             _card_json(mech="search", interv="replace"),
         ])
-        # Branch 1: research → assess → submit
-        branch1 = [
-            ModelReply(json.dumps({
-                "action": "run_research_command",
-                "command": "grep -r getter src/", "cwd": "source",
-            })),
-            ModelReply(json.dumps(_assess_action())),
-            ModelReply(json.dumps(_submit_action())),
-        ]
-        # Branch 2: research → assess → abandon
-        branch2 = [
-            ModelReply(json.dumps({
-                "action": "run_research_command",
-                "command": "grep -r search src/", "cwd": "source",
-            })),
-            ModelReply(json.dumps(_assess_action())),
-            ModelReply(json.dumps(_abandon_action())),
-        ]
-        model = FakeModel([gen] + branch1 + branch2)
+        model = FakeModel(gen, {
+            "getter": _branch_script(submit=True),
+            "search": _branch_script(submit=False),
+        })
         orch = _orchestrator(model, max_steps=20, hypothesis_count=2,
                              branch_count=2)
         result = orch.run(**args)
@@ -192,15 +224,7 @@ class TestOrchestratorRun:
         monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
         args = _run_args(tmp_path)
         gen = _gen_response([_card_json()])
-        branch = [
-            ModelReply(json.dumps({
-                "action": "run_research_command",
-                "command": "grep -r getter src/", "cwd": "source",
-            })),
-            ModelReply(json.dumps(_assess_action())),
-            ModelReply(json.dumps(_abandon_action())),
-        ]
-        model = FakeModel([gen] + branch)
+        model = FakeModel(gen, {"getter": _branch_script(submit=False)})
         orch = _orchestrator(model, max_steps=20, hypothesis_count=1,
                              branch_count=1)
         result = orch.run(**args)
@@ -219,7 +243,7 @@ class TestOrchestratorRun:
             "intervention_family": "", "why_plausible": "w",
             "critical_unknown": "u", "slot": "guided",
         }])
-        model = FakeModel([gen])
+        model = FakeModel(gen)
         orch = _orchestrator(model, max_steps=20, hypothesis_count=1,
                              branch_count=1)
         from simpleloop.roles.model import ModelError
@@ -238,28 +262,93 @@ class TestOrchestratorRun:
             _card_json(mech="getter", interv="cache", slot="guided"),
             _card_json(mech="search", interv="replace", slot="free"),
         ])
-        # Both branches do a research command first (establish evidence_basis),
-        # then assess + submit.
-        branch1 = [
-            ModelReply(json.dumps({
-                "action": "run_research_command",
-                "command": "grep -r getter src/", "cwd": "source",
-            })),
-            ModelReply(json.dumps(_assess_action())),
-            ModelReply(json.dumps(_submit_action())),
-        ]
-        branch2 = [
-            ModelReply(json.dumps({
-                "action": "run_research_command",
-                "command": "grep -r search src/", "cwd": "source",
-            })),
-            ModelReply(json.dumps(_assess_action())),
-            ModelReply(json.dumps(_submit_action())),
-        ]
-        model = FakeModel([gen] + branch1 + branch2)
+        model = FakeModel(gen, {
+            "getter": _branch_script(submit=True),
+            "search": _branch_script(submit=True),
+        })
         orch = _orchestrator(model, max_steps=20, hypothesis_count=2,
                              branch_count=2)
         result = orch.run(**args)
         # Both branches produced a proposal.
         assert len(result.proposals) == 2
         assert not result.abstained
+
+    def test_branches_run_concurrently(self, tmp_path, monkeypatch):
+        """The pool fans the branches out so they overlap in time. FakeModel
+        serves only the generator; research_branch is stubbed so the test
+        targets the pool itself."""
+        FakeTools.instances.clear()
+        monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+        args = _run_args(tmp_path)
+        gen = _gen_response([
+            _card_json(op="G6", mech="getter", interv="cache"),
+            _card_json(op="G9", mech="search", interv="replace"),
+        ])
+        model = FakeModel(gen)
+        orch = _orchestrator(model, max_steps=20, hypothesis_count=2,
+                             branch_count=2)
+
+        state = {"in_flight": 0, "max_in_flight": 0}
+        lock = threading.Lock()
+
+        def fake_research_branch(*, hypothesis, **_kwargs):
+            with lock:
+                state["in_flight"] += 1
+                state["max_in_flight"] = max(
+                    state["max_in_flight"], state["in_flight"])
+            time.sleep(0.05)  # force overlap so concurrency is observable
+            with lock:
+                state["in_flight"] -= 1
+            return proposer_mod.BranchResult(
+                hypothesis=hypothesis,
+                proposal=SimpleNamespace(
+                    instruction=f"do {hypothesis.generative_op}"),
+                deliberation_telemetry={"tool_calls": 1},
+            )
+
+        monkeypatch.setattr(orch.proposer, "research_branch",
+                            fake_research_branch)
+        result = orch.run(**args)
+
+        # The two branches overlapped in flight -> real concurrency.
+        assert state["max_in_flight"] == 2
+        assert not result.abstained
+        assert len(result.proposals) == 2
+
+    def test_branch_worker_failure_is_isolated(self, tmp_path, monkeypatch):
+        """A branch that raises becomes an abandoned result; its siblings still
+        complete. Mirrors test_run_candidates_normalizes_serial_worker_failure."""
+        FakeTools.instances.clear()
+        monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+        args = _run_args(tmp_path)
+        gen = _gen_response([
+            _card_json(op="G6", mech="getter", interv="cache"),
+            _card_json(op="G9", mech="search", interv="replace"),
+        ])
+        model = FakeModel(gen)
+        orch = _orchestrator(model, max_steps=20, hypothesis_count=2,
+                             branch_count=2)
+
+        def fake_research_branch(*, hypothesis, **_kwargs):
+            if hypothesis.generative_op == "G9":
+                raise RuntimeError("boom")
+            return proposer_mod.BranchResult(
+                hypothesis=hypothesis,
+                proposal=SimpleNamespace(instruction="ok"),
+                deliberation_telemetry={"tool_calls": 1},
+            )
+
+        monkeypatch.setattr(orch.proposer, "research_branch",
+                            fake_research_branch)
+        result = orch.run(**args)
+
+        # The failing branch was quarantined as abandoned; the survivor's
+        # proposal came through and the pool was not killed.
+        assert len(result.proposals) == 1
+        assert not result.abstained
+        statuses = {
+            (b["proposal"], b["abandoned"])
+            for b in result.trace["branches"]
+        }
+        assert (True, False) in statuses   # survivor
+        assert (False, True) in statuses   # quarantined failure

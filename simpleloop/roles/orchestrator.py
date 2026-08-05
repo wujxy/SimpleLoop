@@ -29,6 +29,7 @@ The ProposerResult interface is unchanged so loop.py needs no modification.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -136,7 +137,6 @@ class ProposerOrchestrator:
         """Run the full branch-then-deepen pipeline. Returns ProposerResult
         with the same interface as the old ProposerAgent.run."""
         started = time.monotonic()
-        deadline = started + self.timeout_seconds
 
         # --- Explore (shared across generator + branches) ---
         try:
@@ -200,35 +200,16 @@ class ProposerOrchestrator:
         # doesn't exist in the code, the branch abandons (producing a finding
         # for Explore). This is task-agnostic and avoids the vocabulary-mismatch
         # false negatives of a keyword-grep probe.
-        branch_results: list[BranchResult] = []
-        for card in cards:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                print("[orchestrator] deadline exceeded, skipping remaining "
-                      "branches", flush=True)
-                break
-            branch = self.proposer.research_branch(
-                hypothesis=card,
-                goal=goal, editable=editable, frozen=frozen,
-                memory_service=memory_service, base_sha=base_sha,
-                source_path=source_path, repo_path=repo_path,
-                run_dir=run_dir, current_round=current_round,
-                gate_block=gate_block, prompt_dir=prompt_dir,
-                hints=hints, explore=explore,
-                max_steps=mode.max_branch_steps,
-            )
-            branch_results.append(branch)
-            if branch.proposal:
-                print(
-                    f"[orchestrator] branch {card.generative_op} "
-                    f"{card.signature()} → proposal", flush=True,
-                )
-            elif branch.abandoned:
-                print(
-                    f"[orchestrator] branch {card.generative_op} "
-                    f"{card.signature()} → abandoned: "
-                    f"{(branch.abandon_reason or '')[:60]}", flush=True,
-                )
+        branch_results = self._run_branches(
+            cards,
+            goal=goal, editable=editable, frozen=frozen,
+            memory_service=memory_service, base_sha=base_sha,
+            source_path=source_path, repo_path=repo_path,
+            run_dir=run_dir, current_round=current_round,
+            gate_block=gate_block, prompt_dir=prompt_dir,
+            hints=hints, explore=explore,
+            mode=mode,
+        )
 
         # --- (4) Collect proposals (list-wise selection) ---
         proposals = [
@@ -274,6 +255,71 @@ class ProposerOrchestrator:
                 for b in branch_results
             ]},
         )
+
+    def _run_branches(
+        self, cards, *, goal, editable, frozen, memory_service, base_sha,
+        source_path, repo_path, run_dir, current_round, gate_block,
+        prompt_dir, hints, explore, mode,
+    ) -> list[BranchResult]:
+        """Run one research_branch per card, concurrently.
+
+        Mirrors ``loop._run_candidates``: a branch that raises becomes an
+        abandoned result (so one failure never kills the others) and results are
+        indexed by original card position so the post-collection tie-break and
+        trace stay stable. Concurrency is already bounded — ``cards`` is capped
+        at ``branch_count`` upstream.
+        """
+        shared = dict(
+            goal=goal, editable=editable, frozen=frozen,
+            memory_service=memory_service, base_sha=base_sha,
+            source_path=source_path, repo_path=repo_path,
+            run_dir=run_dir, current_round=current_round,
+            gate_block=gate_block, prompt_dir=prompt_dir,
+            hints=hints, explore=explore,
+            max_steps=mode.max_branch_steps,
+        )
+        results: list[BranchResult | None] = [None] * len(cards)
+        with ThreadPoolExecutor(max_workers=len(cards)) as pool:
+            futures = {
+                pool.submit(
+                    self.proposer.research_branch, hypothesis=card, **shared,
+                ): i
+                for i, card in enumerate(cards)
+            }
+            for future in as_completed(futures):
+                i = futures[future]
+                try:
+                    results[i] = future.result()
+                except Exception as exc:
+                    card = cards[i]
+                    print(
+                        f"[orchestrator] branch {card.generative_op} "
+                        f"{card.signature()} failed: {exc}", flush=True,
+                    )
+                    results[i] = BranchResult(
+                        hypothesis=card, abandoned=True,
+                        abandon_reason=f"branch worker failed: {exc}",
+                        deliberation_telemetry={"tool_calls": 0},
+                    )
+        for branch in results:
+            if branch is not None:
+                self._log_branch_result(branch)
+        return [r for r in results if r is not None]
+
+    @staticmethod
+    def _log_branch_result(branch: BranchResult) -> None:
+        card = branch.hypothesis
+        if branch.proposal:
+            print(
+                f"[orchestrator] branch {card.generative_op} "
+                f"{card.signature()} → proposal", flush=True,
+            )
+        elif branch.abandoned:
+            print(
+                f"[orchestrator] branch {card.generative_op} "
+                f"{card.signature()} → abandoned: "
+                f"{(branch.abandon_reason or '')[:60]}", flush=True,
+            )
 
     def _abstain(self, reason: str, *, telemetry: dict | None = None) -> ProposerResult:
         print(f"[orchestrator] abstained: {reason}", flush=True)

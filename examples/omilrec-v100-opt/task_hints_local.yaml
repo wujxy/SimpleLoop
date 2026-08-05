@@ -51,16 +51,21 @@ loop:
 
 roles:
   researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
+    api: zhipu
+    model: glm-5.2
+    # GLM Coding Plan — OpenAI Chat Completions endpoint. The Coding Plan
+    # quota is consumed ONLY at /api/coding/paas/v4/; the bare /api/paas/v4/
+    # bills pay-as-you-go balance (-> 429 code 1113 余额不足), and
+    # /api/anthropic serves the Anthropic Messages API the executor uses.
+    # Auth: ZHIPU_API_KEY (or ZHIPUAI_API_KEY) env var.
+    base_url: https://open.bigmodel.cn/api/coding/paas/v4/
     max_steps: 50
     command_timeout_seconds: 120
     command_output_cap_chars: 12000
   executor:
     api: anthropic
     model: glm-5.2
-    base_url: https://aiapi.ihep.ac.cn/apiv2
+    base_url: https://open.bigmodel.cn/api/anthropic
     # Alternative if the ihep anthropic endpoint is unreachable from this host:
     #   model: glm-5
     #   base_url: https://open.bigmodel.cn/api/anthropic

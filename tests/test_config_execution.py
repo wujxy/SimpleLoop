@@ -146,7 +146,7 @@ def test_researcher_rejects_unknown_key(tmp_path: Path):
     ("researcher", "message"),
     [
         (None, "must be an object"),
-        ({"api": "openai"}, "supports only 'hepai'"),
+        ({"api": "openai"}, "supported values are"),
         ({"model": " "}, "researcher.model"),
         ({"base_url": ""}, "researcher.base_url"),
         ({"max_steps": 0}, "researcher.max_steps"),
