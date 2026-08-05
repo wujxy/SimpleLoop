@@ -268,6 +268,8 @@ class ProposerOrchestrator:
             trace={"branches": [
                 {"sig": b.hypothesis.signature(),
                  "proposal": bool(b.proposal),
+                 "instruction": (b.proposal.instruction
+                                  if b.proposal is not None else None),
                  "abandoned": b.abandoned}
                 for b in branch_results
             ]},

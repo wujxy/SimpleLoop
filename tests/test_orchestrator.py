@@ -179,6 +179,13 @@ class TestOrchestratorRun:
         assert len(result.proposals) == 1
         assert not result.abstained
         assert result.deliberation_telemetry["mode"] == "depth-first"
+        # Trace stores the full instruction text for observability.
+        branch0 = result.trace["branches"][0]
+        assert branch0["proposal"] is True
+        assert branch0["instruction"] == result.proposals[0].instruction
+        branch1 = result.trace["branches"][1]
+        assert branch1["proposal"] is False
+        assert branch1["instruction"] is None
 
     def test_all_branches_abandon_yields_abstain(self, tmp_path, monkeypatch):
         FakeTools.instances.clear()
