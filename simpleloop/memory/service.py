@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from ..explore import ExploreReport, analyze_explore_health
 from ..harness.memory import read_history, resolve_episode
 from .context import build_startup_pack
 from .experiment_index import (
@@ -31,7 +32,6 @@ from .retrieval import (
     diverse_experiment_search,
     rank_findings,
 )
-from .signals import compute_deliberation_signals
 
 
 MEMORY_TOOL_CHEATSHEET = (
@@ -83,6 +83,20 @@ class MemoryService:
             editable_prefixes=editable_prefixes,
         )
 
+    def analyze_explore(self, *, current_round: int) -> ExploreReport:
+        """Compute the search-health report from the current Ledger + Finding
+        archive. This is the single source of truth the Proposer consults —
+        compute it once per wakeup and reuse for the startup pack, the
+        per-step state header, the nudges, and the challenge guard."""
+        objective = (self.metrics_schema or {}).get("objective") or {}
+        return analyze_explore_health(
+            self.load_findings(),
+            self.load_experiments(),
+            current_round=current_round,
+            objective_key=objective.get("key"),
+            lower_is_better=bool(objective.get("lower_is_better")),
+        )
+
     def build_startup_pack(
         self,
         *,
@@ -95,6 +109,7 @@ class MemoryService:
         hints: list[str] | None,
         current_round: int,
         recent_rounds: int = 2,
+        explore: ExploreReport | None = None,
     ) -> str:
         history = read_history(self.history_path)
         experiments = build_experiments(history)
@@ -117,15 +132,8 @@ class MemoryService:
             for record in history
             if isinstance(record, dict) and record.get("abstention")
         ][-recent_rounds:]
-        objective = (self.metrics_schema or {}).get("objective") or {}
-        signals = compute_deliberation_signals(
-            findings,
-            experiments,
-            current_round=current_round,
-            hints_present=bool(hints),
-            objective_key=objective.get("key"),
-            lower_is_better=bool(objective.get("lower_is_better")),
-        )
+        if explore is None:
+            explore = self.analyze_explore(current_round=current_round)
         return build_startup_pack(
             goal=goal,
             editable=editable,
@@ -139,7 +147,7 @@ class MemoryService:
             recent_rounds=recent_rounds,
             tool_cheatsheet=MEMORY_TOOL_CHEATSHEET,
             recent_abstentions=abstentions,
-            signals=signals,
+            explore=explore,
         )
 
     # --- Write path: target resolution & experiment linking ---------------

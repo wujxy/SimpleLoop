@@ -221,9 +221,9 @@ def test_startup_pack_surfaces_deliberation_signals(tmp_path: Path):
         base_sha="abc", gate_block="- physics: pass",
         candidates_per_round=1, hints=None, current_round=3,
     )
-    assert "Deliberation signals" in pack
+    assert "Explore health" in pack
     assert "mechanism_challenge" in pack
-    assert "NOT" in pack and "conclusions" in pack  # the non-verdict disclaimer
+    assert "NOT" in pack and "verdicts" in pack  # the non-verdict disclaimer
 
 
 def test_search_experiments_returns_buckets(tmp_path: Path):

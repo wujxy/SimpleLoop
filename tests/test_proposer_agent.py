@@ -398,6 +398,194 @@ def test_near_duplicate_repaired_then_passes(tmp_path, monkeypatch, capsys):
     assert "reason=near_duplicate" in capsys.readouterr().out
 
 
+# --- Explore challenge_response guard -------------------------------------
+
+def _seed_stall_history(run_dir: Path, *, rounds=4, objective=100.0) -> None:
+    """Seed ``rounds`` history rows that form a no-improvement chain so that
+    Explore health marks challenge_required (global_stall). Round 0 is the
+    baseline (parent unresolvable → unclassified); rounds 1..N-1 are neutral
+    relative to the prior selected candidate."""
+    records = []
+    parent = "abc123"
+    sha = "sha0"
+    for r in range(rounds):
+        sel = (r == 0)  # only the baseline is selected
+        records.append({
+            "round": r,
+            "parent_sha": parent,
+            "selected_candidate": 0,
+            "selected_sha": sha,
+            "candidates": [{
+                "candidate": 0,
+                "experiment_id": f"r{r}c0",
+                "finding_id": None,
+                "proposal": f"neutral variant {r}",
+                "parent_sha": parent,
+                "sha": sha,
+                "status": "COMPLETED",
+                "metrics": {"SPEED_MS": objective},
+                "changed_paths": ["src/a.cc"],
+                "gates": {},
+                "gate_passed": True,
+                "eligible": True,
+                "selected": sel,
+            }],
+        })
+        parent = sha
+        sha = f"sha{r + 1}"
+    (run_dir / "history.jsonl").write_text(
+        "\n".join(json.dumps(rec) for rec in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _challenge_response(refs=("experiment:r0c0",)) -> dict:
+    return {
+        "triggered_policy": "global_stall",
+        "stalled_family": "src/a.cc::lookup",
+        "what_was_exhausted": "repeated neutral variants of the lookup",
+        "null_hypothesis": "this variant changes the cost no more than noise",
+        "why_this_is_not_same_family_variant": "it removes the lookup entirely",
+        "why_worth_one_more_experiment": "the source shows a now-dead branch",
+        "evidence_refs": list(refs),
+    }
+
+
+def _submit_with_challenge(instruction="Remove the dead lookup branch.",
+                            challenge=None) -> dict:
+    action = _submit(instruction=instruction, evidence_refs=["experiment:r0c0"])
+    action["challenge_response"] = challenge or _challenge_response()
+    return action
+
+
+def test_challenge_required_submit_without_response_is_repaired(
+    tmp_path, monkeypatch, capsys,
+):
+    """Under active Explore challenge, submit_proposals without a
+    challenge_response is repaired with reason=challenge_response_required."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    args = _run_args(tmp_path)
+    _seed_stall_history(args["run_dir"])
+    model = FakeModel([
+        _reply(_frame()),
+        _reply(_assess(verification=_verify_block(refs=("experiment:r0c0",)))),
+        # submit without challenge_response -> repaired
+        _reply(_submit()),
+        # submit with a valid challenge_response -> passes
+        _reply(_submit_with_challenge()),
+    ])
+    result = _agent(model).run(**args)
+    assert len(result.proposals) == 1
+    out = capsys.readouterr().out
+    assert "reason=challenge_response_required" in out
+    tel = result.deliberation_telemetry
+    assert tel["explore_challenge_required"] is True
+    assert tel["challenge_response_provided"] is True
+    assert result.trace["explore"]["challenge_required"] is True
+    assert result.trace["explore"]["challenge_reasons"]
+
+
+def test_challenge_response_invalid_evidence_is_repaired(
+    tmp_path, monkeypatch, capsys,
+):
+    """A challenge_response whose evidence_refs do not resolve to real evidence
+    examined this round is also repaired."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    args = _run_args(tmp_path)
+    _seed_stall_history(args["run_dir"])
+    model = FakeModel([
+        _reply(_frame()),
+        _reply(_assess(verification=_verify_block(refs=("experiment:r0c0",)))),
+        # challenge_response points at a non-existent experiment ref
+        _reply(_submit_with_challenge(
+            challenge=_challenge_response(refs=("experiment:r99c9",)),
+        )),
+        _reply(_submit_with_challenge()),
+    ])
+    result = _agent(model).run(**args)
+    assert len(result.proposals) == 1
+    assert "reason=challenge_response_required" in capsys.readouterr().out
+
+
+def test_reframe_under_challenge_needs_no_response(tmp_path, monkeypatch, capsys):
+    """reframe_research and abandon_direction are valid escapes from a
+    challenge and never need a challenge_response — they must not be blocked.
+
+    (Note: challenge_required reflects the Ledger at wakeup and is not cleared
+    by a round-local reframe, so a *submit* after reframe would still need a
+    challenge_response. This test instead exercises the reframe→abandon path,
+    which carries no challenge obligation at all.)"""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    args = _run_args(tmp_path)
+    _seed_stall_history(args["run_dir"])
+    model = FakeModel([
+        _reply(_frame()),
+        _reply(_assess(progress="stalled")),
+        _reply({
+            "action": "reframe_research",
+            "what_failed": "the lookup direction keeps stalling",
+            "new_research_question": "Is the cost in the branch predictor?",
+            "new_decision_relevant_unknown": "branch density",
+        }),
+        _reply(_frame(
+            question="Is the cost in the branch predictor?",
+            unknown="branch density",
+        )),
+        _reply(_assess(progress="stalled")),
+        _reply(_abandon()),
+    ])
+    result = _agent(model).run(**args)
+    assert result.abstained is True
+    # Neither reframe nor abandon triggered a challenge repair.
+    assert "reason=challenge_response_required" not in capsys.readouterr().out
+
+
+def test_no_challenge_means_no_response_required(tmp_path, monkeypatch):
+    """A healthy single-improvement history has no challenge_required, so a
+    plain submit passes with no challenge repair and telemetry reflects it."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    args = _run_args(tmp_path)
+    _seed_history(args["run_dir"], objective=100.0)  # single baseline round
+    model = FakeModel([
+        _reply(_frame()),
+        _reply(_assess(verification=_verify_block(refs=("experiment:r0c0",)))),
+        _reply(_submit()),
+    ])
+    result = _agent(model).run(**args)
+    assert len(result.proposals) == 1
+    tel = result.deliberation_telemetry
+    assert tel["explore_challenge_required"] is False
+    assert tel["challenge_response_provided"] is False
+
+
+def test_parse_challenge_response_round_trips_and_rejects_unknown_keys():
+    action = {
+        "action": "submit_proposals",
+        "proposals": [{"instruction": "x", "research_target": _new_target()}],
+        "challenge_response": _challenge_response(),
+    }
+    parsed = _parse_action(json.dumps(action), candidates_per_round=1)
+    cr = parsed["challenge_response"]
+    assert cr["null_hypothesis"] == "this variant changes the cost no more than noise"
+    assert cr["evidence_refs"] == ["experiment:r0c0"]
+
+    # unknown key -> ProposerError
+    bad = {**action, "challenge_response": {**_challenge_response(), "bogus": 1}}
+    with pytest.raises(ProposerError):
+        _parse_action(json.dumps(bad), candidates_per_round=1)
+
+    # empty required text field -> ProposerError
+    bad2 = {**action, "challenge_response": {
+        **_challenge_response(), "null_hypothesis": "  ",
+    }}
+    with pytest.raises(ProposerError):
+        _parse_action(json.dumps(bad2), candidates_per_round=1)
+
+
 # --- control flow ---------------------------------------------------------
 
 def test_abandon_direction_terminates_with_zero_proposals(

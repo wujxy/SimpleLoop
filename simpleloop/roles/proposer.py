@@ -38,7 +38,12 @@ from ..memory.models import (
     NewFindingTarget,
     ResearchProposal,
 )
-from ..memory.signals import compute_deliberation_signals, jaccard_overlap
+from ..explore.classify import jaccard_overlap
+from ..explore.models import ExploreReport
+from ..explore.render import (
+    render_challenge_repair_message,
+    render_explore_for_state_header,
+)
 from ..prompts import load_semantic
 
 
@@ -244,13 +249,25 @@ _TERMINAL_ACTION_PROMPT = (
     '    {"instruction":"...", '
     '"research_target":{"mode":"new","question":"...","mechanisms":["..."],'
     '"code_regions":["..."]}}\n'
-    "  ]}\n"
+    '  ],"challenge_response":{"triggered_policy":"...",'
+    '"stalled_family":"...","what_was_exhausted":"...",'
+    '"null_hypothesis":"...","why_this_is_not_same_family_variant":"...",'
+    '"why_worth_one_more_experiment":"...","evidence_refs":['
+    '"experiment:r3c0"]}}\n'
     "  Submit only after a proposal is verified (assess_research with a "
     "supported verification block backed by real evidence_refs). 1..N "
     "proposals — the budget is a ceiling, not a quota. evidence_refs and "
     "material_difference are optional unless the proposal resembles a prior "
     "one. Each proposal declares an existing finding (mode=existing, F-NNN) "
     "or a new question (mode=new). There is NO annotations field.\n"
+    "  challenge_response is OPTIONAL — but REQUIRED when Explore health "
+    "marks challenge_required (active family/global stagnation). It must "
+    "name the stalled family, the null hypothesis, why this proposal is not "
+    "another same-family variant, why one more experiment is worth its cost, "
+    "and real evidence_refs you examined this round (at least one "
+    "experiment:/source:). If you cannot honestly fill it, reframe_research "
+    "or abandon_direction instead. reframe_research and abandon_direction "
+    "never need a challenge_response.\n"
     '- {"action":"abandon_direction","reason":"...",'
     '"blocking_unknown":"..."}\n'
     "  End the round with zero proposals when no experiment is worth its "
@@ -317,10 +334,34 @@ _GUARD_REASONS = {
         "information. Change the query, inspect a different episode/finding, "
         "or move on via assess_research."
     ),
+    "challenge_response_required": (
+        "Explore health shows active family/global stagnation "
+        "(challenge_required). Either reframe_research, abandon_direction, or "
+        "submit_proposals with a challenge_response object naming the stalled "
+        "family, the null hypothesis, why this is not another same-family "
+        "variant, why one more experiment is worth its cost, and real "
+        "evidence_refs you examined this round."
+    ),
 }
 
 
-def _guard_repair_message(reason: str) -> str:
+# Text fields a challenge_response must carry (each non-empty) when the
+# Explore report marks challenge_required. evidence_refs is validated
+# separately via _validate_verification_refs (needs empirical evidence).
+_CHALLENGE_TEXT_FIELDS = (
+    "triggered_policy",
+    "stalled_family",
+    "what_was_exhausted",
+    "null_hypothesis",
+    "why_this_is_not_same_family_variant",
+    "why_worth_one_more_experiment",
+)
+_CHALLENGE_ALLOWED_KEYS = set(_CHALLENGE_TEXT_FIELDS) | {"evidence_refs"}
+
+
+def _guard_repair_message(reason: str, *, explore: ExploreReport | None = None) -> str:
+    if reason == "challenge_response_required" and explore is not None:
+        return render_challenge_repair_message(explore)
     base = _GUARD_REASONS.get(reason, "")
     return (
         f"Protocol correction required ({reason}). {base} Return exactly one "
@@ -479,6 +520,36 @@ def _parse_proposal(value) -> ResearchProposal:
         evidence_refs=evidence_refs,
         material_difference=(md.strip() if isinstance(md, str) else None),
     )
+
+
+def _parse_challenge_response(value) -> dict:
+    """Parse the optional submit_proposals challenge_response block.
+
+    Required when Explore health marks ``challenge_required``. All text fields
+    must be non-empty strings when present; ``evidence_refs`` is a possibly
+    empty string list (the guard re-validates that it resolves to real
+    evidence examined this round). Returns a dict carrying the validated fields
+    plus the raw ``evidence_refs`` list.
+    """
+    if not isinstance(value, dict):
+        raise ProposerError("challenge_response must be an object")
+    if set(value) - _CHALLENGE_ALLOWED_KEYS:
+        raise ProposerError(
+            f"challenge_response has unexpected keys: {sorted(value)}"
+        )
+    out: dict[str, object] = {}
+    for field in _CHALLENGE_TEXT_FIELDS:
+        v = value.get(field, "")
+        if not isinstance(v, str) or not v.strip():
+            raise ProposerError(
+                f"challenge_response.{field} must be a non-empty string"
+            )
+        out[field] = v.strip()
+    out["evidence_refs"] = _require_string_list(
+        value.get("evidence_refs", []),
+        name="challenge_response.evidence_refs", allow_empty=True,
+    )
+    return out
 
 
 def _parse_progress(value: str) -> ResearchProgress:
@@ -721,7 +792,7 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             "blocking_unknown": (unknown or "").strip() or None,
         }
     if name == "submit_proposals":
-        _require_keys(action, {"action", "proposals"})
+        _require_keys(action, {"action", "proposals"}, {"challenge_response"})
         proposals = action["proposals"]
         if (not isinstance(proposals, list)
                 or not 1 <= len(proposals) <= candidates_per_round):
@@ -730,7 +801,16 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
                 "none, use abandon_direction from Decide"
             )
         parsed = [_parse_proposal(item) for item in proposals]
-        return {"action": name, "proposals": parsed}
+        challenge_response = None
+        if "challenge_response" in action:
+            challenge_response = _parse_challenge_response(
+                action["challenge_response"]
+            )
+        return {
+            "action": name,
+            "proposals": parsed,
+            "challenge_response": challenge_response,
+        }
     raise ProposerError(f"unknown proposer action: {name}")
 
 
@@ -890,6 +970,7 @@ def _draft_resembles_history(draft: str, history: list[dict]) -> bool:
 def _validate_action_guard(
     state: WorkingState, action: dict, history: list[dict],
     findings_by_id: dict, source_root: Path,
+    explore: ExploreReport | None = None,
 ) -> str | None:
     """Return a repair reason, or None when the action satisfies the guards."""
     name = action["action"]
@@ -920,25 +1001,30 @@ def _validate_action_guard(
             if not prop.evidence_refs or not (
                     prop.material_difference and prop.material_difference.strip()):
                 return "near_duplicate"
+        # Explore challenge: a stalled family/global state must be answered with
+        # a challenge_response whose evidence_refs resolve to real evidence this
+        # round. This never forbids submit — it forces the Scientist to state,
+        # on the record, why the next experiment is not another exhausted
+        # variant. reframe_research and abandon_direction remain free of it.
+        if explore is not None and explore.challenge_required:
+            cr = action.get("challenge_response")
+            if cr is None:
+                return "challenge_response_required"
+            if not _validate_verification_refs(
+                cr["evidence_refs"], state, source_root,
+            ):
+                return "challenge_response_required"
         return None
     return None
 
 
 # --- State header ---------------------------------------------------------
 
-def _render_state_header(state: WorkingState, signals: dict | None) -> str:
+def _render_state_header(
+    state: WorkingState, explore: ExploreReport | None,
+) -> str:
     """Compact, delta-only epistemic state, injected so the Scientist keeps its
     own judgment in view without re-reading the whole history."""
-    active = []
-    if signals and not signals.get("first_round"):
-        for entry in (signals.get("findings") or []):
-            for k, v in (entry.get("policy_signals") or {}).items():
-                if (v or {}).get("active"):
-                    active.append(f"{entry['id']}:{k}")
-        g = signals.get("global") or {}
-        for k, v in (g.get("policy_signals") or {}).items():
-            if (v or {}).get("active"):
-                active.append(f"global:{k}")
     lines = ["Working state (your current epistemic position):"]
     lines.append(f"  phase={state.phase.value}  "
                  f"verification={state.verification_status.value}"
@@ -963,8 +1049,9 @@ def _render_state_header(state: WorkingState, signals: dict | None) -> str:
         lines.append(
             "  possible_near_duplicate: this draft resembles a prior proposal "
             "— be sure it is materially different before verifying")
-    if active:
-        lines.append(f"  active_signals: {', '.join(active)}")
+    explore_block = render_explore_for_state_header(explore)
+    if explore_block:
+        lines.append(explore_block)
     return "\n".join(lines)
 
 
@@ -977,6 +1064,8 @@ def _truncate(text: str, limit: int) -> str:
 
 def _build_telemetry(
     state: WorkingState, *, steps: int, abandoned: bool,
+    explore: ExploreReport | None = None,
+    challenge_response_provided: bool = False,
 ) -> dict:
     return {
         "steps": steps,
@@ -989,10 +1078,32 @@ def _build_telemetry(
         "abandoned": abandoned,
         "protocol_repairs": state.protocol_repairs,
         "signals_fired": list(state.signals_fired),
+        "explore_challenge_required": bool(
+            explore and explore.challenge_required
+        ),
+        "challenge_response_provided": challenge_response_provided,
     }
 
 
-def _build_trace(state: WorkingState, *, round_id: int) -> dict:
+def _build_trace(
+    state: WorkingState, *, round_id: int,
+    explore: ExploreReport | None = None,
+) -> dict:
+    if explore is not None:
+        explore_block = {
+            "challenge_required": explore.challenge_required,
+            "challenge_reasons": list(explore.challenge_reasons),
+            "active_families": [
+                fam.family_id for fam in explore.families
+                if any(s.active for s in fam.policy_signals)
+            ],
+        }
+    else:
+        explore_block = {
+            "challenge_required": False,
+            "challenge_reasons": [],
+            "active_families": [],
+        }
     return {
         "round": round_id,
         "research_question": state.research_question,
@@ -1002,6 +1113,7 @@ def _build_trace(state: WorkingState, *, round_id: int) -> dict:
         "weakest_premise": state.weakest_premise_log,
         "verification_status": state.verification_status.value,
         "actions": list(state.action_log),
+        "explore": explore_block,
         "authority": "non_authoritative",
         "inject_into_future_context": False,
     }
@@ -1052,6 +1164,14 @@ class ProposerAgent:
         )
         experiments = memory_service.load_experiments()
         findings = memory_service.load_findings()
+        # Explore report: compute once per wakeup — the single source of truth
+        # for the startup pack, the per-step state header, the nudges, and the
+        # challenge_response guard. Fail-soft to None (every consumer handles
+        # None as "no health view").
+        try:
+            explore = memory_service.analyze_explore(current_round=current_round)
+        except Exception:
+            explore = None
         messages = [{
             "role": "user",
             "content": memory_service.build_startup_pack(
@@ -1063,6 +1183,7 @@ class ProposerAgent:
                 candidates_per_round=candidates_per_round,
                 hints=hints,
                 current_round=current_round,
+                explore=explore,
             ),
         }]
         started = time.monotonic()
@@ -1080,7 +1201,6 @@ class ProposerAgent:
             {"instruction": e.proposal, "proposal_obj": _experiment_to_proposal(e)}
             for e in recent if e.proposal
         ]
-        signals = self._compute_signals(memory_service, experiments, findings, hints)
         budget_reminder_step = int(0.8 * self.max_steps)
         reminded = False
         print(f"[proposer] started max_steps={self.max_steps}", flush=True)
@@ -1112,7 +1232,7 @@ class ProposerAgent:
                 action, next_phase, reply_text = self._step(
                     state, messages, system_prompt, deadline, usages,
                     candidates_per_round, history_props, findings, source_path,
-                    step,
+                    step, explore,
                 )
                 name = action["action"]
 
@@ -1130,8 +1250,14 @@ class ProposerAgent:
                         usage=usages,
                         deliberation_telemetry=_build_telemetry(
                             state, steps=step, abandoned=False,
+                            explore=explore,
+                            challenge_response_provided=(
+                                action.get("challenge_response") is not None
+                            ),
                         ),
-                        trace=_build_trace(state, round_id=current_round),
+                        trace=_build_trace(
+                            state, round_id=current_round, explore=explore,
+                        ),
                     )
                     break
                 if name == "abandon_direction":
@@ -1150,9 +1276,11 @@ class ProposerAgent:
                         abstain_reason=action["reason"],
                         abstain_blocking_unknown=action["blocking_unknown"],
                         deliberation_telemetry=_build_telemetry(
-                            state, steps=step, abandoned=True,
+                            state, steps=step, abandoned=True, explore=explore,
                         ),
-                        trace=_build_trace(state, round_id=current_round),
+                        trace=_build_trace(
+                            state, round_id=current_round, explore=explore,
+                        ),
                     )
                     break
 
@@ -1162,14 +1290,14 @@ class ProposerAgent:
                     _bump(state, name)
                     state.phase = next_phase
                     messages.append({"role": "assistant", "content": reply_text})
-                    self._note_state(messages, state, signals)
+                    self._note_state(messages, state, explore)
                     continue
                 if name == "assess_research":
                     self._apply_assess(state, action, history_props)
                     _bump(state, name)
                     state.phase = next_phase
                     messages.append({"role": "assistant", "content": reply_text})
-                    self._note_state(messages, state, signals)
+                    self._note_state(messages, state, explore)
                     continue
                 if name == "continue_research":
                     state.current_information_goal = action["next_information_goal"]
@@ -1177,7 +1305,7 @@ class ProposerAgent:
                     state.phase = next_phase
                     state.research_steps_since_frame = 0
                     messages.append({"role": "assistant", "content": reply_text})
-                    self._note_state(messages, state, signals)
+                    self._note_state(messages, state, explore)
                     continue
                 if name == "reframe_research":
                     _bump(state, name)
@@ -1185,7 +1313,7 @@ class ProposerAgent:
                                     decision_relevant_unknown=action["new_decision_relevant_unknown"])
                     state.phase = next_phase
                     messages.append({"role": "assistant", "content": reply_text})
-                    self._note_state(messages, state, signals)
+                    self._note_state(messages, state, explore)
                     continue
                 if name == "begin_verification":
                     _bump(state, name)
@@ -1199,7 +1327,7 @@ class ProposerAgent:
                     state.phase = next_phase
                     state.research_steps_since_frame = 0
                     messages.append({"role": "assistant", "content": reply_text})
-                    self._note_state(messages, state, signals)
+                    self._note_state(messages, state, explore)
                     continue
 
                 # Research tool action.
@@ -1216,11 +1344,11 @@ class ProposerAgent:
                     flush=True,
                 )
                 envelope = {
-                    "state": _render_state_header(state, signals),
+                    "state": _render_state_header(state, explore),
                     "tool_result": observation,
                 }
                 # Soft stall / near-duplicate nudges attach to the tool result.
-                nudge = self._maybe_nudge(state, signals)
+                nudge = self._maybe_nudge(state, explore)
                 if nudge:
                     envelope["note"] = nudge
                     state.signals_fired.append(nudge[:48])
@@ -1236,22 +1364,9 @@ class ProposerAgent:
 
     # -- helpers -----------------------------------------------------------
 
-    def _compute_signals(self, memory_service, experiments, findings, hints):
-        try:
-            objective = (memory_service.metrics_schema or {}).get("objective") or {}
-            return compute_deliberation_signals(
-                findings, experiments,
-                current_round=0,
-                hints_present=bool(hints),
-                objective_key=objective.get("key"),
-                lower_is_better=bool(objective.get("lower_is_better")),
-            )
-        except Exception:
-            return None
-
     def _step(self, state, messages, system_prompt, deadline, usages,
               candidates_per_round, history_props, findings, source_root,
-              step_label):
+              step_label, explore):
         """One model turn with up to _MAX_PROTOCOL_REPAIRS retries. Returns the
         parsed action, its target phase, and the raw reply text."""
         for repair in range(_MAX_PROTOCOL_REPAIRS + 1):
@@ -1320,6 +1435,7 @@ class ProposerAgent:
                 continue
             guard = _validate_action_guard(
                 state, action, history_props, findings, source_root,
+                explore=explore,
             )
             if guard is not None:
                 if repair == _MAX_PROTOCOL_REPAIRS:
@@ -1336,7 +1452,9 @@ class ProposerAgent:
                 )
                 messages.extend([
                     {"role": "assistant", "content": reply.text},
-                    {"role": "user", "content": _guard_repair_message(guard)},
+                    {"role": "user", "content": _guard_repair_message(
+                        guard, explore=explore,
+                    )},
                 ])
                 continue
             print(
@@ -1390,40 +1508,68 @@ class ProposerAgent:
         state.research_progress = None
 
     def _note_state(self, messages: list, state: WorkingState,
-                    signals: dict | None) -> None:
+                    explore: ExploreReport | None) -> None:
         messages.append({
             "role": "user",
-            "content": _render_state_header(state, signals),
+            "content": _render_state_header(state, explore),
         })
 
-    def _maybe_nudge(self, state: WorkingState, signals: dict | None) -> str | None:
+    def _maybe_nudge(
+        self, state: WorkingState, explore: ExploreReport | None,
+    ) -> str | None:
         notes = []
         if (state.phase == ResearchPhase.RESEARCH
                 and state.research_steps_since_frame >= _STALL_THRESHOLD):
             notes.append(
                 "investigation has run several steps without an assessment; "
                 "assess_research or reframe if the key unknown is stuck")
-        if signals and not signals.get("first_round"):
-            for entry in (signals.get("findings") or []):
-                ps = entry.get("policy_signals") or {}
-                if (ps.get("mechanism_challenge") or {}).get("active"):
+        if explore is not None and not explore.first_round:
+            for fh in explore.findings:
+                mc = next(
+                    (s for s in fh.policy_signals
+                     if s.name == "mechanism_challenge" and s.active),
+                    None,
+                )
+                if mc is not None:
                     notes.append(
-                        f"finding {entry['id']} shows repeated eligible-neutral "
+                        f"finding {fh.finding_id} shows repeated eligible-neutral "
                         "attempts — consider challenging the mechanism or reframing")
                     break
-            # Cross-finding global stall: cannot be bypassed by opening a
-            # fresh Finding each round (per-finding signals can).
-            g = signals.get("global") or {}
-            gps = g.get("policy_signals") or {}
-            if (gps.get("global_stall") or {}).get("active"):
-                mechs = ", ".join((g.get("recent_mechanisms") or [])[:5])
-                notes.append(
-                    f"GLOBAL STALL: {g.get('recent_improvements', 0)} "
-                    f"improvements in last {g.get('recent_window', 0)} rounds. "
-                    f"Mechanisms tried: {mechs}. Reframe to a different "
-                    "mechanism family or abandon — do not submit another "
-                    "variant of the same approach."
+            # Family-level stall: opening a fresh Finding each round does NOT
+            # reset the family evidence (the family aggregates across findings).
+            for fam in explore.families:
+                stall = next(
+                    (s for s in fam.policy_signals
+                     if s.name in ("family_stall", "family_regressing")
+                     and s.active),
+                    None,
                 )
+                if stall is not None:
+                    notes.append(
+                        f"FAMILY {stall.name.upper()}: family "
+                        f"{fam.code_region} has {fam.consecutive_no_improve} "
+                        f"consecutive no-improve attempts across findings "
+                        f"{', '.join(fam.finding_ids)}. Reframe to a different "
+                        "mechanism family, abandon, or submit only with a "
+                        "challenge_response — do not submit another variant."
+                    )
+                    break
+            gh = explore.global_health
+            if gh is not None:
+                gs = next(
+                    (s for s in gh.policy_signals
+                     if s.name == "global_stall" and s.active),
+                    None,
+                )
+                if gs is not None:
+                    mechs = ", ".join(gh.recent_mechanisms[:5])
+                    notes.append(
+                        f"GLOBAL STALL: {gh.consecutive_no_improve_rounds} "
+                        f"consecutive no-improve rounds. Mechanisms tried: "
+                        f"{mechs}. Reframe to a different mechanism family or "
+                        "abandon — do not submit another variant of the same "
+                        "approach."
+                    )
         return "; ".join(notes) if notes else None
 
 
