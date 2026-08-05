@@ -19,6 +19,7 @@ class ExecResult:
     changed_paths: list[str]
     path_gate_passed: bool
     path_gate_violations: list[str]
+    output: str = ""         # the agent's raw text response (for handoff logs)
 
 
 def execute(agent: Agent, *, proposal: str, goal: str, editable: list[str],
@@ -51,7 +52,7 @@ inspects and commits the resulting file changes; no structured response is
 required.
 """
 
-    agent.run_text(prompt, cwd=worktree, label=f"executor r{round_id}")
+    agent_output = agent.run_text(prompt, cwd=worktree, label=f"executor r{round_id}")
 
     changed = workspace.changed_paths(worktree)
     if not changed:
@@ -61,6 +62,7 @@ required.
             changed_paths=[],
             path_gate_passed=True,
             path_gate_violations=[],
+            output=agent_output,
         )
 
     ok, violations = gate.check_diff(changed, editable, frozen)
@@ -71,6 +73,7 @@ required.
             changed_paths=changed,
             path_gate_passed=False,
             path_gate_violations=violations,
+            output=agent_output,
         )
 
     sha = workspace.commit(worktree, round_id, changed)
@@ -80,4 +83,5 @@ required.
         changed_paths=changed,
         path_gate_passed=True,
         path_gate_violations=[],
+        output=agent_output,
     )

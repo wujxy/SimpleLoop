@@ -29,6 +29,7 @@ from .memory import (
 from .reporting import plot as plot_mod
 from .roles import proposer as proposer_mod
 from .harness import views
+from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
 from .container.runtime import ApptainerRuntime
@@ -306,6 +307,8 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             proposal_result = _next_proposals(
                 ctx, static_proposals, round_id, parent_sha)
             _write_proposer_trace(ctx, round_id, proposal_result)
+            _write_proposals_handoff(ctx, round_id, parent_sha,
+                                     proposal_result)
             deliberation_telemetry = proposal_result.deliberation_telemetry
             if proposal_result.abstained:
                 # Zero-candidate round: the Scientist judged no experiment
@@ -582,6 +585,33 @@ def _write_proposer_trace(ctx: RunContext, round_id: int,
         )
     except OSError as exc:
         print(f"[{stamp()}] proposer trace write skipped: {exc}", flush=True)
+
+
+def _write_proposals_handoff(
+    ctx: RunContext, round_id: int, parent_sha: str,
+    proposal_result: proposer_mod.ProposerResult,
+) -> None:
+    """Persist the proposer's output the moment it finishes — before any
+    executor starts. Captures the full proposal texts, finding IDs, and
+    abstention reason so the round can be traced/reproduced even if the
+    process dies mid-execution."""
+    proposals = []
+    for i, prop in enumerate(proposal_result.proposals):
+        proposals.append({
+            "index": i,
+            "instruction": prop.instruction,
+            "finding_id": None,  # resolved later by memory_service
+            "evidence_refs": list(prop.evidence_refs),
+            "material_difference": prop.material_difference,
+        })
+    write_handoff(ctx.run_dir, round_id, "proposals.json", {
+        "round_id": round_id,
+        "parent_sha": parent_sha,
+        "abstained": proposal_result.abstained,
+        "abstain_reason": proposal_result.abstain_reason,
+        "proposals": proposals,
+        "trace": getattr(proposal_result, "trace", None),
+    })
 
 
 def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,

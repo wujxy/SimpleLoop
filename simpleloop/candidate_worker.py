@@ -33,6 +33,7 @@ from pathlib import Path
 from . import config as config_mod
 from .container.runtime import ApptainerRuntime
 from .harness import evals, gate, views
+from .harness.handoff import write_handoff
 from .harness.workspace import Workspace
 from .roles import executor as executor_mod
 from .roles.agent import Agent, AgentError
@@ -168,10 +169,34 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
     except (AgentError, ValueError) as exc:
         print(f"[{stamp()}] candidate r{spec.round_id}-c{spec.candidate_id} "
               f"executor failed: {exc}", flush=True)
+        write_handoff(deps.run_dir, spec.round_id,
+                      f"{worktree_id}.executor.json", {
+            "candidate_id": spec.candidate_id,
+            "proposal": spec.proposal,
+            "parent_sha": spec.parent_sha,
+            "status": "EXECUTOR_FAILED",
+            "error": str(exc),
+        })
         return candidate_failure(
             spec.candidate_id, spec, str(exc), spec.parent_sha,
             metrics_schema=metrics_schema, status="EXECUTOR_FAILED",
         )
+
+    # Persist executor output immediately — the agent's response text is
+    # discarded by the executor, so capture it here for traceability.
+    write_handoff(deps.run_dir, spec.round_id,
+                  f"{worktree_id}.executor.json", {
+        "candidate_id": spec.candidate_id,
+        "proposal": spec.proposal,
+        "parent_sha": spec.parent_sha,
+        "sha": result.sha,
+        "status": ("COMMITTED" if result.sha else
+                   "PATH_GATE_REJECTED" if not result.path_gate_passed else
+                   "NO_CHANGE"),
+        "changed_paths": result.changed_paths,
+        "reason": result.reason,
+        "executor_response": result.output,
+    })
 
     if result.path_gate_passed is False:
         gate_results = gate.build_results(
@@ -215,6 +240,14 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             eval_commands=False,
             eval_detail=str(exc),
         )
+        write_handoff(deps.run_dir, spec.round_id,
+                      f"{worktree_id}.eval.json", {
+            "candidate_id": spec.candidate_id,
+            "sha": result.sha,
+            "status": "EVAL_FAILED",
+            "error": str(exc),
+            "gates": gate_results,
+        })
         return _candidate_result(
             spec,
             result,
@@ -236,6 +269,19 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
     gate_passed = gate.all_passed(gate_results)
     eligible = _eligible(result.sha, gate_passed, eval_result.metrics,
                          metrics_schema)
+    write_handoff(deps.run_dir, spec.round_id,
+                  f"{worktree_id}.eval.json", {
+        "candidate_id": spec.candidate_id,
+        "sha": result.sha,
+        "status": "COMPLETED" if gate_passed else "GATE_REJECTED",
+        "metrics": eval_result.metrics,
+        "gates": gate_results,
+        "gate_passed": gate_passed,
+        "eligible": eligible,
+        "eval_block": eval_result.text,
+        "returncodes": list(eval_result.returncodes),
+        "commands_ok": eval_result.commands_ok,
+    })
     return _candidate_result(
         spec,
         result,
