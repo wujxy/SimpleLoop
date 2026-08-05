@@ -1,9 +1,9 @@
 """Hypothesis card: a lightweight, evidence-free research direction.
 
 The Generator produces these in bulk (G1-G9 as entry-point angles). They are
-NOT proposals — they are unverified leads that the Probe layer must confirm
-(the mechanism actually exists in the code) before a branch researcher spends
-deep budget on them. See PLAN.md for the full architecture.
+NOT proposals — they are unverified leads that a branch researcher investigates
+deeply; if the mechanism doesn't exist in the code, the branch abandons
+(producing a finding for Explore). See PLAN.md for the full architecture.
 
 The structural signature (region x mechanism x intervention_family) is the
 dedup key for the diversity archive: two cards with the same signature compete
@@ -63,19 +63,6 @@ def _canon(text: str) -> str:
     population to build the union-find; for card dedup a simple normalize
     is enough (the Generator rarely produces near-spelling variants)."""
     return " ".join(text.lower().split()) or UNKNOWN
-
-
-@dataclass(frozen=True)
-class ProbeResult:
-    """Outcome of a shallow probe confirming a hypothesis's mechanism exists.
-
-    ``confirmed`` True when the probe found evidence the mechanism is present
-    in the code. ``evidence_ref`` is a source: path citable by the downstream
-    branch researcher. ``note`` is a short diagnostic for the trace.
-    """
-    confirmed: bool
-    evidence_ref: str | None = None
-    note: str = ""
 
 
 def dedup_by_signature(

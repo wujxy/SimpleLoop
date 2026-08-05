@@ -1525,7 +1525,6 @@ class ProposerAgent:
         current_round: int,
         gate_block: str,
         prompt_dir: Path | None,
-        probe_evidence_ref: str | None = None,
         hints: list[str] | None = None,
         explore=None,
         max_steps: int | None = None,
@@ -1574,10 +1573,6 @@ class ProposerAgent:
             f"  why_plausible: {hypothesis.why_plausible}\n"
             f"  critical_unknown: {hypothesis.critical_unknown}\n"
         )
-        if probe_evidence_ref:
-            branch_intro += (
-                f"\nProbe confirmed the mechanism exists: {probe_evidence_ref}\n"
-            )
         branch_intro += (
             "\nStart in VALIDATE. Investigate the critical_unknown, read the "
             "source, then assess_candidate. You may reject_candidate to reframe "
@@ -1601,14 +1596,10 @@ class ProposerAgent:
             f"in {hypothesis.region}")
         state.decision_relevant_unknown = hypothesis.critical_unknown
         state.evidence_basis = (
-            bool(hints) or bool(experiments) or bool(findings)
-            or bool(probe_evidence_ref))
+            bool(hints) or bool(experiments) or bool(findings))
         state.session_evidence = {
             f"experiment:{e.experiment_id}" for e in experiments
         } | {f"finding:{fid}" for fid in findings}
-        if probe_evidence_ref and probe_evidence_ref.startswith("source:"):
-            state.session_evidence.add("__source_examined__")
-            state.new_evidence.add("__source_examined__")
         recent = sorted(
             experiments, key=lambda e: (e.round, e.candidate)
         )[-_DUP_WINDOW:]

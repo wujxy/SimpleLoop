@@ -72,7 +72,6 @@ _RESEARCHER_DEFAULTS = {
     "hypothesis_count": 8,       # generator produces this many cards
     "branch_count": 3,           # max branches deep-researched per round
     "frame_free_ratio": 0.33,    # fraction of cards ignoring Explore boundary
-    "probe_timeout_seconds": 30, # per-command timeout for the probe layer
 }
 
 # Only `api` carries a default; the executor's `model` and `base_url` are
@@ -296,7 +295,6 @@ def _resolve_researcher(raw: object) -> dict:
         ("command_output_cap_chars", 1000),
         ("hypothesis_count", 1),
         ("branch_count", 1),
-        ("probe_timeout_seconds", 1),
     ):
         value = result[key]
         if (not isinstance(value, int) or isinstance(value, bool)

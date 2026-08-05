@@ -72,7 +72,6 @@ def test_researcher_defaults(tmp_path: Path):
         "hypothesis_count": 8,
         "branch_count": 3,
         "frame_free_ratio": 0.33,
-        "probe_timeout_seconds": 30,
     }
 
 

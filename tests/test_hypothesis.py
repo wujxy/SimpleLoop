@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from simpleloop.roles.hypothesis import (
     HypothesisCard,
-    ProbeResult,
     dedup_by_signature,
     distinct_niches,
 )
@@ -105,14 +104,3 @@ class TestDistinctNiches:
 
     def test_empty(self):
         assert distinct_niches([]) == 0
-
-
-class TestProbeResult:
-    def test_confirmed_with_ref(self):
-        r = ProbeResult(confirmed=True, evidence_ref="source:src/foo.cc",
-                        note="grep hit")
-        assert r.confirmed and r.evidence_ref
-
-    def test_unconfirmed(self):
-        r = ProbeResult(confirmed=False)
-        assert not r.confirmed and r.evidence_ref is None

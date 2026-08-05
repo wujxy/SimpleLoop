@@ -4,9 +4,8 @@ Replaces ProposerAgent.run as the Loop's proposer. It runs the pipeline:
 
   (1) Generator → N hypothesis cards (wide, evidence-free)
   (2) dedup_by_signature → K distinct niches
-  (3) Probe → confirm mechanisms exist (filter by evidence, not prior)
-  (4) Per-branch ProposerAgent.research_branch → 0-1 proposals each
-  (5) list-wise selection → 1..candidates_per_round proposals
+  (3) Per-branch ProposerAgent.research_branch → 0-1 proposals each
+  (4) list-wise selection → 1..candidates_per_round proposals
 
 The orchestrator owns the breadth/depth trade-off: on the first round (no
 history, frontier empty) it runs depth-first — fewer hypotheses, deeper
@@ -15,6 +14,16 @@ and most wide hypotheses would be prior-duplicates. On later rounds it runs
 breadth-first — more hypotheses, shallower branches — because Explore's
 negative feedback can steer the generator away from exhausted families.
 
+There is no probe/gate between generator and branch. An earlier version had a
+shallow grep-based probe to filter cards before spending branch budget, but it
+suffered a vocabulary mismatch: the generator writes English mechanism
+descriptions, the code contains CamelCase C++ identifiers, so literal grep
+produced systematic false negatives — killing good seeds. The branch
+researcher itself is the filter: its first few run_research_command steps
+confirm whether the mechanism exists, and if not it abandons (producing a
+finding that feeds Explore). This is both more accurate (the branch has task
+context and understanding, not a blind keyword match) and task-agnostic.
+
 The ProposerResult interface is unchanged so loop.py needs no modification.
 """
 from __future__ import annotations
@@ -22,12 +31,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from .model import ChatModel
 from .hypothesis import HypothesisCard, dedup_by_signature, distinct_niches
 from .generator import GeneratorAgent
-from .probe import probe_batch
 from .proposer import ProposerAgent, ProposerResult, BranchResult
 from ..explore.models import ExploreReport
 from ..container.runtime import ApptainerRuntime
@@ -60,7 +67,7 @@ def _select_mode(
     if first_round or n_experiments == 0:
         # Depth-first: 2-3 hypotheses, deep branches (most of the budget).
         n = min(3, hypothesis_count)
-        branch_steps = max(5, max_steps - 6)  # reserve ~6 for gen + probe
+        branch_steps = max(5, max_steps - 6)  # reserve ~6 for generation
         return _Mode(n_hypotheses=n, max_branch_steps=branch_steps,
                      label="depth-first")
     # Breadth-first: full hypothesis count, split budget across branches.
@@ -85,7 +92,6 @@ class ProposerOrchestrator:
         hypothesis_count: int = 8,
         branch_count: int = 3,
         frame_free_ratio: float = 0.33,
-        probe_timeout_seconds: int = 30,
         usage_observer=None,
     ):
         self.model = model
@@ -97,7 +103,6 @@ class ProposerOrchestrator:
         self.hypothesis_count = hypothesis_count
         self.branch_count = branch_count
         self.frame_free_ratio = frame_free_ratio
-        self.probe_timeout_seconds = probe_timeout_seconds
         self.usage_observer = usage_observer
         self.generator = GeneratorAgent(
             model=model, timeout_seconds=timeout_seconds,
@@ -189,44 +194,14 @@ class ProposerOrchestrator:
         if not cards:
             return self._abstain("generator produced no usable hypotheses")
 
-        # --- (3) Probe ---
-        with TemporaryDirectory(prefix="simpleloop-probe-") as scratch:
-            from .research_tools import ResearchCommandRunner
-            probe_runner = ResearchCommandRunner(
-                runtime=self.runtime,
-                source=source_path,
-                repo=repo_path,
-                history_dir=run_dir,
-                scratch=Path(scratch),
-                timeout_seconds=self.probe_timeout_seconds,
-                output_cap_chars=self.command_output_cap_chars,
-            )
-            probe_results = probe_batch(
-                cards, probe_runner,
-                deadline=deadline,
-                timeout_seconds=self.probe_timeout_seconds,
-            )
-        confirmed = [
-            (card, result) for card, result in probe_results
-            if result.confirmed
-        ]
-        # Frame-free cards that failed probe still enter a branch — the probe
-        # is conservative (grep may miss the mechanism), and frame-free cards
-        # are our diversity insurance; dropping them on a grep miss is too
-        # aggressive.
-        for card, result in probe_results:
-            if not result.confirmed and card.slot == "free":
-                confirmed.append((card, result))
-        print(
-            f"[orchestrator] probe: {len(confirmed)}/{len(cards)} confirmed",
-            flush=True,
-        )
-        if not confirmed:
-            return self._abstain("no hypothesis survived probing")
-
-        # --- (4) Per-branch deep research ---
+        # --- (3) Per-branch deep research ---
+        # No probe/gate: every dedup'd card enters a branch. The branch's first
+        # few run_research_command steps are the real filter — if the mechanism
+        # doesn't exist in the code, the branch abandons (producing a finding
+        # for Explore). This is task-agnostic and avoids the vocabulary-mismatch
+        # false negatives of a keyword-grep probe.
         branch_results: list[BranchResult] = []
-        for card, probe_result in confirmed:
+        for card in cards:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 print("[orchestrator] deadline exceeded, skipping remaining "
@@ -239,7 +214,6 @@ class ProposerOrchestrator:
                 source_path=source_path, repo_path=repo_path,
                 run_dir=run_dir, current_round=current_round,
                 gate_block=gate_block, prompt_dir=prompt_dir,
-                probe_evidence_ref=probe_result.evidence_ref,
                 hints=hints, explore=explore,
                 max_steps=mode.max_branch_steps,
             )
@@ -256,7 +230,7 @@ class ProposerOrchestrator:
                     f"{(branch.abandon_reason or '')[:60]}", flush=True,
                 )
 
-        # --- (5) Collect proposals (list-wise selection) ---
+        # --- (4) Collect proposals (list-wise selection) ---
         proposals = [
             b.proposal for b in branch_results if b.proposal is not None
         ]

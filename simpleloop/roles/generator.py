@@ -2,8 +2,9 @@
 
 This is the wide, shallow, evidence-free first stage of the branch-then-deepen
 architecture (PLAN.md). It uses G1-G9 as entry-point angles and outputs a JSON
-array of HypothesisCard. A probe layer later checks whether each mechanism
-exists in the code; only confirmed cards enter a branch researcher.
+array of HypothesisCard. A branch researcher later investigates each card
+deeply; cards that point at non-existent mechanisms are abandoned by the
+branch (producing a finding for Explore).
 
 The generator never reads code and never forms a proposal. Its only inputs are
 the startup-pack context (objective/gates/editable/frontier) and the generation

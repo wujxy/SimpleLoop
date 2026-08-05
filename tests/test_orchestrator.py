@@ -55,19 +55,6 @@ class FakeTools:
         raise AssertionError(f"unexpected: {action['action']}")
 
 
-class FakeProbeRunner:
-    """Fake command runner for the probe layer."""
-    def __init__(self, *args, **kwargs):
-        self.confirm = kwargs.get("confirm", True)
-        self.calls = []
-
-    def run(self, command, *, cwd="source", timeout_seconds=None):
-        self.calls.append(command)
-        if self.confirm:
-            return {"ok": True, "returncode": 0, "output": "src/foo.cc:42:hit"}
-        return {"ok": True, "returncode": 0, "output": ""}
-
-
 def _gen_response(cards):
     return ModelReply(json.dumps({"hypotheses": cards}))
 
@@ -157,20 +144,9 @@ class TestSelectMode:
 
 class TestOrchestratorRun:
     def test_produces_proposal_from_one_branch(self, tmp_path, monkeypatch):
-        """Generator produces 2 cards, probe confirms, one branch submits."""
+        """Generator produces 2 cards, both enter branches, one submits."""
         FakeTools.instances.clear()
         monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-        monkeypatch.setattr(
-            "simpleloop.roles.orchestrator.ResearchCommandRunner",
-            FakeProbeRunner, raising=False,
-        )
-        # But orchestrator imports ResearchCommandRunner inside the method;
-        # patch at the source module.
-        from simpleloop.roles import research_tools
-        monkeypatch.setattr(
-            research_tools, "ResearchCommandRunner", FakeProbeRunner,
-            raising=False,
-        )
 
         args = _run_args(tmp_path)
         # Generator response: 2 cards
@@ -178,13 +154,21 @@ class TestOrchestratorRun:
             _card_json(mech="getter", interv="cache"),
             _card_json(mech="search", interv="replace"),
         ])
-        # Branch 1: assess → submit
+        # Branch 1: research → assess → submit
         branch1 = [
+            ModelReply(json.dumps({
+                "action": "run_research_command",
+                "command": "grep -r getter src/", "cwd": "source",
+            })),
             ModelReply(json.dumps(_assess_action())),
             ModelReply(json.dumps(_submit_action())),
         ]
-        # Branch 2: assess → abandon
+        # Branch 2: research → assess → abandon
         branch2 = [
+            ModelReply(json.dumps({
+                "action": "run_research_command",
+                "command": "grep -r search src/", "cwd": "source",
+            })),
             ModelReply(json.dumps(_assess_action())),
             ModelReply(json.dumps(_abandon_action())),
         ]
@@ -199,14 +183,13 @@ class TestOrchestratorRun:
     def test_all_branches_abandon_yields_abstain(self, tmp_path, monkeypatch):
         FakeTools.instances.clear()
         monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-        from simpleloop.roles import research_tools
-        monkeypatch.setattr(
-            research_tools, "ResearchCommandRunner", FakeProbeRunner,
-            raising=False,
-        )
         args = _run_args(tmp_path)
         gen = _gen_response([_card_json()])
         branch = [
+            ModelReply(json.dumps({
+                "action": "run_research_command",
+                "command": "grep -r getter src/", "cwd": "source",
+            })),
             ModelReply(json.dumps(_assess_action())),
             ModelReply(json.dumps(_abandon_action())),
         ]
@@ -222,11 +205,6 @@ class TestOrchestratorRun:
         keeps one). Abstain only if generator produces nothing usable."""
         FakeTools.instances.clear()
         monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-        from simpleloop.roles import research_tools
-        monkeypatch.setattr(
-            research_tools, "ResearchCommandRunner", FakeProbeRunner,
-            raising=False,
-        )
         args = _run_args(tmp_path)
         # All empty structural fields → parser drops them → ModelError
         gen = _gen_response([{
@@ -241,26 +219,29 @@ class TestOrchestratorRun:
         with pytest.raises(ModelError):
             orch.run(**args)
 
-    def test_probe_failure_drops_card(self, tmp_path, monkeypatch):
-        """A card that fails probing is dropped; frame-free cards survive."""
+    def test_all_cards_enter_branch_no_probe_gate(self, tmp_path, monkeypatch):
+        """Without a probe gate, every dedup'd card enters a branch — even
+        cards whose mechanism might not exist. The branch itself is the filter:
+        it researches, then either submits or abandons."""
         FakeTools.instances.clear()
         monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-        from simpleloop.roles import research_tools
-        # Probe returns empty → not confirmed
-        monkeypatch.setattr(
-            research_tools, "ResearchCommandRunner",
-            lambda *a, **kw: FakeProbeRunner(confirm=False),
-            raising=False,
-        )
         args = _run_args(tmp_path)
-        # One guided card (will be dropped by probe) + one free card (survives)
+        # Two cards with different signatures → both enter branches.
         gen = _gen_response([
             _card_json(mech="getter", interv="cache", slot="guided"),
             _card_json(mech="search", interv="replace", slot="free"),
         ])
-        # Free card survived probe but has no evidence_ref → branch needs
-        # a tool call first to establish evidence_basis, then assess+submit.
-        branch = [
+        # Both branches do a research command first (establish evidence_basis),
+        # then assess + submit.
+        branch1 = [
+            ModelReply(json.dumps({
+                "action": "run_research_command",
+                "command": "grep -r getter src/", "cwd": "source",
+            })),
+            ModelReply(json.dumps(_assess_action())),
+            ModelReply(json.dumps(_submit_action())),
+        ]
+        branch2 = [
             ModelReply(json.dumps({
                 "action": "run_research_command",
                 "command": "grep -r search src/", "cwd": "source",
@@ -268,9 +249,10 @@ class TestOrchestratorRun:
             ModelReply(json.dumps(_assess_action())),
             ModelReply(json.dumps(_submit_action())),
         ]
-        model = FakeModel([gen] + branch)
+        model = FakeModel([gen] + branch1 + branch2)
         orch = _orchestrator(model, max_steps=20, hypothesis_count=2,
                              branch_count=2)
         result = orch.run(**args)
-        # Only the free card survived probe and produced a proposal.
-        assert len(result.proposals) == 1
+        # Both branches produced a proposal.
+        assert len(result.proposals) == 2
+        assert not result.abstained
