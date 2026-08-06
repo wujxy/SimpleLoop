@@ -72,6 +72,10 @@ _RESEARCHER_DEFAULTS = {
     "hypothesis_count": 8,       # generator produces this many cards
     "branch_count": 3,           # max branches deep-researched per round
     "frame_free_ratio": 0.33,    # fraction of cards ignoring Explore boundary
+    # Per-branch step budget for the cognitive element (sieve + enrich). null
+    # → derive from max_steps/branch_count (the legacy formula). Set an int to
+    # give every branch a fixed deepen budget regardless of breadth/depth mode.
+    "branch_steps": None,
 }
 
 # Only `api` carries a default; the executor's `model` and `base_url` are
@@ -309,6 +313,12 @@ def _resolve_researcher(raw: object) -> dict:
             or not 0.0 <= ratio <= 1.0):
         raise ConfigError(
             "researcher.frame_free_ratio: must be a number in [0.0, 1.0]"
+        )
+    bs = result.get("branch_steps")
+    if bs is not None and (
+            not isinstance(bs, int) or isinstance(bs, bool) or bs < 1):
+        raise ConfigError(
+            "researcher.branch_steps: must be an integer >= 1 or null"
         )
     return result
 

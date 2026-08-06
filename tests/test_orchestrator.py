@@ -104,11 +104,11 @@ def _card_json(op="G6", region="src/foo.cc", mech="getter",
     }
 
 
-def _assess_action():
+def _block_action():
     return {
-        "action": "assess_candidate",
-        "current_judgment": "mechanism confirmed",
-        "research_progress": "advancing",
+        "action": "block",
+        "reason_kind": "false_claim",
+        "explanation": "the claimed function is not present",
         "evidence_refs": ["source:src/foo.cc"],
     }
 
@@ -127,16 +127,15 @@ def _submit_action():
     }
 
 
-def _abandon_action():
-    return {"action": "abandon_round", "reason": "mechanism not found"}
-
-
 def _run_args(tmp_path):
     source = tmp_path / "source"
     repo = tmp_path / "repo"
     run_dir = tmp_path / "run"
     for p in (source, repo, run_dir):
         p.mkdir(exist_ok=True)
+    # A real source file so a block's source: ref can resolve.
+    (source / "src").mkdir(exist_ok=True)
+    (source / "src" / "foo.cc").write_text("// target\n", encoding="utf-8")
     return {"goal": "make it faster", "editable": ["src/**"],
             "frozen": ["tests/**"], "memory_service": MemoryService(
                 run_dir=run_dir, metrics_schema=_METRICS_SCHEMA),
@@ -154,19 +153,18 @@ def _orchestrator(model, *, max_steps=20, **kw):
         hypothesis_count=kw.get("hypothesis_count", 4),
         branch_count=kw.get("branch_count", 3),
         frame_free_ratio=kw.get("frame_free_ratio", 0.33),
+        branch_steps=kw.get("branch_steps"),
     )
 
 
 def _branch_script(submit):
-    """A research -> assess -> (submit|abandon) response sequence for one
-    branch."""
+    """A research -> (submit|block) response sequence for one branch."""
     return [
         ModelReply(json.dumps({
             "action": "run_research_command",
             "command": "grep -r mechanism src/", "cwd": "source",
         })),
-        ModelReply(json.dumps(_assess_action())),
-        ModelReply(json.dumps(_submit_action() if submit else _abandon_action())),
+        ModelReply(json.dumps(_submit_action() if submit else _block_action())),
     ]
 
 
@@ -189,6 +187,14 @@ class TestSelectMode:
         breadth = _select_mode(first_round=False, n_experiments=5,
                                max_steps=50, hypothesis_count=8, branch_count=3)
         assert depth.max_branch_steps > breadth.max_branch_steps
+
+    def test_explicit_branch_steps_overrides_formula(self):
+        depth = _select_mode(first_round=True, n_experiments=0, max_steps=50,
+                             hypothesis_count=8, branch_count=3, branch_steps=28)
+        breadth = _select_mode(first_round=False, n_experiments=5, max_steps=50,
+                               hypothesis_count=8, branch_count=3, branch_steps=28)
+        assert depth.max_branch_steps == 28
+        assert breadth.max_branch_steps == 28
 
 
 class TestOrchestratorRun:
@@ -213,13 +219,21 @@ class TestOrchestratorRun:
         assert result.deliberation_telemetry["mode"] == "depth-first"
         # Trace stores the full instruction text for observability.
         branch0 = result.trace["branches"][0]
+        assert branch0["outcome"] == "submit"
         assert branch0["proposal"] is True
         assert branch0["instruction"] == result.proposals[0].instruction
         branch1 = result.trace["branches"][1]
+        assert branch1["outcome"] == "block"
         assert branch1["proposal"] is False
         assert branch1["instruction"] is None
+        assert branch1["reason_kind"] == "false_claim"
+        # The block's free-text rationale is persisted so a human can audit
+        # whether the sieve blocked on a genuine source conflict or read the
+        # code wrongly (the one place the sieve can quietly over-restrict).
+        assert branch1["explanation"] == "the claimed function is not present"
+        assert branch1["evidence_refs"] == ["source:src/foo.cc"]
 
-    def test_all_branches_abandon_yields_abstain(self, tmp_path, monkeypatch):
+    def test_all_branches_block_yields_abstain(self, tmp_path, monkeypatch):
         FakeTools.instances.clear()
         monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
         args = _run_args(tmp_path)
@@ -230,6 +244,7 @@ class TestOrchestratorRun:
         result = orch.run(**args)
         assert result.abstained
         assert len(result.proposals) == 0
+        assert result.trace["branches"][0]["outcome"] == "block"
 
     def test_no_cards_after_dedup_abstains(self, tmp_path, monkeypatch):
         """If all cards collapse to one signature, we still proceed (per_bin=1
@@ -342,13 +357,70 @@ class TestOrchestratorRun:
                             fake_research_branch)
         result = orch.run(**args)
 
-        # The failing branch was quarantined as abandoned; the survivor's
+        # The failing branch was quarantined as an error; the survivor's
         # proposal came through and the pool was not killed.
         assert len(result.proposals) == 1
         assert not result.abstained
-        statuses = {
-            (b["proposal"], b["abandoned"])
-            for b in result.trace["branches"]
-        }
-        assert (True, False) in statuses   # survivor
-        assert (False, True) in statuses   # quarantined failure
+        outcomes = {b["outcome"] for b in result.trace["branches"]}
+        assert "submit" in outcomes   # survivor
+        assert "error" in outcomes    # quarantined failure
+
+
+class TestFrozenPrefilterAndTrace:
+    def test_frozen_region_card_dropped_and_backfilled(self, tmp_path, monkeypatch):
+        """A card whose region names a frozen path is dropped before any branch
+        runs; the next distinct card backfills the branch slot."""
+        FakeTools.instances.clear()
+        monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+        args = _run_args(tmp_path)
+        args["frozen"] = ["tests/**"]
+        gen = _gen_response([
+            _card_json(region="tests/ref.cc", mech="frozen_m", interv="i"),
+            _card_json(region="src/foo.cc", mech="live_m", interv="j"),
+        ])
+        model = FakeModel(gen, {"live_m": _branch_script(submit=True)})
+        orch = _orchestrator(model, max_steps=20, hypothesis_count=2,
+                             branch_count=1)
+        result = orch.run(**args)
+        # The frozen card was dropped pre-LLM; only the live card ran a branch.
+        assert len(result.trace["branches"]) == 1
+        assert len(result.proposals) == 1
+
+    def test_trace_branch_keys_match_new_schema(self, tmp_path, monkeypatch):
+        FakeTools.instances.clear()
+        monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+        args = _run_args(tmp_path)
+        gen = _gen_response([_card_json()])
+        model = FakeModel(gen, {"getter": _branch_script(submit=True)})
+        orch = _orchestrator(model, max_steps=20, hypothesis_count=1,
+                             branch_count=1)
+        result = orch.run(**args)
+        keys = set(result.trace["branches"][0])
+        assert keys == {"sig", "outcome", "proposal", "instruction",
+                        "reason_kind", "explanation", "evidence_refs",
+                        "tool_calls", "partial"}
+
+    def test_zero_read_partial_is_dropped_before_execution(
+            self, tmp_path, monkeypatch):
+        """A partial submit with zero source reads carries no enrichment; the
+        orchestrator drops it before spending an executor+harness pass."""
+        FakeTools.instances.clear()
+        monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+        args = _run_args(tmp_path)
+        gen = _gen_response([_card_json()])
+        # The branch exhausts its budget with memory-tool calls only (no source
+        # read), then partial-submits. Two distinct calls so repeated_tool
+        # does not fire.
+        model = FakeModel(gen, {"getter": [
+            ModelReply(json.dumps({"action": "list_findings",
+                                   "state": "active"})),
+            ModelReply(json.dumps({"action": "list_findings",
+                                   "state": "open"})),
+        ]})
+        orch = _orchestrator(model, max_steps=20, hypothesis_count=1,
+                             branch_count=1, branch_steps=2)
+        result = orch.run(**args)
+        # Branch submitted partial with 0 source reads → dropped → abstain.
+        assert result.abstained
+        assert len(result.proposals) == 0
+        assert result.trace["branches"][0]["partial"] is True

@@ -1,33 +1,29 @@
 """ProposerOrchestrator: the branch-then-deepen entry point for the Loop.
 
-Replaces ProposerAgent.run as the Loop's proposer. It runs the pipeline:
+Runs the pipeline:
 
   (1) Generator → N hypothesis cards (wide, evidence-free)
-  (2) dedup_by_signature → K distinct niches
-  (3) Per-branch ProposerAgent.research_branch → 0-1 proposals each
+  (2) dedup_by_signature → K distinct niches, minus frozen-region cards
+  (3) Per-branch cognitive element (Sieve + Enricher) → 0-1 proposals each
   (4) list-wise selection → 1..candidates_per_round proposals
 
-The orchestrator owns the breadth/depth trade-off: on the first round (no
-history, frontier empty) it runs depth-first — fewer hypotheses, deeper
-branches — because the model has no evidence to spread across wide branches
-and most wide hypotheses would be prior-duplicates. On later rounds it runs
-breadth-first — more hypotheses, shallower branches — because Explore's
-negative feedback can steer the generator away from exhausted families.
+The cognitive element (per branch) is NOT a reviewer — it never judges merit.
+It only sieves on objective bars (and blocks with a source ref) and enriches
+the card into an executor-ready instruction (and submits). There is no
+search-space restriction on a judgment: submit is the default terminal; block
+is objective and evidence-bound; budget exhaustion submits partial. See
+promposer.py / prompts/proposer.md.
 
-There is no probe/gate between generator and branch. An earlier version had a
-shallow grep-based probe to filter cards before spending branch budget, but it
-suffered a vocabulary mismatch: the generator writes English mechanism
-descriptions, the code contains CamelCase C++ identifiers, so literal grep
-produced systematic false negatives — killing good seeds. The branch
-researcher itself is the filter: its first few run_research_command steps
-confirm whether the mechanism exists, and if not it abandons (producing a
-finding that feeds Explore). This is both more accurate (the branch has task
-context and understanding, not a blind keyword match) and task-agnostic.
+The orchestrator owns the breadth/depth trade-off. When ``branch_steps`` is set
+explicitly it overrides the derived per-branch budget — the cognitive element's
+job is now bounded locate+enrich, which no longer justifies splitting a
+merit-judging budget across branches.
 
 The ProposerResult interface is unchanged so loop.py needs no modification.
 """
 from __future__ import annotations
 
+import fnmatch
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -52,29 +48,28 @@ class _Mode:
 
 def _select_mode(
     *, first_round: bool, n_experiments: int, max_steps: int,
-    hypothesis_count: int, branch_count: int,
+    hypothesis_count: int, branch_count: int, branch_steps: int | None = None,
 ) -> _Mode:
-    """Adaptive breadth/depth (Snell 2024 — fixed strategies are dominated).
+    """Adaptive breadth/depth.
 
-    First round / no history → depth-first: few hypotheses, deep branches.
-    The model has no evidence to spread wide; most wide hypotheses would be
-    prior-duplicates. Better to deep-probe one or two directions, discover
-    where the real bottleneck is, then branch next round.
+    First round / no history → depth-first (few hypotheses, deep branches).
+    Later rounds → breadth-first (full hypothesis count).
 
-    Later rounds → breadth-first: more hypotheses, shallower branches.
-    Explore's negative feedback steers the generator away from exhausted
-    families, so wide generation produces genuine diversity.
+    When ``branch_steps`` is set explicitly it overrides the derived per-branch
+    budget for both modes. The cognitive element's job is bounded locate+enrich
+    (the old merit-judging budget split no longer applies); an explicit budget
+    lets each branch deepen enough to locate and enrich a real target instead
+    of budget-exhausting like the old merit chase did.
     """
     if first_round or n_experiments == 0:
-        # Depth-first: 2-3 hypotheses, deep branches (most of the budget).
         n = min(3, hypothesis_count)
-        branch_steps = max(5, max_steps - 6)  # reserve ~6 for generation
-        return _Mode(n_hypotheses=n, max_branch_steps=branch_steps,
+        steps = branch_steps if branch_steps else max(5, max_steps - 6)
+        return _Mode(n_hypotheses=n, max_branch_steps=steps,
                      label="depth-first")
-    # Breadth-first: full hypothesis count, split budget across branches.
     n = hypothesis_count
-    branch_steps = max(5, (max_steps - 6) // min(branch_count, n))
-    return _Mode(n_hypotheses=n, max_branch_steps=branch_steps,
+    steps = (branch_steps if branch_steps
+             else max(5, (max_steps - 6) // min(branch_count, n)))
+    return _Mode(n_hypotheses=n, max_branch_steps=steps,
                  label="breadth-first")
 
 
@@ -93,6 +88,7 @@ class ProposerOrchestrator:
         hypothesis_count: int = 8,
         branch_count: int = 3,
         frame_free_ratio: float = 0.33,
+        branch_steps: int | None = None,
         usage_observer=None,
     ):
         self.model = model
@@ -104,6 +100,7 @@ class ProposerOrchestrator:
         self.hypothesis_count = hypothesis_count
         self.branch_count = branch_count
         self.frame_free_ratio = frame_free_ratio
+        self.branch_steps = branch_steps
         self.usage_observer = usage_observer
         self.generator = GeneratorAgent(
             model=model, timeout_seconds=timeout_seconds,
@@ -134,8 +131,7 @@ class ProposerOrchestrator:
         prompt_dir: Path | None,
         hints: list[str] | None = None,
     ) -> ProposerResult:
-        """Run the full branch-then-deepen pipeline. Returns ProposerResult
-        with the same interface as the old ProposerAgent.run."""
+        """Run the full branch-then-deepen pipeline."""
         started = time.monotonic()
 
         # --- Explore (shared across generator + branches) ---
@@ -152,6 +148,7 @@ class ProposerOrchestrator:
             max_steps=self.max_steps,
             hypothesis_count=self.hypothesis_count,
             branch_count=self.branch_count,
+            branch_steps=self.branch_steps,
         )
         print(
             f"[orchestrator] mode={mode.label} "
@@ -181,9 +178,9 @@ class ProposerOrchestrator:
             flush=True,
         )
 
-        # --- (2) Dedup by structural signature ---
+        # --- (2) Dedup by structural signature, drop frozen regions ---
         cards = dedup_by_signature(cards, per_bin=1)
-        # Cap at branch_count.
+        cards = self._split_frozen(cards, frozen)
         cards = cards[:self.branch_count]
         print(
             f"[orchestrator] after dedup: {len(cards)} cards "
@@ -194,12 +191,7 @@ class ProposerOrchestrator:
         if not cards:
             return self._abstain("generator produced no usable hypotheses")
 
-        # --- (3) Per-branch deep research ---
-        # No probe/gate: every dedup'd card enters a branch. The branch's first
-        # few run_research_command steps are the real filter — if the mechanism
-        # doesn't exist in the code, the branch abandons (producing a finding
-        # for Explore). This is task-agnostic and avoids the vocabulary-mismatch
-        # false negatives of a keyword-grep probe.
+        # --- (3) Per-branch cognitive element (sieve + enrich) ---
         branch_results = self._run_branches(
             cards,
             goal=goal, editable=editable, frozen=frozen,
@@ -212,30 +204,31 @@ class ProposerOrchestrator:
         )
 
         # --- (4) Collect proposals (list-wise selection) ---
-        proposals = [
-            b.proposal for b in branch_results if b.proposal is not None
+        # Floor: a zero-read partial submit carries no enrichment, so it is
+        # dropped before selection (orchestrator-level filter, NOT a cognitive-
+        # element merit gate — the element submitted it; the orchestrator simply
+        # does not spend an executor+harness pass on a card it never located).
+        eligible = [
+            b for b in branch_results
+            if b.proposal is not None
+            and not (b.enrichment_partial
+                     and b.deliberation_telemetry.get("source_reads", 0) == 0)
         ]
-        # Cap at candidates_per_round. List-wise: keep proposals from branches
-        # with the most tool calls (deepest research) first, as a proxy for
-        # evidence weight. Tie-break by branch order.
-        if len(proposals) > candidates_per_round:
-            scored = sorted(
-                enumerate(proposals),
-                key=lambda iv: (
-                    -branch_results[
-                        [b for b, r in enumerate(branch_results)
-                         if r.proposal is not None][iv[0]]
-                    ].deliberation_telemetry.get("tool_calls", 0),
-                    iv[0],
-                ),
-            )
-            proposals = [p for _, p in scored[:candidates_per_round]]
+        # Cap at candidates_per_round, preferring deeper research (tool_calls);
+        # stable sort preserves branch order among ties.
+        if len(eligible) > candidates_per_round:
+            eligible = sorted(
+                eligible,
+                key=lambda b: -b.deliberation_telemetry.get("tool_calls", 0),
+            )[:candidates_per_round]
+        proposals = [b.proposal for b in eligible]
 
         elapsed = time.monotonic() - started
         if not proposals:
             return self._abstain(
-                "all branches abandoned or produced no proposal",
+                "all branches blocked, errored, or produced no eligible proposal",
                 telemetry=self._telemetry(branch_results, mode, elapsed),
+                trace=self._branch_trace(branch_results),
             )
         print(
             f"[orchestrator] {len(proposals)} proposal(s) in {elapsed:.1f}s",
@@ -246,15 +239,50 @@ class ProposerOrchestrator:
             usage=None,
             deliberation_telemetry=self._telemetry(
                 branch_results, mode, elapsed),
-            trace={"branches": [
-                {"sig": b.hypothesis.signature(),
-                 "proposal": bool(b.proposal),
-                 "instruction": (b.proposal.instruction
-                                  if b.proposal is not None else None),
-                 "abandoned": b.abandoned}
-                for b in branch_results
-            ]},
+            trace=self._branch_trace(branch_results),
         )
+
+    @staticmethod
+    def _branch_trace(branches: list[BranchResult]) -> dict:
+        """Per-branch observability — recorded for EVERY round, including
+        rounds where all branches blocked/errored (so a block is diagnosable
+        from the trace, not silently lost)."""
+        return {"branches": [
+            {"sig": b.hypothesis.signature(),
+             "outcome": b.outcome,
+             "proposal": bool(b.proposal),
+             "instruction": (b.proposal.instruction
+                             if b.proposal is not None else None),
+             "reason_kind": b.reason_kind,
+             "explanation": b.explanation,
+             "evidence_refs": list(b.block_evidence_refs),
+             "tool_calls": b.deliberation_telemetry.get("tool_calls", 0),
+             "partial": bool(b.enrichment_partial)}
+            for b in branches
+        ]}
+
+    @staticmethod
+    def _split_frozen(cards: list[HypothesisCard],
+                      frozen: list[str]) -> list[HypothesisCard]:
+        """Best-effort deterministic prefilter: drop cards whose ``region``
+        names a path under a frozen glob. ``region`` is often prose, so this
+        only catches the obvious path-like cases; the branch sieve's frozen
+        check is the real gate for prose regions. Dropped cards are naturally
+        backfilled because this runs before the branch_count cap."""
+        if not frozen:
+            return list(cards)
+        kept = []
+        for card in cards:
+            region = (card.region or "").strip()
+            token = region.split()[0] if region else ""
+            if token and any(fnmatch.fnmatch(token, pat) for pat in frozen):
+                print(
+                    f"[orchestrator] dropped frozen-region card "
+                    f"{card.signature()}", flush=True,
+                )
+                continue
+            kept.append(card)
+        return kept
 
     def _run_branches(
         self, cards, *, goal, editable, frozen, memory_service, base_sha,
@@ -263,11 +291,10 @@ class ProposerOrchestrator:
     ) -> list[BranchResult]:
         """Run one research_branch per card, concurrently.
 
-        Mirrors ``loop._run_candidates``: a branch that raises becomes an
-        abandoned result (so one failure never kills the others) and results are
-        indexed by original card position so the post-collection tie-break and
-        trace stay stable. Concurrency is already bounded — ``cards`` is capped
-        at ``branch_count`` upstream.
+        A branch that raises becomes an error result (so one failure never
+        kills the others) and results are indexed by original card position so
+        selection and trace stay stable. Concurrency is bounded — ``cards`` is
+        capped at ``branch_count`` upstream.
         """
         shared = dict(
             goal=goal, editable=editable, frozen=frozen,
@@ -297,8 +324,7 @@ class ProposerOrchestrator:
                         f"{card.signature()} failed: {exc}", flush=True,
                     )
                     results[i] = BranchResult(
-                        hypothesis=card, abandoned=True,
-                        abandon_reason=f"branch worker failed: {exc}",
+                        hypothesis=card, outcome="error",
                         deliberation_telemetry={"tool_calls": 0},
                     )
         for branch in results:
@@ -310,24 +336,32 @@ class ProposerOrchestrator:
     def _log_branch_result(branch: BranchResult) -> None:
         card = branch.hypothesis
         if branch.proposal:
+            tag = "partial submit" if branch.enrichment_partial else "proposal"
             print(
                 f"[orchestrator] branch {card.generative_op} "
-                f"{card.signature()} → proposal", flush=True,
+                f"{card.signature()} → {tag}", flush=True,
             )
-        elif branch.abandoned:
+        elif branch.outcome == "block":
             print(
                 f"[orchestrator] branch {card.generative_op} "
-                f"{card.signature()} → abandoned: "
-                f"{(branch.abandon_reason or '')[:60]}", flush=True,
+                f"{card.signature()} → blocked: {branch.reason_kind}",
+                flush=True,
+            )
+        elif branch.outcome == "error":
+            print(
+                f"[orchestrator] branch {card.generative_op} "
+                f"{card.signature()} → error", flush=True,
             )
 
-    def _abstain(self, reason: str, *, telemetry: dict | None = None) -> ProposerResult:
+    def _abstain(self, reason: str, *, telemetry: dict | None = None,
+                 trace: dict | None = None) -> ProposerResult:
         print(f"[orchestrator] abstained: {reason}", flush=True)
         return ProposerResult(
             proposals=[],
             abstained=True,
             abstain_reason=reason,
             deliberation_telemetry=telemetry or {},
+            trace=trace or {},
         )
 
     def _telemetry(self, branches: list[BranchResult], mode: _Mode,
@@ -336,8 +370,12 @@ class ProposerOrchestrator:
             "mode": mode.label,
             "n_hypotheses": mode.n_hypotheses,
             "n_branches": len(branches),
-            "n_proposals": sum(1 for b in branches if b.proposal),
-            "n_abandoned": sum(1 for b in branches if b.abandoned),
+            "n_proposals": sum(
+                1 for b in branches
+                if b.proposal and not b.enrichment_partial),
+            "n_partial": sum(1 for b in branches if b.enrichment_partial),
+            "n_blocked": sum(1 for b in branches if b.outcome == "block"),
+            "n_error": sum(1 for b in branches if b.outcome == "error"),
             "elapsed_seconds": round(elapsed, 1),
             "branch_telemetry": [
                 b.deliberation_telemetry for b in branches

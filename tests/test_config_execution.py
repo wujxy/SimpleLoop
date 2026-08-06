@@ -72,6 +72,7 @@ def test_researcher_defaults(tmp_path: Path):
         "hypothesis_count": 8,
         "branch_count": 3,
         "frame_free_ratio": 0.33,
+        "branch_steps": None,
     }
 
 

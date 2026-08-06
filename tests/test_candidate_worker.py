@@ -18,7 +18,8 @@ from simpleloop.candidate_worker import (
     write_result,
 )
 from simpleloop.harness.evals import EvalResult
-from simpleloop.roles.executor import ExecResult
+from simpleloop.roles import executor as exec_mod
+from simpleloop.roles.executor import ExecResult, parse_self_report
 
 
 _SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -266,3 +267,113 @@ def test_candidate_failure_shape(tmp_path: Path):
     assert failure["parent_sha"] == "parent"
     assert failure["gate_passed"] is False
     assert failure["eligible"] is False
+    # No executor ran, so there is no self-report.
+    assert failure["self_report"] is None
+
+
+# ---------------------------------------------------------------------------
+# Executor SELF_REPORT: the executor's only channel to tell the loop whether
+# it finished and why a change is absent/incomplete. Best-effort parse; the
+# objective/effort partition is the cut that lets a future proposer-feed treat
+# "target doesn't exist" (objective, safe to relay) differently from "too hard"
+# (effort, a merit judgment that must stay record-only).
+# ---------------------------------------------------------------------------
+class TestParseSelfReport:
+    def test_valid_completed(self):
+        text = ('did the work\n```json\n{"outcome": "completed", '
+                '"summary": "cached the constants"}\n```')
+        assert parse_self_report(text) == {
+            "outcome": "completed", "blocked_reason_kind": None,
+            "summary": "cached the constants",
+        }
+
+    def test_blocked_objective_kind(self):
+        text = ('```json\n{"outcome": "blocked", "blocked_reason_kind": '
+                '"objective", "summary": "target fn absent"}\n```')
+        r = parse_self_report(text)
+        assert r["outcome"] == "blocked"
+        assert r["blocked_reason_kind"] == "objective"
+
+    def test_effort_kind(self):
+        text = ('```json\n{"outcome": "partial", "blocked_reason_kind": '
+                '"effort", "summary": "ran out of budget"}\n```')
+        assert parse_self_report(text)["blocked_reason_kind"] == "effort"
+
+    def test_invalid_outcome_returns_none(self):
+        text = '```json\n{"outcome": "done", "summary": "x"}\n```'
+        assert parse_self_report(text) is None
+
+    def test_unknown_kind_normalized_to_none(self):
+        # "too_hard" is a merit judgment, not one of the two objective kinds;
+        # it must not survive as a structured field (it could later be mistaken
+        # for an objective, relayable fact).
+        text = ('```json\n{"outcome": "blocked", "blocked_reason_kind": '
+                '"too_hard", "summary": "x"}\n```')
+        assert parse_self_report(text)["blocked_reason_kind"] is None
+
+    @pytest.mark.parametrize("text", ["just prose, no fence", "", "```json\n[]\n```"])
+    def test_missing_or_non_object_returns_none(self, text: str):
+        assert parse_self_report(text) is None
+
+    def test_ignores_unrelated_json_without_outcome(self):
+        text = '```json\n{"metrics": {"speed": 100}}\n```'
+        assert parse_self_report(text) is None
+
+    def test_last_outcome_block_wins(self):
+        text = ('```json\n{"outcome": "completed", "summary": "first"}\n```\n'
+                'more text\n```json\n{"outcome": "blocked", '
+                '"blocked_reason_kind": "objective", "summary": "second"}\n```')
+        assert parse_self_report(text)["summary"] == "second"
+
+    def test_summary_truncated(self):
+        long_summary = "x" * 1000
+        text = ('```json\n{"outcome": "completed", "summary": "'
+                + long_summary + '"}\n```')
+        assert len(parse_self_report(text)["summary"]) == 600
+
+
+def test_self_report_flows_into_candidate_record(tmp_path: Path, monkeypatch):
+    """A self-report on the ExecResult lands in the candidate dict that reaches
+    history (the record channel); it does NOT affect status/eligibility."""
+    report = {"outcome": "blocked", "blocked_reason_kind": "objective",
+              "summary": "target absent"}
+
+    def fake_execute(*_a, **_k):
+        return ExecResult(
+            sha=None, reason="executor made no changes", changed_paths=[],
+            path_gate_passed=True, path_gate_violations=[],
+            self_report=report)
+
+    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
+    monkeypatch.setattr(worker_mod.evals, "run_eval", lambda *a, **k: None)
+    result = run_candidate(_deps(tmp_path), _spec(tmp_path))
+    assert result["status"] == "NO_CHANGE"
+    assert result["eligible"] is False
+    assert result["self_report"] == report
+
+
+def test_execute_parses_self_report_from_agent_output(tmp_path: Path,
+                                                       monkeypatch):
+    """execute() runs parse_self_report on the agent's text and attaches it to
+    ExecResult on every return path (here: the committed path)."""
+    class FakeAgent:
+        def run_text(self, _prompt, cwd=None, label=None):
+            return ('work\n```json\n{"outcome": "completed", '
+                    '"summary": "done"}\n```')
+
+    class FakeWorkspace:
+        def changed_paths(self, _wt):
+            return ["a.cc"]
+
+        def commit(self, _wt, _rid, _paths):
+            return "sha1"
+
+    monkeypatch.setattr(exec_mod.gate, "check_diff",
+                        lambda changed, editable, frozen: (True, []))
+    result = exec_mod.execute(
+        FakeAgent(), proposal="p", goal="g", editable=["src/**"], frozen=[],
+        workspace=FakeWorkspace(), worktree=tmp_path, round_id="r1")
+    assert result.sha == "sha1"
+    assert result.self_report == {"outcome": "completed",
+                                  "blocked_reason_kind": None,
+                                  "summary": "done"}

@@ -196,6 +196,7 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
         "changed_paths": result.changed_paths,
         "reason": result.reason,
         "executor_response": result.output,
+        "self_report": result.self_report,
     })
 
     if result.path_gate_passed is False:
@@ -333,6 +334,7 @@ def _candidate_result(
         "gate_passed": gate_passed,
         "eligible": eligible,
         "selected": False,
+        "self_report": result.self_report,
     }
 
 
@@ -377,6 +379,7 @@ def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> d
         "changed_paths": [],
         "gates": gate_results,
         "gate_passed": gate_passed,
+        "self_report": None,
         "eligible": _eligible(
             spec.parent_sha, gate_passed, result.metrics, cfg.get("metrics"),
         ),
@@ -408,6 +411,7 @@ def candidate_failure(candidate_id: int, spec: CandidateSpec,
         "gate_passed": False,
         "eligible": False,
         "selected": False,
+        "self_report": None,
     }
 
 

@@ -490,6 +490,7 @@ def _build_context(
             hypothesis_count=researcher.get("hypothesis_count", 8),
             branch_count=researcher.get("branch_count", 3),
             frame_free_ratio=researcher.get("frame_free_ratio", 0.33),
+            branch_steps=researcher.get("branch_steps"),
             usage_observer=telemetry.record_usage,
         )
     executor = roles["executor"]
