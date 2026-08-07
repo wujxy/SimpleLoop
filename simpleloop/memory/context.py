@@ -13,6 +13,32 @@ from ..explore.models import ExploreReport
 from ..explore.render import render_explore_for_startup
 
 
+def build_generation_context(
+    *,
+    goal: str,
+    editable: list[str],
+    frozen: list[str],
+    base_sha: str,
+    gate_block: str,
+) -> str:
+    """History-free context for the Generator.
+
+    Only the task definition: objective, gates, paths, base_sha. No dashboard,
+    no frontier, no explore health, no exhausted-region list. The Generator is
+    a free explorer — it sees the task but not the history.
+    """
+    return f"""Research objective:
+{goal}
+
+Harness Gates:
+{gate_block or "(declared in factual records)"}
+
+Current accepted revision: {base_sha}
+Editable paths: {json.dumps(editable, ensure_ascii=False)}
+Frozen paths: {json.dumps(frozen, ensure_ascii=False)}
+"""
+
+
 def build_startup_pack(
     *,
     goal: str,

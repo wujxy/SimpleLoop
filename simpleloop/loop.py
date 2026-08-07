@@ -487,7 +487,6 @@ def _build_context(
             command_output_cap_chars=researcher[
                 "command_output_cap_chars"
             ],
-            hypothesis_count=researcher.get("hypothesis_count", 8),
             branch_steps=researcher.get("branch_steps"),
             usage_observer=telemetry.record_usage,
         )

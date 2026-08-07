@@ -39,6 +39,19 @@ from .research_tools import (
     ResearchTools,
     render_research_tool_prompt,
 )
+from .research_agent import (
+    AgentError,
+    ResearchAgent,
+    WorkingState,
+    _bump,
+    _build_telemetry,
+    _build_trace,
+    _fingerprint,
+    _register_evidence,
+    _render_state_header,
+    _result_summary,
+    _action_summary,
+)
 from ..container.runtime import ApptainerRuntime
 from ..memory.models import (
     ExistingFindingTarget,
@@ -50,7 +63,7 @@ from ..explore.render import render_explore_for_state_header
 from ..prompts import load_semantic
 
 
-class ProposerError(RuntimeError):
+class ProposerError(AgentError):
     """The cognitive element violated its action or budget contract."""
 
 
@@ -97,40 +110,14 @@ class BranchResult:
     trace: dict = field(default_factory=dict)
 
 
-# --- Round-local state -----------------------------------------------------
+# --- Tunables (cognitive-specific) -----------------------------------------
 
-@dataclass
-class WorkingState:
-    """Branch-local state. Lives only in this runtime; never written to the
-    Ledger or Finding archive. Drives the state header and telemetry."""
-    counts: dict = field(default_factory=dict)
-    session_evidence: set[str] = field(default_factory=set)
-    new_evidence: set[str] = field(default_factory=set)
-    action_log: list[dict] = field(default_factory=list)
-    protocol_repairs: int = 0
-    candidate_directions: str = ""
-    current_information_goal: str = ""
-    located: bool = False
-    last_tool_fingerprint: str | None = None
-
-
-# Tunables.
-_MAX_PROTOCOL_REPAIRS = 2
 _BLOCK_REASON_KINDS = frozenset({"false_claim", "frozen", "contradiction"})
 
 # Research / memory tools never terminate the loop.
 _RESEARCH_TOOL_ACTIONS = frozenset(
     {"run_research_command"} | MEMORY_TOOL_ACTIONS
 )
-
-
-def _bump(state: WorkingState, name: str) -> None:
-    state.counts[name] = state.counts.get(name, 0) + 1
-
-
-def _truncate(text: str, limit: int) -> str:
-    text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 # --- Prompt scaffolding ----------------------------------------------------
@@ -223,45 +210,6 @@ def _guard_repair_message(reason: str) -> str:
         "JSON action object matching the Runtime contract, with no prose or "
         "additional JSON."
     )
-
-
-# --- Logging summaries (never leak raw content) ----------------------------
-
-def _action_summary(action: dict) -> str:
-    name = action["action"]
-    if name == "run_research_command":
-        return (
-            f"action={name} cwd={action['cwd']} "
-            f"command_chars={len(action['command'])}"
-        )
-    if name == "inspect_episode":
-        return f"action={name} ref_chars={len(action['ref'])}"
-    if name in ("list_findings", "search_findings", "inspect_finding",
-                "search_experiments"):
-        extra = ""
-        if "query" in action:
-            extra = f" query_chars={len(action.get('query', ''))}"
-        elif "finding_id" in action:
-            extra = f" finding_id={action.get('finding_id', '')}"
-        return f"action={name}{extra}"
-    if name == "submit_proposals":
-        return f"action={name} count={len(action['proposals'])}"
-    if name == "block":
-        return f"action={name} reason_kind={action['reason_kind']}"
-    return f"action={name}"
-
-
-def _result_summary(action: dict, observation: dict) -> str:
-    parts = [f"result={'ok' if observation.get('ok') else 'error'}"]
-    if action["action"] == "run_research_command":
-        if "returncode" in observation:
-            parts.append(f"exit_code={observation['returncode']}")
-        output = observation.get("output")
-        if isinstance(output, str):
-            parts.append(f"output_chars={len(output)}")
-        if observation.get("timed_out"):
-            parts.append("timed_out=true")
-    return " ".join(parts)
 
 
 # --- Action parsing -------------------------------------------------------
@@ -372,12 +320,6 @@ def _opt_str(value) -> str:
     return value.strip()
 
 
-def _protocol_reason(exc: ProposerError) -> str:
-    if isinstance(exc.__cause__, (TypeError, json.JSONDecodeError)):
-        return "invalid_json"
-    return "invalid_action"
-
-
 def _parse_action(text: str, candidates_per_round: int) -> dict:
     try:
         action = json.loads(text)
@@ -466,6 +408,36 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             "filters": filters or {}, "limit": limit, "buckets": buckets,
         }
 
+    # --- feedback to Generator (non-terminal, triggers regeneration) ---
+    if name == "feedback_generator":
+        _require_keys(
+            action,
+            {"action", "evidence_refs", "observation",
+             "relation_to_seed", "implication"},
+        )
+        refs = _require_string_list(
+            action["evidence_refs"], name="feedback_generator.evidence_refs",
+        )
+        observation = action["observation"]
+        if not isinstance(observation, str) or not observation.strip():
+            raise ProposerError(
+                "feedback_generator.observation must be a non-empty string")
+        relation = action["relation_to_seed"]
+        if not isinstance(relation, str) or not relation.strip():
+            raise ProposerError(
+                "feedback_generator.relation_to_seed must be non-empty")
+        implication = action["implication"]
+        if not isinstance(implication, str) or not implication.strip():
+            raise ProposerError(
+                "feedback_generator.implication must be a non-empty string")
+        return {
+            "action": name,
+            "evidence_refs": tuple(refs),
+            "observation": observation.strip(),
+            "relation_to_seed": relation.strip(),
+            "implication": implication.strip(),
+        }
+
     # --- control actions ---
     if name == "submit_proposals":
         _require_keys(action, {"action", "proposals"})
@@ -503,75 +475,9 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
     raise ProposerError(f"unknown proposer action: {name}")
 
 
-# --- Evidence tracking & guards -------------------------------------------
+# --- Cognitive-specific guards -------------------------------------------
 
-def _register_evidence(state: WorkingState, action: dict, observation: dict) -> None:
-    """Record the references a successful tool call made available to cite.
-
-    Tool-acquired evidence is added to BOTH ``session_evidence`` and
-    ``new_evidence`` (acquired this branch, not from the startup pack). The
-    block guard checks ``new_evidence`` so a block can only lean on a source
-    read this branch.
-    """
-    if not observation.get("ok"):
-        return
-    name = action["action"]
-    if name == "run_research_command":
-        state.session_evidence.add("__source_examined__")
-        state.new_evidence.add("__source_examined__")
-        return
-    result = observation.get("result")
-    if name == "inspect_episode":
-        eid = (result or {}).get("experiment_id")
-        if eid:
-            ref = f"experiment:{eid}"
-            state.session_evidence.add(ref)
-            state.new_evidence.add(ref)
-    elif name == "inspect_finding":
-        fid = (result or {}).get("id")
-        if fid:
-            ref = f"finding:{fid}"
-            state.session_evidence.add(ref)
-            state.new_evidence.add(ref)
-    elif name in ("search_findings", "list_findings"):
-        for item in result or []:
-            fid = item.get("id") if isinstance(item, dict) else None
-            if fid:
-                ref = f"finding:{fid}"
-                state.session_evidence.add(ref)
-                state.new_evidence.add(ref)
-    elif name == "search_experiments":
-        for exp in _iter_experiment_hits(result):
-            eid = exp.get("experiment_id") if isinstance(exp, dict) else None
-            if eid:
-                ref = f"experiment:{eid}"
-                state.session_evidence.add(ref)
-                state.new_evidence.add(ref)
-
-
-def _iter_experiment_hits(result) -> list:
-    if isinstance(result, list):
-        return result
-    if isinstance(result, dict):
-        out: list = []
-        for key in ("relevant", "contrasting", "diverse"):
-            out.extend(result.get(key) or [])
-        return out
-    return []
-
-
-def _source_path_exists(relpath: str, source_root: Path) -> bool:
-    relpath = relpath.strip().lstrip("/")
-    candidates = [relpath]
-    if ":" in relpath:
-        candidates.append(relpath.rsplit(":", 1)[0])
-    for cand in candidates:
-        try:
-            if cand and (source_root / cand).exists():
-                return True
-        except OSError:
-            continue
-    return False
+from .research_agent import _source_path_exists  # noqa: E402
 
 
 def _validate_block_evidence(
@@ -589,22 +495,6 @@ def _validate_block_evidence(
                     and _source_path_exists(rest, source_root)):
                 return True
     return False
-
-
-def _fingerprint(action: dict) -> str:
-    """Canonical fingerprint of a tool action for exact-repeat detection."""
-    name = action["action"]
-    if name == "run_research_command":
-        return f"{name}:{action['cwd']}:{action['command']}"
-    if name == "inspect_episode":
-        return f"{name}:{action['ref']}"
-    if name == "inspect_finding":
-        return f"{name}:{action['finding_id']}"
-    if name in ("search_findings", "search_experiments"):
-        return f"{name}:{action.get('query')}"
-    if name == "list_findings":
-        return f"{name}:{action.get('state')}:{action.get('limit')}"
-    return name
 
 
 def _validate_action_guard(
@@ -627,63 +517,11 @@ def _validate_action_guard(
     return None
 
 
-# --- State header ---------------------------------------------------------
-
-def _render_state_header(state: WorkingState, explore: ExploreReport | None) -> str:
-    """Compact position, injected so the agent keeps its goal in view."""
-    lines = ["Working state (your current position):"]
-    lines.append(
-        f"  source_reads={state.counts.get('source_read', 0)}  "
-        f"tool_calls={state.counts.get('tool', 0)}  "
-        f"located={'yes' if state.located else 'no'}"
-    )
-    if state.candidate_directions:
-        lines.append(
-            f"  hypothesis: {_truncate(state.candidate_directions, 160)}")
-    if state.current_information_goal:
-        lines.append(
-            f"  current_goal: {_truncate(state.current_information_goal, 120)}")
-    explore_block = render_explore_for_state_header(explore)
-    if explore_block:
-        lines.append(explore_block)
-    return "\n".join(lines)
-
-
-# --- Telemetry / trace ----------------------------------------------------
-
-def _build_telemetry(
-    state: WorkingState, *, steps: int, outcome: str,
-    reason_kind: str | None = None, enrichment_partial: bool = False,
-) -> dict:
-    return {
-        "steps": steps,
-        "tool_calls": state.counts.get("tool", 0),
-        "source_reads": state.counts.get("source_read", 0),
-        "protocol_repairs": state.protocol_repairs,
-        "outcome": outcome,
-        "reason_kind": reason_kind,
-        "enrichment_partial": enrichment_partial,
-    }
-
-
-def _build_trace(
-    state: WorkingState, *, round_id: int, outcome: str,
-    reason_kind: str | None = None, evidence_refs: tuple[str, ...] = (),
-    explore: ExploreReport | None = None,
-) -> dict:
-    return {
-        "round": round_id,
-        "candidate_directions": state.candidate_directions,
-        "actions": list(state.action_log),
-        "outcome": outcome,
-        "reason_kind": reason_kind,
-        "evidence_refs": list(evidence_refs),
-    }
-
-
 # --- The cognitive element ------------------------------------------------
 
-class ProposerAgent:
+class ProposerAgent(ResearchAgent):
+    _error_class = ProposerError
+
     def __init__(
         self,
         *,
@@ -695,13 +533,22 @@ class ProposerAgent:
         command_output_cap_chars: int,
         usage_observer=None,
     ):
-        self.model = model
-        self.runtime = runtime
-        self.timeout_seconds = timeout_seconds
-        self.max_steps = max_steps
-        self.command_timeout_seconds = command_timeout_seconds
-        self.command_output_cap_chars = command_output_cap_chars
-        self.usage_observer = usage_observer
+        super().__init__(
+            model=model, runtime=runtime,
+            timeout_seconds=timeout_seconds, max_steps=max_steps,
+            command_timeout_seconds=command_timeout_seconds,
+            command_output_cap_chars=command_output_cap_chars,
+            usage_observer=usage_observer,
+        )
+        self._candidates_per_round = 1
+
+    def _parse_action(self, text: str) -> dict:
+        return _parse_action(text, self._candidates_per_round)
+
+    def _validate_guard(
+        self, state: WorkingState, action: dict, source_root: Path,
+    ) -> str | None:
+        return _validate_action_guard(state, action, source_root)
 
     def research_branch(
         self,
@@ -721,6 +568,7 @@ class ProposerAgent:
         hints: list[str] | None = None,
         explore: ExploreReport | None = None,
         max_steps: int | None = None,
+        generator_regenerate=None,
     ) -> BranchResult:
         """Sieve + enrich one hypothesis in isolation.
 
@@ -757,13 +605,16 @@ class ProposerAgent:
             f"  mechanism: {hypothesis.mechanism}\n"
             f"  intervention_family: {hypothesis.intervention_family}\n"
             f"  why_plausible: {hypothesis.why_plausible}\n"
-            f"  critical_unknown: {hypothesis.critical_unknown}\n\n"
-            "First SIEVE: read just enough at the target site to confirm the "
+            f"  critical_unknown: {hypothesis.critical_unknown}\n"
+            f"  facts_read (from your Generator partner):\n"
+            + "".join(f"    - {f}\n" for f in hypothesis.facts_read)
+            + "\nFirst SIEVE: read just enough at the target site to confirm the "
             "three objective bars — the card's factual claims hold against the "
             "code, the site is not under a frozen path, and the card is "
-            "self-consistent. If an objective bar fails, block with a source: "
-            "ref. Then ENRICH: read until the executor can act without further "
-            "codebase search, and submit_proposals with an enriched "
+            "self-consistent. The facts_read above are your partner's basis; "
+            "verify they are true. If an objective bar fails, block with a "
+            "source: ref. Then ENRICH: read until the executor can act without "
+            "further codebase search, and submit_proposals with an enriched "
             "instruction. You are done only when you submit or block."
         )
         messages = [
@@ -808,8 +659,8 @@ class ProposerAgent:
                     })
                     reminded = True
                 action, reply_text = self._step(
-                    state, messages, system_prompt, deadline, usages,
-                    1, source_path, step,
+                    state, messages, system_prompt, deadline, usages, step,
+                    source_root=source_path, steps_budget=steps_budget,
                 )
                 name = action["action"]
                 state.action_log.append({"action": name, "step": step})
@@ -855,6 +706,50 @@ class ProposerAgent:
                             reason_kind=action["reason_kind"],
                             evidence_refs=action["evidence_refs"], explore=explore),
                     )
+
+                if name == "feedback_generator":
+                    _bump(state, name)
+                    if generator_regenerate is None:
+                        raise ProposerError(
+                            "feedback_generator issued but no "
+                            "generator_regenerate callback was provided")
+                    print(
+                        f"[branch] feedback_generator steps={step}",
+                        flush=True,
+                    )
+                    new_hypothesis = generator_regenerate(action)
+                    envelope = {
+                        "state": _render_state_header(state, explore),
+                        "feedback": action,
+                        "new_hypothesis": {
+                            "generative_op": new_hypothesis.generative_op,
+                            "region": new_hypothesis.region,
+                            "mechanism": new_hypothesis.mechanism,
+                            "intervention_family":
+                                new_hypothesis.intervention_family,
+                            "why_plausible": new_hypothesis.why_plausible,
+                            "critical_unknown": new_hypothesis.critical_unknown,
+                        },
+                    }
+                    messages.extend([
+                        {"role": "assistant", "content": reply_text},
+                        {"role": "user", "content": json.dumps(
+                            envelope, ensure_ascii=False,
+                        )},
+                    ])
+                    hypothesis = new_hypothesis
+                    state.candidate_directions = (
+                        f"{hypothesis.mechanism} → "
+                        f"{hypothesis.intervention_family} "
+                        f"in {hypothesis.region}")
+                    state.current_information_goal = (
+                        hypothesis.critical_unknown)
+                    print(
+                        f"[branch] generator regenerated "
+                        f"{new_hypothesis.signature()} steps={step}",
+                        flush=True,
+                    )
+                    continue
 
                 # tool call
                 observation = tools.execute(action, deadline=deadline)
@@ -922,74 +817,3 @@ class ProposerAgent:
                 state, round_id=current_round, outcome="submit", explore=explore),
         )
 
-    def _step(self, state, messages, system_prompt, deadline, usages,
-              candidates_per_round, source_root, step_label):
-        """One model turn with up to _MAX_PROTOCOL_REPAIRS retries. Returns
-        (action, reply_text)."""
-        for repair in range(_MAX_PROTOCOL_REPAIRS + 1):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ProposerError("proposer deadline exceeded")
-            reply = self.model.complete(
-                system=system_prompt,
-                messages=messages,
-                timeout_seconds=remaining,
-            )
-            usages.append(reply.usage)
-            if (self.usage_observer is not None
-                    and reply.usage is not None):
-                self.usage_observer(reply.usage)
-            try:
-                action = _parse_action(
-                    reply.text,
-                    candidates_per_round=candidates_per_round,
-                )
-            except ProposerError as exc:
-                if repair == _MAX_PROTOCOL_REPAIRS:
-                    raise ProposerError(
-                        "proposer action protocol failed after "
-                        f"{_MAX_PROTOCOL_REPAIRS} repairs"
-                    ) from None
-                reason = _protocol_reason(exc)
-                state.protocol_repairs += 1
-                print(
-                    f"[proposer step {step_label}/{self.max_steps}] "
-                    f"protocol repair {repair + 1}/{_MAX_PROTOCOL_REPAIRS} "
-                    f"reason={reason}",
-                    flush=True,
-                )
-                messages.extend([
-                    {"role": "assistant", "content": reply.text},
-                    {"role": "user", "content": (
-                        "Protocol correction required "
-                        f"({reason}). Return exactly one JSON action object "
-                        "matching the Runtime contract, with no prose or "
-                        "additional JSON."
-                    )},
-                ])
-                continue
-            guard = _validate_action_guard(state, action, source_root)
-            if guard is not None:
-                if repair == _MAX_PROTOCOL_REPAIRS:
-                    raise ProposerError(
-                        "proposer action protocol failed after "
-                        f"{_MAX_PROTOCOL_REPAIRS} repairs"
-                    ) from None
-                state.protocol_repairs += 1
-                print(
-                    f"[proposer step {step_label}/{self.max_steps}] "
-                    f"protocol repair {repair + 1}/{_MAX_PROTOCOL_REPAIRS} "
-                    f"reason={guard}",
-                    flush=True,
-                )
-                messages.extend([
-                    {"role": "assistant", "content": reply.text},
-                    {"role": "user", "content": _guard_repair_message(guard)},
-                ])
-                continue
-            print(
-                f"[proposer step {step_label}/{self.max_steps}] "
-                f"{_action_summary(action)}",
-                flush=True,
-            )
-            return action, reply.text

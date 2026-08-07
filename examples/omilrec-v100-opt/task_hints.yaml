@@ -52,8 +52,8 @@ safety:
 
 loop:
   max_rounds: 30
-  candidates_per_round: 3
-  max_workers: 3
+  candidates_per_round: 4
+  max_workers: 4
   agent_timeout_seconds: 7200
 
 # self_improvement:

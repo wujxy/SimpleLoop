@@ -202,6 +202,102 @@ def test_submit_no_longer_carries_challenge_response():
         _parse_action(json.dumps(action), candidates_per_round=1)
 
 
+# --- feedback_generator action parser --------------------------------------
+
+def test_feedback_generator_parses_valid_action():
+    action = _parse_action(json.dumps({
+        "action": "feedback_generator",
+        "evidence_refs": ["experiment:r3c0", "finding:F-003"],
+        "observation": "r3c0 tried caching here, gained <1%",
+        "relation_to_seed": "same mechanism in the same region",
+        "implication": "the cache appears already effective here",
+    }), candidates_per_round=1)
+    assert action["action"] == "feedback_generator"
+    assert action["evidence_refs"] == ("experiment:r3c0", "finding:F-003")
+    assert action["observation"] == "r3c0 tried caching here, gained <1%"
+    assert action["relation_to_seed"] == "same mechanism in the same region"
+    assert action["implication"] == "the cache appears already effective here"
+
+
+@pytest.mark.parametrize("action", [
+    {"action": "feedback_generator",
+     "evidence_refs": [],
+     "observation": "o", "relation_to_seed": "r", "implication": "im"},
+    {"action": "feedback_generator",
+     "evidence_refs": ["experiment:r3c0"],
+     "observation": " ", "relation_to_seed": "r", "implication": "im"},
+    {"action": "feedback_generator",
+     "evidence_refs": ["experiment:r3c0"],
+     "observation": "o", "relation_to_seed": " ", "implication": "im"},
+    {"action": "feedback_generator",
+     "evidence_refs": ["experiment:r3c0"],
+     "observation": "o", "relation_to_seed": "r", "implication": " "},
+    {"action": "feedback_generator",
+     "evidence_refs": "experiment:r3c0",
+     "observation": "o", "relation_to_seed": "r", "implication": "im"},
+    {"action": "feedback_generator",
+     "observation": "o", "relation_to_seed": "r", "implication": "im"},
+])
+def test_feedback_generator_rejects_malformed(action):
+    with pytest.raises(ProposerError):
+        _parse_action(json.dumps(action), candidates_per_round=1)
+
+
+def test_feedback_generator_in_research_branch(tmp_path, monkeypatch):
+    """When the cognitive element issues feedback_generator, the
+    generator_regenerate callback is invoked and the new hypothesis replaces
+    the old one for the remainder of the branch."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    feedback_action = {
+        "action": "feedback_generator",
+        "evidence_refs": ["experiment:r3c0"],
+        "observation": "tried this, no gain",
+        "relation_to_seed": "same mechanism",
+        "implication": "the gain margin here is small",
+    }
+    model = FakeModel([
+        _reply(feedback_action),
+        _reply(_submit()),
+    ])
+    regenerate_calls = []
+
+    def generator_regenerate(action):
+        regenerate_calls.append(action)
+        return HypothesisCard(
+            generative_op="G6", region="src/bar.cc",
+            mechanism="precompute", intervention_family="lookup-table",
+            why_plausible="w", critical_unknown="u",
+        )
+
+    result = _agent(model).research_branch(
+        hypothesis=_card(), **_branch_args(tmp_path), max_steps=5,
+        generator_regenerate=generator_regenerate,
+    )
+    assert len(regenerate_calls) == 1
+    assert regenerate_calls[0]["action"] == "feedback_generator"
+    assert result.outcome == "submit"
+    # The branch continued with the regenerated hypothesis.
+    assert result.hypothesis.mechanism == "precompute"
+
+
+def test_feedback_generator_without_callback_raises(tmp_path, monkeypatch):
+    """feedback_generator issued when no callback was provided is a protocol
+    error."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    feedback_action = {
+        "action": "feedback_generator",
+        "evidence_refs": ["experiment:r3c0"],
+        "observation": "o", "relation_to_seed": "r", "implication": "im",
+    }
+    model = FakeModel([_reply(feedback_action)])
+    with pytest.raises(ProposerError, match="no generator_regenerate"):
+        _agent(model).research_branch(
+            hypothesis=_card(), **_branch_args(tmp_path), max_steps=5,
+        )
+
+
 # --- research_branch behavior --------------------------------------------
 
 def test_submit_always_allowed_no_evidence_gate(tmp_path, monkeypatch):

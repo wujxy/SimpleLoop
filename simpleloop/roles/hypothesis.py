@@ -37,6 +37,10 @@ class HypothesisCard:
     intervention_family: str
     why_plausible: str
     critical_unknown: str
+    # Factual observations the Generator read from the source (NOT code
+    # snippets). The hypothesis must follow from these facts. Carried to the
+    # cognitive partner so it can audit the Generator's factual basis.
+    facts_read: tuple[str, ...] = ()
     # Slot kind: "guided" (shaped by Explore boundary) or "free" (frame-free).
     slot: str = "guided"
 

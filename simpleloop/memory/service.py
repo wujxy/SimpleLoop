@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..explore import ExploreReport, analyze_explore_health
 from ..harness.memory import read_history, resolve_episode
-from .context import build_startup_pack
+from .context import build_startup_pack, build_generation_context
 from .experiment_index import (
     Experiment,
     build_experiments,
@@ -148,6 +148,21 @@ class MemoryService:
             tool_cheatsheet=MEMORY_TOOL_CHEATSHEET,
             recent_abstentions=abstentions,
             explore=explore,
+        )
+
+    def build_generation_context(
+        self,
+        *,
+        goal: str,
+        editable: list[str],
+        frozen: list[str],
+        base_sha: str,
+        gate_block: str,
+    ) -> str:
+        """History-free context for the Generator (partner design)."""
+        return build_generation_context(
+            goal=goal, editable=editable, frozen=frozen,
+            base_sha=base_sha, gate_block=gate_block,
         )
 
     # --- Write path: target resolution & experiment linking ---------------

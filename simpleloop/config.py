@@ -68,8 +68,6 @@ _RESEARCHER_DEFAULTS = {
     "max_steps": 50,
     "command_timeout_seconds": 120,
     "command_output_cap_chars": 12000,
-    # Branch-then-deepen pipeline (PLAN.md):
-    "hypothesis_count": 8,       # 2N independent two-card generator calls/round
     # Per-branch step budget for the cognitive element (sieve + enrich). null
     # → derive from max_steps/candidates_per_round. Set an int to give every
     # branch a fixed deepen budget regardless of breadth/depth mode.
@@ -297,7 +295,6 @@ def _resolve_researcher(raw: object) -> dict:
         ("max_steps", 1),
         ("command_timeout_seconds", 1),
         ("command_output_cap_chars", 1000),
-        ("hypothesis_count", 1),
     ):
         value = result[key]
         if (not isinstance(value, int) or isinstance(value, bool)
