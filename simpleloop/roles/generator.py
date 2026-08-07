@@ -36,6 +36,65 @@ _GENERATIVE_OPS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9")
 _EXHAUSTED_NO_IMPROVE = 5
 
 
+def _g_definition(semantic: str, op: str) -> str:
+    """Extract one G's definition paragraph from the generator prompt text.
+
+    The prompt stores each generative operation as a paragraph beginning with
+    ``Gn — <title>: <body>`` (possibly wrapped across lines), separated by blank
+    lines. Returns the single paragraph for ``op`` (e.g. "G6"), or "" if the
+    shape is not recognized — the caller falls back to the full basis.
+    """
+    paragraph: list[str] = []
+    capturing = False
+    for line in semantic.splitlines():
+        token = line.split()[0] if line.split() else ""
+        is_header = token in _GENERATIVE_OPS and " — " in line
+        if is_header:
+            capturing = token == op
+            if capturing:
+                paragraph = [line]
+            continue
+        if capturing:
+            if not line.strip():
+                break
+            paragraph.append(line)
+    return "\n".join(paragraph)
+
+
+def _replace_basis(semantic: str, ops: tuple[str, ...]) -> str:
+    """Swap the full G1-G9 basis in the prompt for a scheduler-selected subset.
+
+    The prompt has a ``## The Generative Basis ...`` section whose body is the
+    G1-G9 paragraphs. This replaces that body with the definition paragraphs of
+    ``ops`` (in the given order), leaving the section header and everything
+    else (rules, JSON schema) untouched. If the section shape isn't recognized,
+    returns ``semantic`` unchanged so a prompt edit never breaks generation.
+    """
+    lines = semantic.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith("## The Generative Basis"):
+            header_idx = i
+            break
+    if header_idx is None:
+        return semantic
+    # The basis body runs from the line after the header up to (but not
+    # including) the next blank-line-then-non-G paragraph — i.e. the closing
+    # "You are not required to use every G." paragraph.
+    end_idx = len(lines)
+    for j in range(header_idx + 1, len(lines)):
+        if lines[j].startswith("You are not required to use every G"):
+            end_idx = j
+            break
+    defs = [_g_definition(semantic, op) for op in ops]
+    defs = [d for d in defs if d]
+    if not defs:
+        return semantic
+    new_body = "\n\n".join(defs)
+    rebuilt = lines[:header_idx + 1] + ["", new_body, ""] + lines[end_idx:]
+    return "\n".join(rebuilt)
+
+
 @dataclass(frozen=True)
 class GenerationResult:
     cards: list[HypothesisCard]
@@ -64,15 +123,30 @@ class GeneratorAgent:
         context: str,
         explore: ExploreReport | None = None,
         prompt_dir: str | None = None,
+        assigned_ops: tuple[str, ...] | None = None,
     ) -> GenerationResult:
         """Produce n hypothesis cards. ``context`` is the startup-pack text
         (objective/gates/editable/frontier). ``explore`` supplies the negative
-        feedback boundary; None means no boundary (first round)."""
+        feedback boundary; None means no boundary (first round).
+
+        ``assigned_ops`` is a *soft* steering signal from the orchestrator's
+        generative-op scheduler: a subset of G1-G9 (e.g. ("G2","G6","G9",...))
+        the model may choose from this call. The full G1-G9 basis in the prompt
+        is replaced with just these entries (with their definitions), so the
+        model's choice is constrained to the subset. The model still
+        self-reports ``generative_op`` in the JSON — the delivery contract is
+        unchanged; this is guidance, not an override.
+        """
         boundary = render_generation_boundary(explore)
         n_free = max(1, int(n * frame_free_ratio)) if n > 1 else 0
         n_guided = n - n_free
+        semantic = load_semantic('generator', prompt_dir).rstrip()
+        if assigned_ops:
+            valid = tuple(op for op in assigned_ops if op in _GENERATIVE_OPS)
+            if valid:
+                semantic = _replace_basis(semantic, valid)
         system = (
-            f"{load_semantic('generator', prompt_dir).rstrip()}\n\n"
+            f"{semantic}\n\n"
             f"Produce exactly {n} hypotheses: {n_guided} guided slot(s) "
             f"(respect the exhausted-region list) and {n_free} free slot(s) "
             f"(ignore it — generate from pure imagination). Mark each with "

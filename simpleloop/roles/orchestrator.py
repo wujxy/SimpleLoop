@@ -2,7 +2,7 @@
 
 Runs the pipeline:
 
-  (1) Generator → N hypothesis cards (wide, evidence-free)
+  (1) Generator → N independent calls (n=2 each) → 2N hypothesis cards
   (2) dedup_by_signature → K distinct niches, minus frozen-region cards
   (3) Per-branch cognitive element (Sieve + Enricher) → 0-1 proposals each
   (4) list-wise selection → 1..candidates_per_round proposals
@@ -24,6 +24,7 @@ The ProposerResult interface is unchanged so loop.py needs no modification.
 from __future__ import annotations
 
 import fnmatch
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -46,14 +47,38 @@ class _Mode:
     label: str
 
 
+# The generative basis (G1-G9) the prompt defines. The scheduler draws a random
+# 5-of-9 subset per independent generator call so that identical context does
+# not collapse every draw onto the same entry-point angle.
+_ALL_GENERATIVE_OPS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9")
+_SCHEDULED_OP_COUNT = 5
+
+
+def _sample_generative_ops() -> tuple[str, ...]:
+    """Pick a random 5-of-9 subset of G1-G9 for one generator call.
+
+    This is the generative-op scheduler: it narrows the menu the model chooses
+    from, so N independent calls each see a different constrained basis rather
+    than the full G1-G9 (which a strong prior collapses to one repeated G). The
+    model still self-reports which G it used — the scheduler only selects the
+    menu, not the choice.
+    """
+    return tuple(random.sample(_ALL_GENERATIVE_OPS, _SCHEDULED_OP_COUNT))
+
+
 def _select_mode(
     *, first_round: bool, n_experiments: int, max_steps: int,
-    hypothesis_count: int, branch_count: int, branch_steps: int | None = None,
+    hypothesis_count: int, candidates_per_round: int,
+    branch_steps: int | None = None,
 ) -> _Mode:
     """Adaptive breadth/depth.
 
     First round / no history → depth-first (few hypotheses, deep branches).
     Later rounds → breadth-first (full hypothesis count).
+
+    The number of branches per round is ``candidates_per_round`` — there is no
+    separate branch-count knob — so the breadth-first step budget is split
+    across that many branches.
 
     When ``branch_steps`` is set explicitly it overrides the derived per-branch
     budget for both modes. The cognitive element's job is bounded locate+enrich
@@ -68,7 +93,7 @@ def _select_mode(
                      label="depth-first")
     n = hypothesis_count
     steps = (branch_steps if branch_steps
-             else max(5, (max_steps - 6) // min(branch_count, n)))
+             else max(5, (max_steps - 6) // min(candidates_per_round, n)))
     return _Mode(n_hypotheses=n, max_branch_steps=steps,
                  label="breadth-first")
 
@@ -86,8 +111,6 @@ class ProposerOrchestrator:
         command_timeout_seconds: int,
         command_output_cap_chars: int,
         hypothesis_count: int = 8,
-        branch_count: int = 3,
-        frame_free_ratio: float = 0.33,
         branch_steps: int | None = None,
         usage_observer=None,
     ):
@@ -98,8 +121,6 @@ class ProposerOrchestrator:
         self.command_timeout_seconds = command_timeout_seconds
         self.command_output_cap_chars = command_output_cap_chars
         self.hypothesis_count = hypothesis_count
-        self.branch_count = branch_count
-        self.frame_free_ratio = frame_free_ratio
         self.branch_steps = branch_steps
         self.usage_observer = usage_observer
         self.generator = GeneratorAgent(
@@ -147,7 +168,7 @@ class ProposerOrchestrator:
             first_round=first_round, n_experiments=len(experiments),
             max_steps=self.max_steps,
             hypothesis_count=self.hypothesis_count,
-            branch_count=self.branch_count,
+            candidates_per_round=candidates_per_round,
             branch_steps=self.branch_steps,
         )
         print(
@@ -164,24 +185,23 @@ class ProposerOrchestrator:
             candidates_per_round=candidates_per_round, hints=hints,
             current_round=current_round, explore=explore,
         )
-        gen_result = self.generator.run(
-            n=mode.n_hypotheses,
-            frame_free_ratio=self.frame_free_ratio,
+        call_count = self.hypothesis_count
+        cards = self._generate_independent_hypotheses(
+            call_count=call_count,
             context=startup_pack,
             explore=explore,
             prompt_dir=prompt_dir,
         )
-        cards = gen_result.cards
         print(
-            f"[orchestrator] generated {len(cards)} cards, "
-            f"{distinct_niches(cards)} distinct niches",
+            f"[orchestrator] independent hypothesis calls={call_count} "
+            f"→ {len(cards)} cards, {distinct_niches(cards)} distinct niches",
             flush=True,
         )
 
         # --- (2) Dedup by structural signature, drop frozen regions ---
         cards = dedup_by_signature(cards, per_bin=1)
         cards = self._split_frozen(cards, frozen)
-        cards = cards[:self.branch_count]
+        cards = cards[:candidates_per_round]
         print(
             f"[orchestrator] after dedup: {len(cards)} cards "
             f"({distinct_niches(cards)} niches)",
@@ -242,6 +262,55 @@ class ProposerOrchestrator:
             trace=self._branch_trace(branch_results),
         )
 
+    def _generate_independent_hypotheses(
+        self, *, call_count: int, context: str, explore, prompt_dir,
+    ) -> list[HypothesisCard]:
+        """Fire ``call_count`` independent two-card Generator calls in parallel.
+
+        Each call is ``self.generator.run(n=2, ...)`` against the same
+        configured model with identical context, Explore boundary, and prompt
+        directory. With ``hypothesis_count=N`` this issues N calls producing
+        2N cards total — half the call count of one-card calls at the same
+        yield, so each call does more work but the draws are still independent.
+
+        Generative-op scheduling: each call gets a random 5-of-9 subset of
+        G1-G9 injected into its prompt (replacing the full basis), so the model
+        chooses from a different constrained menu each time. This counters the
+        collapse where identical context makes every independent draw pick the
+        same G. The model still self-reports ``generative_op`` — the delivery
+        contract is unchanged; the scheduler only narrows the menu.
+
+        Concurrency is bounded at eight (no new configuration) so large N
+        stays practical. Results are stored by submission index and flattened
+        in index order after completion, so dedup (which keeps the first card
+        per signature) and downstream selection stay deterministic regardless
+        of completion order.
+        """
+        slots: list[list[HypothesisCard] | None] = [None] * call_count
+        workers = min(8, call_count) if call_count else 1
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    self.generator.run,
+                    # n=2 ⇒ each call produces 2 cards. frame_free_ratio=0.0
+                    # still yields 1 free slot (the generator's max(1, ...)
+                    # floor), so one card respects the Explore boundary and
+                    # one ignores it — a guided+free pair per call.
+                    n=2, frame_free_ratio=0.0,
+                    context=context, explore=explore, prompt_dir=prompt_dir,
+                    assigned_ops=_sample_generative_ops(),
+                ): i
+                for i in range(call_count)
+            }
+            for future in as_completed(futures):
+                # Keyed by submission index, not completion order — see docstring.
+                slots[futures[future]] = future.result().cards
+        cards: list[HypothesisCard] = []
+        for slot in slots:
+            if slot:
+                cards.extend(slot)
+        return cards
+
     @staticmethod
     def _branch_trace(branches: list[BranchResult]) -> dict:
         """Per-branch observability — recorded for EVERY round, including
@@ -268,7 +337,7 @@ class ProposerOrchestrator:
         names a path under a frozen glob. ``region`` is often prose, so this
         only catches the obvious path-like cases; the branch sieve's frozen
         check is the real gate for prose regions. Dropped cards are naturally
-        backfilled because this runs before the branch_count cap."""
+        backfilled because this runs before the candidates_per_round cap."""
         if not frozen:
             return list(cards)
         kept = []
@@ -294,7 +363,7 @@ class ProposerOrchestrator:
         A branch that raises becomes an error result (so one failure never
         kills the others) and results are indexed by original card position so
         selection and trace stay stable. Concurrency is bounded — ``cards`` is
-        capped at ``branch_count`` upstream.
+        capped at ``candidates_per_round`` upstream.
         """
         shared = dict(
             goal=goal, editable=editable, frozen=frozen,

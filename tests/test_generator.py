@@ -8,6 +8,8 @@ from simpleloop.roles.generator import (
     GeneratorAgent,
     _parse_hypotheses,
     GenerationResult,
+    _replace_basis,
+    _g_definition,
 )
 from simpleloop.roles.hypothesis import HypothesisCard
 from simpleloop.roles.model import ModelError, ModelReply
@@ -166,3 +168,51 @@ class TestAgentRun:
         # n=9, ratio 0.33 → n_free = int(9*0.33) = 2, n_guided = 7
         assert "7 guided" in sys_prompt
         assert "2 free" in sys_prompt
+
+    def test_assigned_ops_replaces_basis_with_subset(self):
+        """assigned_ops narrows the G1-G9 basis in the prompt to the subset;
+        the model still self-reports generative_op (delivery unchanged)."""
+        model = FakeModel(_response([_card_json(op="G6")]))
+        agent = GeneratorAgent(model=model, timeout_seconds=30)
+        agent.run(
+            n=1, frame_free_ratio=0.0, context="ctx",
+            assigned_ops=("G2", "G6", "G9", "G1", "G4"),
+        )
+        sys_prompt = model.calls[0]["system"]
+        # The five assigned Gs appear (their definitions are in the prompt).
+        for op in ("G1", "G2", "G4", "G6", "G9"):
+            assert op in sys_prompt
+        # The four excluded Gs' definition paragraphs are gone. G3/G5/G7/G8
+        # each have a unique definition body word that won't appear elsewhere.
+        assert "Idealize and take limits" not in sys_prompt   # G3
+        assert "Invert: don't accelerate" not in sys_prompt    # G5
+        assert "Anomaly amplification" not in sys_prompt       # G7
+        assert "Form first, explanation later" not in sys_prompt  # G8
+
+    def test_assigned_ops_none_keeps_full_basis(self):
+        """Without scheduling the full G1-G9 basis is intact."""
+        model = FakeModel(_response([_card_json()]))
+        agent = GeneratorAgent(model=model, timeout_seconds=30)
+        agent.run(n=1, frame_free_ratio=0.0, context="ctx")
+        sys_prompt = model.calls[0]["system"]
+        for op in ("G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"):
+            assert op in sys_prompt
+
+    def test_replace_basis_preserves_section_header_and_rules(self):
+        """_replace_basis swaps only the G paragraphs — the section header,
+        the rules, and the JSON schema stay intact."""
+        from simpleloop.prompts import load_semantic
+        semantic = load_semantic("generator")
+        replaced = _replace_basis(semantic, ("G6", "G2"))
+        assert "## The Generative Basis" in replaced
+        assert "You are not required to use every G" in replaced
+        assert "Be diverse." in replaced   # a rule, not a G definition
+
+    def test_g_definition_extracts_one_paragraph(self):
+        from simpleloop.prompts import load_semantic
+        semantic = load_semantic("generator")
+        g6 = _g_definition(semantic, "G6")
+        assert g6.startswith("G6 —")
+        assert "Algorithm/representation/paradigm sweep" in g6
+        # G5's body must not bleed into G6's paragraph.
+        assert "Invert" not in g6

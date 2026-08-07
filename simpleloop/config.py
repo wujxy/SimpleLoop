@@ -69,12 +69,10 @@ _RESEARCHER_DEFAULTS = {
     "command_timeout_seconds": 120,
     "command_output_cap_chars": 12000,
     # Branch-then-deepen pipeline (PLAN.md):
-    "hypothesis_count": 8,       # generator produces this many cards
-    "branch_count": 3,           # max branches deep-researched per round
-    "frame_free_ratio": 0.33,    # fraction of cards ignoring Explore boundary
+    "hypothesis_count": 8,       # 2N independent two-card generator calls/round
     # Per-branch step budget for the cognitive element (sieve + enrich). null
-    # → derive from max_steps/branch_count (the legacy formula). Set an int to
-    # give every branch a fixed deepen budget regardless of breadth/depth mode.
+    # → derive from max_steps/candidates_per_round. Set an int to give every
+    # branch a fixed deepen budget regardless of breadth/depth mode.
     "branch_steps": None,
 }
 
@@ -300,7 +298,6 @@ def _resolve_researcher(raw: object) -> dict:
         ("command_timeout_seconds", 1),
         ("command_output_cap_chars", 1000),
         ("hypothesis_count", 1),
-        ("branch_count", 1),
     ):
         value = result[key]
         if (not isinstance(value, int) or isinstance(value, bool)
@@ -308,12 +305,6 @@ def _resolve_researcher(raw: object) -> dict:
             raise ConfigError(
                 f"researcher.{key}: must be an integer >= {minimum}"
             )
-    ratio = result["frame_free_ratio"]
-    if (not isinstance(ratio, (int, float)) or isinstance(ratio, bool)
-            or not 0.0 <= ratio <= 1.0):
-        raise ConfigError(
-            "researcher.frame_free_ratio: must be a number in [0.0, 1.0]"
-        )
     bs = result.get("branch_steps")
     if bs is not None and (
             not isinstance(bs, int) or isinstance(bs, bool) or bs < 1):
