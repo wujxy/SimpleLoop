@@ -18,6 +18,9 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
 _Y_KINDS = ("objective", "ratio")
 _X_KINDS = ("round", "worktime", "tokens")
 _Y_SLUGS = {"objective": "objective", "ratio": "objective-ratio"}
+_COST_RMB_PER_MILLION_TOKENS = 28.0
+_CACHE_HIT_RMB_PER_MILLION_TOKENS = 2.0
+_COST_MODEL_LABEL = "glm-5.2"
 
 
 @dataclass
@@ -27,6 +30,7 @@ class Observation:
     processed_tokens: int | None
     objective: float | None
     ratio: float | None
+    cost_rmb: float | None = None
     selected: bool = False
 
 
@@ -93,6 +97,24 @@ def _coordinates(telemetry: object) -> tuple[float | None, int | None]:
     )
 
 
+def _cost_rmb(telemetry: object) -> float | None:
+    if not isinstance(telemetry, dict):
+        return None
+    input_tokens = _tokens(telemetry.get("input_tokens"))
+    output_tokens = _tokens(telemetry.get("output_tokens"))
+    cache_read_tokens = _tokens(telemetry.get("cache_read_input_tokens"))
+    cache_creation_tokens = _tokens(telemetry.get("cache_creation_input_tokens"))
+    if all(value is None for value in (
+        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+    )):
+        return None
+    ordinary_tokens = (input_tokens or 0) + (output_tokens or 0)
+    return (
+        ordinary_tokens * _COST_RMB_PER_MILLION_TOKENS
+        + (cache_read_tokens or 0) * _CACHE_HIT_RMB_PER_MILLION_TOKENS
+    ) / 1_000_000.0
+
+
 def _ratio(
     objective_value: float | None,
     baseline_value: float | None,
@@ -149,6 +171,7 @@ def _observation(
         processed_tokens=tokens,
         objective=objective_value,
         ratio=ratio,
+        cost_rmb=_cost_rmb(telemetry),
         selected=selected,
     )
 
@@ -346,6 +369,18 @@ def _render_panel(axis, series: PlotSeries, y_kind: str, x_kind: str) -> None:
             label="Baseline",
             zorder=1,
         )
+    if (
+        y_kind == "objective"
+        and series.objective_key == "SPEED_MS"
+    ):
+        axis.axhline(
+            _PAPER_SPEED_MS,
+            color="#2E8B57",
+            linestyle="--",
+            linewidth=1.2,
+            label="Paper v1.12.0",
+            zorder=1,
+        )
 
     has_data = bool(candidate_x)
     if y_kind in ("objective", "ratio"):
@@ -442,4 +477,449 @@ def write_progress_png(
     overview = run_path / "progress.png"
     if _publish(overview, lambda path: _render_progress_png(series, path)):
         return overview
+    return None
+
+
+def _render_cost_png(series: PlotSeries, output: Path) -> None:
+    """Draw cumulative token cost (RMB) vs round as a single-panel detail image."""
+    plt = _prepare_pyplot()
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    figure.patch.set_facecolor("white")
+
+    # Incumbents carry round-level cumulative cost.
+    points = [
+        (int(obs.round), obs.cost_rmb)
+        for obs in series.incumbents
+        if obs.round > 0 and obs.cost_rmb is not None
+    ]
+    if points:
+        rounds = [r for r, _ in points]
+        costs = [cost for _, cost in points]
+        axis.step(
+            rounds,
+            costs,
+            where="post",
+            color="#2856A6",
+            linewidth=2.2,
+            label="Cumulative cost",
+            zorder=3,
+        )
+        axis.scatter(rounds, costs, color="#B43A3A", marker="D", s=30, zorder=4)
+    else:
+        axis.text(
+            0.5,
+            0.5,
+            "No data",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+            color="#6B7280",
+        )
+
+    axis.set_xlabel("Round")
+    axis.set_ylabel("Cumulative cost (RMB)")
+    axis.set_title(
+        f"Cumulative token cost vs Round  "
+        f"({_COST_MODEL_LABEL}: input/output "
+        f"{_COST_RMB_PER_MILLION_TOKENS:g}, cache hit "
+        f"{_CACHE_HIT_RMB_PER_MILLION_TOKENS:g} RMB / 1M)"
+    )
+    axis.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
+    if series.rounds:
+        axis.set_xticks(_round_ticks(series.rounds))
+        axis.set_xlim(-0.5, series.rounds[-1] + 0.5)
+    handles, _ = axis.get_legend_handles_labels()
+    if handles:
+        axis.legend(loc="best", frameon=False, fontsize="small")
+    figure.tight_layout()
+    try:
+        figure.savefig(output, format="png", dpi=140)
+    finally:
+        plt.close(figure)
+
+
+def write_cost_png(
+    run_dir: str | Path,
+    history: list[dict],
+    metrics_schema: dict | None,
+    plot_context: dict | None = None,
+) -> Path | None:
+    """Redraw the standalone cumulative-cost image (offline detail)."""
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    series = build_series(history, metrics_schema, plot_context)
+    output = run_path / "progress-cost-vs-round.png"
+    if _publish(output, lambda path: _render_cost_png(series, path)):
+        return output
+    return None
+
+# Reference value for the paper v1.12.0 SPEED_MS, shown as a dashed line on
+# objective panels and the dual-axis detail image.
+_PAPER_SPEED_MS = 177.7
+
+
+def _round_cost_points(series: PlotSeries) -> list[tuple[int, float, float]]:
+    """Cumulative (round, objective, cost-RMB) tuples for accepted incumbents.
+
+    Only incumbents whose round-level telemetry carries a cumulative
+    cumulative cost can be placed on the cost axis.  The objective is the
+    incumbent value carried on the same observation."""
+    points: list[tuple[int, float, float]] = []
+    for obs in series.incumbents:
+        if obs.round <= 0 or obs.cost_rmb is None:
+            continue
+        if obs.objective is None:
+            continue
+        points.append((int(obs.round), obs.objective, obs.cost_rmb))
+    return points
+
+
+def _render_objective_vs_cost_png(series: PlotSeries, output: Path) -> None:
+    """Objective vs cumulative token cost — where the optimization lands for the
+    RMB spent.  Plots every candidate (faint), the accepted incumbent step, and
+    the selected points highlighted."""
+    plt = _prepare_pyplot()
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    figure.patch.set_facecolor("white")
+
+    # Candidate scatter: objective vs its own cumulative cost.
+    cand_points: list[tuple[float, float]] = []
+    for obs in series.candidates:
+        if obs.cost_rmb is None or obs.objective is None:
+            continue
+        cand_points.append((obs.cost_rmb, obs.objective))
+    if cand_points:
+        axis.scatter(
+            [c for c, _ in cand_points],
+            [o for _, o in cand_points],
+            color="#D88932",
+            alpha=0.65,
+            s=30,
+            label="All candidates",
+            zorder=2,
+        )
+
+    # Selected candidates highlighted.
+    sel_points: list[tuple[float, float]] = []
+    for obs in series.candidates:
+        if not obs.selected or obs.cost_rmb is None or obs.objective is None:
+            continue
+        sel_points.append((obs.cost_rmb, obs.objective))
+    if sel_points:
+        axis.scatter(
+            [c for c, _ in sel_points],
+            [o for _, o in sel_points],
+            color="#B43A3A",
+            marker="D",
+            s=42,
+            label="Selected",
+            zorder=4,
+        )
+
+    # Accepted incumbent step over cost.
+    inc_points = [
+        (cost, obj) for _, obj, cost in _round_cost_points(series)
+    ]
+    if inc_points:
+        axis.step(
+            [c for c, _ in inc_points],
+            [o for _, o in inc_points],
+            where="post",
+            color="#2856A6",
+            linewidth=2.2,
+            label="Accepted incumbent",
+            zorder=3,
+        )
+
+    if series.objective_key == "SPEED_MS":
+        axis.axhline(
+            _PAPER_SPEED_MS,
+            color="#2E8B57",
+            linestyle="--",
+            linewidth=1.2,
+            label="Paper v1.12.0",
+            zorder=1,
+        )
+    if series.baseline is not None and series.baseline.objective is not None:
+        axis.axhline(
+            series.baseline.objective,
+            color="#6B7280",
+            linestyle="--",
+            linewidth=1.0,
+            label="Baseline",
+            zorder=1,
+        )
+
+    has_data = bool(cand_points) or bool(inc_points)
+    if not has_data:
+        axis.text(
+            0.5,
+            0.5,
+            "No data",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+            color="#6B7280",
+        )
+
+    axis.set_xlabel("Cumulative cost (RMB)")
+    axis.set_ylabel(_y_label(series, "objective"))
+    direction = (
+        "lower is better" if series.lower_is_better is True
+        else "higher is better" if series.lower_is_better is False
+        else "direction not configured"
+    )
+    axis.set_title(
+        f"{_y_label(series, 'objective')} ({direction}) vs Cumulative cost  "
+        f"({_COST_MODEL_LABEL}: input/output "
+        f"{_COST_RMB_PER_MILLION_TOKENS:g}, cache hit "
+        f"{_CACHE_HIT_RMB_PER_MILLION_TOKENS:g} RMB / 1M)"
+    )
+    axis.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
+    handles, _ = axis.get_legend_handles_labels()
+    if handles:
+        axis.legend(loc="best", frameon=False, fontsize="small")
+    figure.tight_layout()
+    try:
+        figure.savefig(output, format="png", dpi=140)
+    finally:
+        plt.close(figure)
+
+
+def write_objective_vs_cost_png(
+    run_dir: str | Path,
+    history: list[dict],
+    metrics_schema: dict | None,
+    plot_context: dict | None = None,
+) -> Path | None:
+    """Redraw the objective-vs-cost detail image (offline only)."""
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    series = build_series(history, metrics_schema, plot_context)
+    output = run_path / "progress-objective-vs-cost.png"
+    if _publish(output, lambda path: _render_objective_vs_cost_png(series, path)):
+        return output
+    return None
+
+
+def _render_dual_axis_png(series: PlotSeries, output: Path) -> None:
+    """Dual-y-axis detail image for SPEED_MS objectives.
+
+    Left axis: objective (SPEED_MS, log scale).  Right axis: speedup multiple
+    (baseline / objective, linear).  Only selected points are drawn, plus dashed
+    reference lines for the paper v1.12.0 value and the baseline."""
+    plt = _prepare_pyplot()
+    figure, left = plt.subplots(figsize=(9, 5.5))
+    figure.patch.set_facecolor("white")
+
+    selected = [
+        obs for obs in series.candidates
+        if obs.selected and obs.objective is not None
+    ]
+    baseline_value = (
+        series.baseline.objective if series.baseline is not None else None
+    )
+
+    right = None
+    if selected:
+        rounds = [int(obs.round) for obs in selected]
+        objectives = [obs.objective for obs in selected]
+        left.plot(
+            rounds,
+            objectives,
+            color="#B43A3A",
+            linewidth=1.4,
+            alpha=0.8,
+            zorder=3,
+        )
+        left.scatter(
+            rounds,
+            objectives,
+            color="#B43A3A",
+            marker="D",
+            s=48,
+            label="Selected (SPEED_MS)",
+            zorder=4,
+        )
+        if baseline_value:
+            speedups = [baseline_value / o for o in objectives]
+            right = left.twinx()
+            right.plot(
+                rounds,
+                speedups,
+                color="#2856A6",
+                linewidth=1.4,
+                alpha=0.8,
+                zorder=2,
+            )
+            right.scatter(
+                rounds,
+                speedups,
+                color="#2856A6",
+                marker="o",
+                s=36,
+                label="Selected (speedup)",
+                zorder=3,
+            )
+            right.set_ylabel("Speedup (× baseline)")
+            right.grid(False)
+            right.axhline(
+                1.0,
+                color="#6B7280",
+                linestyle="--",
+                linewidth=1.0,
+                label="Baseline (1×)",
+                zorder=1,
+            )
+    else:
+        left.text(
+            0.5,
+            0.5,
+            "No selected points",
+            ha="center",
+            va="center",
+            transform=left.transAxes,
+            color="#6B7280",
+        )
+
+    left.set_xlabel("Round")
+    left.set_ylabel(_y_label(series, "objective"))
+    left.set_yscale("log")
+    if series.objective_key == "SPEED_MS":
+        left.axhline(
+            _PAPER_SPEED_MS,
+            color="#2E8B57",
+            linestyle="--",
+            linewidth=1.2,
+            label="Paper v1.12.0",
+            zorder=1,
+        )
+    if series.rounds:
+        left.set_xticks(_round_ticks(series.rounds))
+        left.set_xlim(-0.5, series.rounds[-1] + 0.5)
+    left.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
+    title = f"{_y_label(series, 'objective')} (log) & speedup vs Round"
+    if not selected:
+        title = f"{_y_label(series, 'objective')} (log) & speedup — no selected points"
+    left.set_title(title)
+
+    # Merge left/right legend entries into one legend inside the plot frame.
+    handles, labels = left.get_legend_handles_labels()
+    if right is not None:
+        r_handles, r_labels = right.get_legend_handles_labels()
+        handles += r_handles
+        labels += r_labels
+    if handles:
+        left.legend(
+            handles,
+            labels,
+            loc="best",
+            frameon=True,
+            framealpha=0.85,
+            fontsize="small",
+        )
+    figure.tight_layout()
+    try:
+        figure.savefig(output, format="png", dpi=140)
+    finally:
+        plt.close(figure)
+
+
+
+def _render_dual_axis_cost_png(series: PlotSeries, output: Path) -> None:
+    """Draw selected objective and speedup against cumulative cost."""
+    plt = _prepare_pyplot()
+    figure, left = plt.subplots(figsize=(9, 5.5))
+    figure.patch.set_facecolor("white")
+
+    selected = [
+        obs for obs in series.candidates
+        if (
+            obs.selected
+            and obs.objective is not None
+            and obs.cost_rmb is not None
+        )
+    ]
+    baseline_value = (
+        series.baseline.objective if series.baseline is not None else None
+    )
+
+    right = None
+    if selected:
+        costs = [obs.cost_rmb for obs in selected]
+        objectives = [obs.objective for obs in selected]
+        left.plot(costs, objectives, color="#B43A3A", linewidth=1.4,
+                  alpha=0.8, zorder=3)
+        left.scatter(costs, objectives, color="#B43A3A", marker="D", s=48,
+                     label="Selected (SPEED_MS)", zorder=4)
+        if baseline_value:
+            speedups = [baseline_value / value for value in objectives]
+            right = left.twinx()
+            right.plot(costs, speedups, color="#2856A6", linewidth=1.4,
+                       alpha=0.8, zorder=2)
+            right.scatter(costs, speedups, color="#2856A6", marker="o", s=36,
+                          label="Selected (speedup)", zorder=3)
+            right.set_ylabel("Speedup (× baseline)")
+            right.grid(False)
+            right.axhline(1.0, color="#6B7280", linestyle="--", linewidth=1.0,
+                          label="Baseline (1×)", zorder=1)
+    else:
+        left.text(0.5, 0.5, "No selected points", ha="center", va="center",
+                  transform=left.transAxes, color="#6B7280")
+
+    left.set_xlabel("Cumulative cost (RMB)")
+    left.set_ylabel(_y_label(series, "objective"))
+    left.set_yscale("log")
+    if series.objective_key == "SPEED_MS":
+        left.axhline(_PAPER_SPEED_MS, color="#2E8B57", linestyle="--",
+                     linewidth=1.2, label="Paper v1.12.0", zorder=1)
+    left.grid(True, color="#D9DEE5", linewidth=0.7, alpha=0.75)
+    title = f"{_y_label(series, 'objective')} (log) & speedup vs Cumulative cost"
+    if not selected:
+        title = f"{_y_label(series, 'objective')} (log) & speedup — no selected points"
+    left.set_title(title)
+
+    handles, labels = left.get_legend_handles_labels()
+    if right is not None:
+        right_handles, right_labels = right.get_legend_handles_labels()
+        handles += right_handles
+        labels += right_labels
+    if handles:
+        left.legend(handles, labels, loc="best", frameon=True,
+                    framealpha=0.85, fontsize="small")
+    figure.tight_layout()
+    try:
+        figure.savefig(output, format="png", dpi=140)
+    finally:
+        plt.close(figure)
+
+
+def write_dual_axis_cost_png(
+    run_dir: str | Path,
+    history: list[dict],
+    metrics_schema: dict | None,
+    plot_context: dict | None = None,
+) -> Path | None:
+    """Redraw the objective/speedup-vs-cost detail image."""
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    series = build_series(history, metrics_schema, plot_context)
+    output = run_path / "progress-objective-ratio-vs-cost.png"
+    if _publish(output, lambda path: _render_dual_axis_cost_png(series, path)):
+        return output
+    return None
+
+def write_dual_axis_png(
+    run_dir: str | Path,
+    history: list[dict],
+    metrics_schema: dict | None,
+    plot_context: dict | None = None,
+) -> Path | None:
+    """Redraw the dual-axis objective/speedup detail image (offline only)."""
+    run_path = Path(run_dir)
+    run_path.mkdir(parents=True, exist_ok=True)
+    series = build_series(history, metrics_schema, plot_context)
+    output = run_path / "progress-objective-speedup-vs-round.png"
+    if _publish(output, lambda path: _render_dual_axis_png(series, path)):
+        return output
     return None

@@ -169,6 +169,19 @@ def test_build_series_skips_non_finite_values():
     assert series.incumbent_objective == []
 
 
+def test_cost_uses_weighted_input_output_and_cache_hit_rates():
+    telemetry = {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_creation_input_tokens": 7,
+        "cache_read_input_tokens": 20,
+    }
+
+    assert plot_mod._cost_rmb(telemetry) == pytest.approx(
+        (10 + 5) * 28 / 1_000_000 + 20 * 2 / 1_000_000
+    )
+
+
 def test_write_progress_png_creates_valid_png(tmp_path):
     history = [
         {
@@ -378,6 +391,10 @@ DETAIL_OUTPUTS = {
     "progress-objective-ratio-vs-round.png",
     "progress-objective-ratio-vs-worktime.png",
     "progress-objective-ratio-vs-tokens.png",
+    "progress-cost-vs-round.png",
+    "progress-objective-vs-cost.png",
+    "progress-objective-speedup-vs-round.png",
+    "progress-objective-ratio-vs-cost.png",
 }
 
 
@@ -498,6 +515,132 @@ def test_ratio_panel_keeps_raw_ratio_for_higher_is_better():
         assert "higher is better" in axis.get_title()
     finally:
         plt.close(figure)
+
+
+def test_objective_panel_has_paper_reference_line_for_speed_ms():
+    """Every SPEED_MS objective panel gets a dashed 177.7 ms reference line."""
+    plt = plot_mod._prepare_pyplot()
+    figure, axis = plt.subplots()
+    try:
+        series = build_series(HISTORY, SCHEMA, CONTEXT)
+        plot_mod._render_panel(axis, series, "objective", "round")
+        labels = [line.get_label() for line in axis.get_lines()]
+        assert "Paper v1.12.0" in labels
+        ref_line = next(
+            line for line in axis.get_lines() if line.get_label() == "Paper v1.12.0"
+        )
+        # axhline stores the y-intercept as the first y-data element.
+        assert pytest.approx(ref_line.get_ydata()[0]) == 177.7
+    finally:
+        plt.close(figure)
+
+
+def test_ratio_panel_has_no_paper_reference_line():
+    """The 177.7 ms reference line must not appear on ratio panels."""
+    plt = plot_mod._prepare_pyplot()
+    figure, axis = plt.subplots()
+    try:
+        series = build_series(HISTORY, SCHEMA, CONTEXT)
+        plot_mod._render_panel(axis, series, "ratio", "round")
+        labels = [line.get_label() for line in axis.get_lines()]
+        assert "Paper v1.12.0" not in labels
+    finally:
+        plt.close(figure)
+
+
+def test_cost_png_is_written_with_valid_content(tmp_path):
+    output = plot_mod.write_cost_png(tmp_path, HISTORY, SCHEMA, CONTEXT)
+
+    assert output == tmp_path / "progress-cost-vs-round.png"
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert output.stat().st_size > 5_000
+
+
+def test_objective_vs_cost_png_is_written_with_valid_content(tmp_path):
+    output = plot_mod.write_objective_vs_cost_png(tmp_path, HISTORY, SCHEMA, CONTEXT)
+
+    assert output == tmp_path / "progress-objective-vs-cost.png"
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert output.stat().st_size > 5_000
+
+
+def test_objective_vs_cost_png_has_paper_and_baseline_reference_lines():
+    """The objective-vs-cost image draws the paper v1.12.0 and baseline
+    reference lines as dashed axhlines."""
+    plt = plot_mod._prepare_pyplot()
+    import matplotlib.pyplot as _plt
+    figures = []
+    orig_subplots = _plt.subplots
+
+    def capture_subplots(*a, **k):
+        fig, ax = orig_subplots(*a, **k)
+        figures.append(fig)
+        return fig, ax
+
+    _plt.subplots = capture_subplots
+    try:
+        plot_mod._render_objective_vs_cost_png(
+            build_series(HISTORY, SCHEMA, CONTEXT), Path("/tmp/dummy.png"))
+    finally:
+        _plt.subplots = orig_subplots
+        for f in figures:
+            _plt.close(f)
+    assert figures, "no figure was created"
+    axis = figures[0].axes[0]
+    labels = [line.get_label() for line in axis.get_lines()]
+    assert "Paper v1.12.0" in labels
+    assert "Baseline" in labels
+    ref_line = next(
+        line for line in axis.get_lines() if line.get_label() == "Paper v1.12.0"
+    )
+    assert pytest.approx(ref_line.get_ydata()[0]) == 177.7
+
+
+def test_dual_axis_png_is_written_with_valid_content(tmp_path):
+    output = plot_mod.write_dual_axis_png(tmp_path, HISTORY, SCHEMA, CONTEXT)
+
+    assert output == tmp_path / "progress-objective-speedup-vs-round.png"
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert output.stat().st_size > 5_000
+
+
+def test_dual_axis_png_has_log_scale_and_reference_lines():
+    """The dual-axis image uses a log y-axis and draws the paper v1.12.0 and
+    baseline reference lines on the left axis."""
+    plt = plot_mod._prepare_pyplot()
+    figures = []
+    import matplotlib.pyplot as _plt
+    orig_subplots = _plt.subplots
+
+    def capture_subplots(*a, **k):
+        fig, ax = orig_subplots(*a, **k)
+        figures.append(fig)
+        return fig, ax
+
+    _plt.subplots = capture_subplots
+    try:
+        plot_mod._render_dual_axis_png(
+            build_series(HISTORY, SCHEMA, CONTEXT), Path("/tmp/dummy.png"))
+    finally:
+        _plt.subplots = orig_subplots
+        for f in figures:
+            _plt.close(f)
+    assert figures, "no figure was created"
+    fig = figures[0]
+    left = fig.axes[0]
+    # Log scale on the left y-axis.
+    assert left.get_yscale() == "log"
+    labels = [line.get_label() for line in left.get_lines()]
+    assert "Paper v1.12.0" in labels
+    assert "Baseline" in labels
+    # Only selected points are plotted on the left axis (one selected candidate
+    # in HISTORY: SPEED_MS 80.0 at round 1).
+    selected_line = next(
+        coll for coll in left.collections
+        if coll.get_label() == "Selected (SPEED_MS)"
+    )
+    ys = selected_line.get_offsets()[:, 1]
+    assert list(ys) == [80.0]
 
 
 def test_one_detail_failure_preserves_old_file_and_other_outputs(

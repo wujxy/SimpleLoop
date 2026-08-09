@@ -59,6 +59,30 @@ def write_detail_pngs(
                 ),
             ):
                 published.append(output)
+    cost_output = run_path / "progress-cost-vs-round.png"
+    if plot_mod._publish(
+        cost_output,
+        lambda path: plot_mod._render_cost_png(series, path),
+    ):
+        published.append(cost_output)
+    obj_cost_output = run_path / "progress-objective-vs-cost.png"
+    if plot_mod._publish(
+        obj_cost_output,
+        lambda path: plot_mod._render_objective_vs_cost_png(series, path),
+    ):
+        published.append(obj_cost_output)
+    dual_output = run_path / "progress-objective-speedup-vs-round.png"
+    if plot_mod._publish(
+        dual_output,
+        lambda path: plot_mod._render_dual_axis_png(series, path),
+    ):
+        published.append(dual_output)
+    cost_dual_output = run_path / "progress-objective-ratio-vs-cost.png"
+    if plot_mod._publish(
+        cost_dual_output,
+        lambda path: plot_mod._render_dual_axis_cost_png(series, path),
+    ):
+        published.append(cost_dual_output)
     return published
 
 
