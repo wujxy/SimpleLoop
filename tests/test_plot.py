@@ -15,7 +15,7 @@ from simpleloop.reporting.telemetry import RunTelemetry
 
 _RESEARCHER = {
     "model": "gpt-5.5", "base_url": "https://example.invalid",
-    "max_steps": 5, "command_timeout_seconds": 2,
+    "command_timeout_seconds": 2,
     "command_output_cap_chars": 1000,
 }
 _EXECUTOR = {

@@ -482,12 +482,10 @@ def _build_context(
             model=model_mod.build_chat_model(researcher),
             runtime=runtime,
             timeout_seconds=timeout,
-            max_steps=researcher["max_steps"],
             command_timeout_seconds=researcher["command_timeout_seconds"],
             command_output_cap_chars=researcher[
                 "command_output_cap_chars"
             ],
-            branch_steps=researcher.get("branch_steps"),
             usage_observer=telemetry.record_usage,
         )
     executor = roles["executor"]
@@ -651,6 +649,8 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
             gate_block=ctx.gate_lines,
             prompt_dir=ctx.prompt_dir,
             hints=cfg.get("hints") or None,
+            gen_steps=cfg.get("gen_steps", 216),
+            cognitive_steps=cfg.get("cognitive_steps", 148),
         )
     except (model_mod.ModelError, proposer_mod.ProposerError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.

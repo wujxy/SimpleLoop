@@ -178,7 +178,7 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         "roles": {
             "researcher": {
                 "model": "gpt-5.5", "base_url": "https://example.invalid",
-                "max_steps": 5, "command_timeout_seconds": 2,
+                "command_timeout_seconds": 2,
                 "command_output_cap_chars": 1000,
             },
             "executor": {

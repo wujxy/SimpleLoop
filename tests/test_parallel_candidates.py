@@ -645,7 +645,7 @@ def _run_loop_integration(
         "roles": {
             "researcher": {
                 "model": "gpt-5.5", "base_url": "https://example.invalid",
-                "max_steps": 5, "command_timeout_seconds": 2,
+                "command_timeout_seconds": 2,
                 "command_output_cap_chars": 1000,
             },
             "executor": {
@@ -834,7 +834,7 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         "roles": {
             "researcher": {
                 "model": "gpt-5.5", "base_url": "https://example.invalid",
-                "max_steps": 5, "command_timeout_seconds": 2,
+                "command_timeout_seconds": 2,
                 "command_output_cap_chars": 1000,
             },
             "executor": {

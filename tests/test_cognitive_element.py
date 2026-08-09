@@ -243,10 +243,18 @@ def test_feedback_generator_rejects_malformed(action):
         _parse_action(json.dumps(action), candidates_per_round=1)
 
 
-def test_feedback_generator_in_research_branch(tmp_path, monkeypatch):
+def _select(idx=0, slot="hotspot",
+            refs=("experiment:r0c0",), rationale="recent improvement"):
+    return {"action": "select_for_enrich", "selected": [
+        {"hypothesis_idx": idx, "slot": slot,
+         "evidence_refs": list(refs), "rationale": rationale},
+    ]}
+
+
+def test_feedback_generator_in_research_batch(tmp_path, monkeypatch):
     """When the cognitive element issues feedback_generator, the
-    generator_regenerate callback is invoked and the new hypothesis replaces
-    the old one for the remainder of the branch."""
+    generator_regenerate callback is invoked and the new hypothesis is fed
+    back as context for the remainder of the batch."""
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
     feedback_action = {
@@ -258,6 +266,7 @@ def test_feedback_generator_in_research_branch(tmp_path, monkeypatch):
     }
     model = FakeModel([
         _reply(feedback_action),
+        _reply(_select()),
         _reply(_submit()),
     ])
     regenerate_calls = []
@@ -270,15 +279,13 @@ def test_feedback_generator_in_research_branch(tmp_path, monkeypatch):
             why_plausible="w", critical_unknown="u",
         )
 
-    result = _agent(model).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=5,
-        generator_regenerate=generator_regenerate,
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=6, generator_regenerate=generator_regenerate,
     )
     assert len(regenerate_calls) == 1
     assert regenerate_calls[0]["action"] == "feedback_generator"
     assert result.outcome == "submit"
-    # The branch continued with the regenerated hypothesis.
-    assert result.hypothesis.mechanism == "precompute"
 
 
 def test_feedback_generator_without_callback_raises(tmp_path, monkeypatch):
@@ -293,42 +300,61 @@ def test_feedback_generator_without_callback_raises(tmp_path, monkeypatch):
     }
     model = FakeModel([_reply(feedback_action)])
     with pytest.raises(ProposerError, match="no generator_regenerate"):
-        _agent(model).research_branch(
-            hypothesis=_card(), **_branch_args(tmp_path), max_steps=5,
+        _agent(model).research_batch(
+            hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+            max_steps=5,
         )
 
 
-# --- research_branch behavior --------------------------------------------
+# --- research_batch behavior ---------------------------------------------
 
-def test_submit_always_allowed_no_evidence_gate(tmp_path, monkeypatch):
-    """No merit/evidence gate on submit: a branch may submit immediately,
-    even with zero tool calls. The Harness is the only merit judge."""
+def test_select_then_submit_no_evidence_gate(tmp_path, monkeypatch):
+    """No merit/evidence gate on submit: a batch may select + submit
+    immediately, even with zero tool calls. The Harness is the only merit
+    judge."""
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-    model = FakeModel([_reply(_submit())])
-    result = _agent(model).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=5)
+    model = FakeModel([_reply(_select()), _reply(_submit())])
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=5)
     assert result.outcome == "submit"
-    assert result.proposal is not None
+    assert result.proposals is not None
+    assert len(result.proposals) == 1
     assert result.enrichment_partial is False
 
 
-def test_budget_exhaust_submits_partial_not_abandon(tmp_path, monkeypatch):
-    """Budget exhaustion submits a partial proposal — it never abandons an
-    idea. The orchestrator's tool_calls tie-break deprioritizes it."""
+def test_budget_exhaust_after_select_submits_partial(tmp_path, monkeypatch):
+    """Budget exhaustion after selection but before enrichment submits a
+    partial proposal — it never abandons a selected idea."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    model = FakeModel([
+        _reply(_select()),
+        _reply({"action": "inspect_episode", "ref": "r0c0"}),
+    ])
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=2)
+    assert result.outcome == "submit"
+    assert result.enrichment_partial is True
+    assert result.proposal is not None
+    assert "Enrichment incomplete" in result.proposal.instruction
+
+
+def test_budget_exhaust_before_select_blocks(tmp_path, monkeypatch):
+    """Budget exhaustion before any selection blocks — nothing to submit."""
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
     model = FakeModel([
         _reply({"action": "inspect_episode", "ref": "r0c0"}),
         _reply({"action": "inspect_episode", "ref": "r1c0"}),
     ])
-    result = _agent(model).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=2)
-    assert result.outcome == "submit"
-    assert result.enrichment_partial is True
-    assert result.proposal is not None
-    assert "Enrichment incomplete" in result.proposal.instruction
-    assert result.deliberation_telemetry["source_reads"] == 0
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=2)
+    assert result.outcome == "block"
+    assert result.reason_kind == "contradiction"
 
 
 def test_block_requires_source_evidence(tmp_path, monkeypatch, capsys):
@@ -336,10 +362,11 @@ def test_block_requires_source_evidence(tmp_path, monkeypatch, capsys):
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
     bad_block = _block(refs=("source:src/missing.cc",))  # parses, but unresolved
-    model = FakeModel([_reply(bad_block), _reply(_submit())])
-    result = _agent(model).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=5)
-    assert result.outcome == "submit"  # block was rejected, then submit
+    model = FakeModel([_reply(bad_block), _reply(_select()), _reply(_submit())])
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=6)
+    assert result.outcome == "submit"  # block was rejected, then select+submit
     assert "reason=block_needs_source" in capsys.readouterr().out
 
 
@@ -352,8 +379,9 @@ def test_block_succeeds_with_valid_source_ref(tmp_path, monkeypatch):
                 "cwd": "source"}),
         _reply(_block(explanation="the getter is absent")),
     ])
-    result = _agent(model).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=5)
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=5)
     assert result.outcome == "block"
     assert result.reason_kind == "false_claim"
     assert "source:src/foo.cc" in result.block_evidence_refs
@@ -366,25 +394,100 @@ def test_repeated_tool_is_repaired(tmp_path, monkeypatch, capsys):
     model = FakeModel([
         _reply({"action": "inspect_episode", "ref": "r0c0"}),
         _reply({"action": "inspect_episode", "ref": "r0c0"}),  # exact repeat
+        _reply(_select()),
         _reply(_submit()),
     ])
-    result = _agent(model).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=8)
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=8)
     assert result.outcome == "submit"
     assert "reason=repeated_tool" in capsys.readouterr().out
 
 
-def test_no_taboo_two_same_family_submits_pass(tmp_path, monkeypatch):
-    """There is no taboo set: submitting in a family is never refused on
-    judgment. (Two branches in the same family both submit — exercised at the
-    orchestrator level; here we confirm a single submit needs no novelty.)"""
+def test_no_taboo_on_submit(tmp_path, monkeypatch):
+    """There is no taboo set: submitting is never refused on judgment."""
     FakeTools.instances.clear()
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
-    model = FakeModel([_reply(_submit())])
-    result = _agent(model).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=5)
+    model = FakeModel([_reply(_select()), _reply(_submit())])
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=5)
     assert result.outcome == "submit"
     assert result.deliberation_telemetry.get("taboo_count", 0) == 0
+
+
+def test_select_out_of_range_raises(tmp_path, monkeypatch):
+    """select_for_enrich with an idx beyond the hypotheses list is a protocol
+    error."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    model = FakeModel([_reply(_select(idx=5))])
+    with pytest.raises(ProposerError, match="out of range"):
+        _agent(model).research_batch(
+            hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+            max_steps=5)
+
+
+def test_submit_without_select_rejected(tmp_path, monkeypatch):
+    """submit_proposals before select_for_enrich is rejected with a repair."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    model = FakeModel([
+        _reply(_submit()),       # rejected: no select first
+        _reply(_select()),       # now select
+        _reply(_submit()),       # now submit OK
+    ])
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=6)
+    assert result.outcome == "submit"
+
+
+def test_submit_count_must_match_selected(tmp_path, monkeypatch):
+    """If select_quota=2 but only 1 proposal is submitted, it is rejected."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    two_cards = [_card(), HypothesisCard(
+        generative_op="G4", region="src/bar.cc", mechanism="other",
+        intervention_family="other", why_plausible="w", critical_unknown="u")]
+    model = FakeModel([
+        _reply({"action": "select_for_enrich", "selected": [
+            {"hypothesis_idx": 0, "slot": "hotspot",
+             "evidence_refs": ["experiment:r0c0"], "rationale": "r1"},
+            {"hypothesis_idx": 1, "slot": "new_direction",
+             "evidence_refs": ["experiment:r1c0"], "rationale": "r2"},
+        ]}),
+        _reply(_submit()),       # only 1 proposal but 2 selected -> rejected
+        _reply({"action": "submit_proposals", "proposals": [
+            {"instruction": "a", "research_target": _new_target()},
+            {"instruction": "b", "research_target": _new_target()},
+        ]}),
+    ])
+    result = _agent(model).research_batch(
+        hypotheses=two_cards, select_quota=2, **_branch_args(tmp_path),
+        max_steps=6)
+    assert result.outcome == "submit"
+    assert len(result.proposals) == 2
+
+
+def test_select_exceeding_quota_rejected(tmp_path, monkeypatch):
+    """select_for_enrich selecting more than select_quota is rejected."""
+    FakeTools.instances.clear()
+    monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
+    model = FakeModel([
+        _reply({"action": "select_for_enrich", "selected": [
+            {"hypothesis_idx": 0, "slot": "hotspot",
+             "evidence_refs": ["experiment:r0c0"], "rationale": "r1"},
+            {"hypothesis_idx": 0, "slot": "new_direction",
+             "evidence_refs": ["experiment:r1c0"], "rationale": "r2"},
+        ]}),  # 2 selected but quota=1 -> rejected
+        _reply(_select()),
+        _reply(_submit()),
+    ])
+    result = _agent(model).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=8)
+    assert result.outcome == "submit"
 
 
 # --- protocol repair mechanics (salvaged) --------------------------------
@@ -396,10 +499,12 @@ def test_repairs_protocol_without_consuming_a_step(tmp_path, monkeypatch, capsys
     model = FakeModel([
         ModelReply(rejected, usage={"t": 1}),
         _reply({"action": "inspect_episode", "ref": "r0c0"}, {"t": 2}),
-        _reply(_submit(), {"t": 3}),
+        _reply(_select(), {"t": 3}),
+        _reply(_submit(), {"t": 4}),
     ])
-    result = _agent(model, max_steps=8, observer=[].append).research_branch(
-        hypothesis=_card(), **_branch_args(tmp_path), max_steps=8)
+    result = _agent(model, max_steps=10, observer=[].append).research_batch(
+        hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+        max_steps=10)
     assert result.outcome == "submit"
     out = capsys.readouterr().out
     assert "protocol repair 1/2 reason=invalid_json" in out
@@ -411,8 +516,9 @@ def test_fails_closed_after_two_protocol_repairs(tmp_path, monkeypatch):
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
     model = FakeModel([ModelReply("{} trailing") for _ in range(3)])
     with pytest.raises(ProposerError, match="after 2 repairs"):
-        _agent(model).research_branch(
-            hypothesis=_card(), **_branch_args(tmp_path), max_steps=8)
+        _agent(model).research_batch(
+            hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+            max_steps=8)
     assert FakeTools.instances[0].actions == []
 
 
@@ -423,8 +529,9 @@ def test_failed_protocol_repair_traceback_hides_rejected_content(
     marker = "PRIVATE_ACTION_MARKER"
     model = FakeModel([_reply({"action": marker}) for _ in range(3)])
     with pytest.raises(ProposerError) as exc_info:
-        _agent(model).research_branch(
-            hypothesis=_card(), **_branch_args(tmp_path), max_steps=8)
+        _agent(model).research_batch(
+            hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+            max_steps=8)
     rendered = "".join(traceback.format_exception(exc_info.value))
     assert marker not in rendered
 
@@ -439,5 +546,6 @@ def test_does_not_repair_model_transport_errors(tmp_path):
             raise ModelError("transport failed")
 
     with pytest.raises(ModelError, match="transport failed"):
-        _agent(RaisingModel()).research_branch(
-            hypothesis=_card(), **_branch_args(tmp_path), max_steps=8)
+        _agent(RaisingModel()).research_batch(
+            hypotheses=[_card()], select_quota=1, **_branch_args(tmp_path),
+            max_steps=8)

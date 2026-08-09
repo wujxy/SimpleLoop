@@ -66,10 +66,8 @@ def test_researcher_defaults(tmp_path: Path):
         "api": "hepai",
         "model": "gpt-5.5",
         "base_url": "https://aiapi.ihep.ac.cn/apiv2",
-        "max_steps": 50,
         "command_timeout_seconds": 120,
         "command_output_cap_chars": 12000,
-        "branch_steps": None,
     }
 
 
@@ -147,7 +145,6 @@ def test_researcher_rejects_unknown_key(tmp_path: Path):
         ({"api": "openai"}, "supported values are"),
         ({"model": " "}, "researcher.model"),
         ({"base_url": ""}, "researcher.base_url"),
-        ({"max_steps": 0}, "researcher.max_steps"),
         ({"command_timeout_seconds": 0}, "command_timeout_seconds"),
         ({"command_output_cap_chars": 999}, "command_output_cap_chars"),
     ],

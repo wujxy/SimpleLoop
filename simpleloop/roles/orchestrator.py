@@ -56,7 +56,9 @@ class LaneResult:
     lane_id: int
     assigned_ops: tuple[str, ...] = ()
     hypothesis: HypothesisCard | None = None
+    all_cards: tuple[HypothesisCard, ...] = ()  # all generator cards this lane
     proposal: ResearchProposal | None = None
+    proposals: tuple[ResearchProposal, ...] = ()  # batch mode: K proposals
     outcome: str = "submit"
     reason_kind: str | None = None
     explanation: str | None = None
@@ -76,11 +78,16 @@ _SCHEDULED_OP_COUNT = 5
 # Max regenerations per lane (cognitive feeds history back to generator).
 _MAX_REGENERATIONS = 3
 
-# Step budget for the Generator agent (it scans code + spots a direction).
-_GEN_STEPS = 12
-
-# Step budget for the Cognitive element (sieve + history audit + enrich).
-_COGNITIVE_STEPS = 36
+# --- Funnel architecture constants (internal, not user-configurable) ---
+# Each lane's generator produces _HYPOTHESES_PER_LANE seed hypotheses
+# (_SCHEDULED_OP_COUNT lenses × _IDEAS_PER_LENS ideas each).
+_IDEAS_PER_LENS = 2
+_HYPOTHESES_PER_LANE = _SCHEDULED_OP_COUNT * _IDEAS_PER_LENS  # 5 × 2 = 10
+# Each lane's cognitive element selects _SELECT_PER_LANE for enrichment.
+# K=2: one hotspot (recent improvement) + one new_direction (low coverage).
+_SELECT_PER_LANE = 2
+# Max concurrent lane workers.
+_MAX_LANE_WORKERS = 8
 
 
 def _sample_generative_ops() -> tuple[str, ...]:
@@ -88,26 +95,19 @@ def _sample_generative_ops() -> tuple[str, ...]:
     return tuple(random.sample(_ALL_GENERATIVE_OPS, _SCHEDULED_OP_COUNT))
 
 
-def _select_mode(
-    *, first_round: bool, n_experiments: int, max_steps: int,
-    candidates_per_round: int,
-    branch_steps: int | None = None,
-) -> _Mode:
-    """Adaptive breadth/depth.
+def _lane_quotas(candidates_per_round: int, select_per_lane: int) -> list[int]:
+    """Derive lane count and per-lane quotas from N and K.
 
-    First round / no history → depth-first (fewer lanes, deeper branches).
-    Later rounds → breadth-first (full candidates_per_round lanes).
+    N = candidates_per_round (total evals), K = select_per_lane (per lane).
+    n_lanes = ceil(N / K). Quotas are [K, K, ..., K, remainder].
+
+    E.g. N=4, K=2 → [2, 2]. N=5, K=2 → [2, 2, 1]. N=4, K=1 → [1, 1, 1, 1].
     """
-    if first_round or n_experiments == 0:
-        n = min(3, candidates_per_round)
-        steps = branch_steps if branch_steps else max(5, max_steps - 6)
-        return _Mode(n_lanes=n, max_branch_steps=steps,
-                     label="depth-first")
-    n = candidates_per_round
-    steps = (branch_steps if branch_steps
-             else max(5, (max_steps - 6) // min(candidates_per_round, n)))
-    return _Mode(n_lanes=n, max_branch_steps=steps,
-                 label="breadth-first")
+    if select_per_lane <= 0:
+        return []
+    n_lanes = -(-candidates_per_round // select_per_lane)  # ceil
+    base, extra = divmod(candidates_per_round, n_lanes)
+    return [base + (1 if i < extra else 0) for i in range(n_lanes)]
 
 
 class ProposerOrchestrator:
@@ -119,31 +119,27 @@ class ProposerOrchestrator:
         model: ChatModel,
         runtime: ApptainerRuntime,
         timeout_seconds: int,
-        max_steps: int,
         command_timeout_seconds: int,
         command_output_cap_chars: int,
-        branch_steps: int | None = None,
         usage_observer=None,
     ):
         self.model = model
         self.runtime = runtime
         self.timeout_seconds = timeout_seconds
-        self.max_steps = max_steps
         self.command_timeout_seconds = command_timeout_seconds
         self.command_output_cap_chars = command_output_cap_chars
-        self.branch_steps = branch_steps
         self.usage_observer = usage_observer
         self.generator = GeneratorAgent(
             model=model, runtime=runtime,
             timeout_seconds=timeout_seconds,
-            max_steps=max_steps,
+            max_steps=1,  # placeholder; actual budget passed per-run
             command_timeout_seconds=command_timeout_seconds,
             command_output_cap_chars=command_output_cap_chars,
             usage_observer=usage_observer,
         )
         self.proposer = ProposerAgent(
             model=model, runtime=runtime, timeout_seconds=timeout_seconds,
-            max_steps=max_steps,
+            max_steps=1,  # placeholder; actual budget passed per-run
             command_timeout_seconds=command_timeout_seconds,
             command_output_cap_chars=command_output_cap_chars,
             usage_observer=usage_observer,
@@ -165,8 +161,16 @@ class ProposerOrchestrator:
         gate_block: str,
         prompt_dir: Path | None,
         hints: list[str] | None = None,
+        gen_steps: int = 216,
+        cognitive_steps: int = 148,
     ) -> ProposerResult:
-        """Run N independent 1:1 generator-cognitive partner lanes."""
+        """Run N independent generator-cognitive partner lanes (funnel mode).
+
+        Each lane's generator produces _HYPOTHESES_PER_LANE seed hypotheses;
+        the cognitive element audits them in batch and selects
+        _SELECT_PER_LANE for enrichment. Lane count is derived:
+        n_lanes = ceil(candidates_per_round / _SELECT_PER_LANE).
+        """
         started = time.monotonic()
 
         # --- Explore (for the Cognitive element only, not the Generator) ---
@@ -175,20 +179,16 @@ class ProposerOrchestrator:
                 current_round=current_round)
         except Exception:
             explore = None
-        experiments = memory_service.load_experiments()
-        first_round = explore is None or explore.first_round
 
-        mode = _select_mode(
-            first_round=first_round, n_experiments=len(experiments),
-            max_steps=self.max_steps,
-            candidates_per_round=candidates_per_round,
-            branch_steps=self.branch_steps,
-        )
-        n_lanes = mode.n_lanes
+        # --- Derive lanes and quotas from N and K ---
+        quotas = _lane_quotas(candidates_per_round, _SELECT_PER_LANE)
+        n_lanes = len(quotas)
+        mode = _Mode(n_lanes=n_lanes, max_branch_steps=cognitive_steps,
+                     label="funnel")
         print(
-            f"[orchestrator] mode={mode.label} "
-            f"lanes={n_lanes} "
-            f"branch_steps={mode.max_branch_steps}",
+            f"[orchestrator] lanes={n_lanes} quotas={quotas} "
+            f"hypotheses_per_lane={_HYPOTHESES_PER_LANE} "
+            f"ideas_per_lens={_IDEAS_PER_LENS}",
             flush=True,
         )
 
@@ -215,13 +215,21 @@ class ProposerOrchestrator:
             gate_block=gate_block, prompt_dir=prompt_dir,
             hints=hints, explore=explore,
             mode=mode,
+            quotas=quotas,
+            gen_steps=gen_steps,
+            cognitive_steps=cognitive_steps,
         )
 
         # --- Collect proposals in stable lane order (no selection) ---
-        proposals = [
-            lr.proposal for lr in lane_results
-            if lr.outcome == "submit" and lr.proposal is not None
-        ]
+        proposals = []
+        for lr in lane_results:
+            if lr.outcome != "submit":
+                continue
+            if lr.proposals:
+                proposals.extend(lr.proposals)
+            elif lr.proposal is not None:
+                # Fallback for single-proposal branch results.
+                proposals.append(lr.proposal)
 
         elapsed = time.monotonic() - started
         if not proposals:
@@ -246,6 +254,8 @@ class ProposerOrchestrator:
         self, lanes, *, gen_context, goal, editable, frozen, memory_service,
         base_sha, source_path, repo_path, run_dir, current_round,
         gate_block, prompt_dir, hints, explore, mode,
+        quotas=None,
+        gen_steps=216, cognitive_steps=148,
     ) -> list[LaneResult]:
         """Run one partner lane per lane state, concurrently."""
         shared = dict(
@@ -257,12 +267,18 @@ class ProposerOrchestrator:
             gate_block=gate_block, prompt_dir=prompt_dir,
             hints=hints, explore=explore,
             max_steps=mode.max_branch_steps,
+            gen_steps=gen_steps,
+            cognitive_steps=cognitive_steps,
         )
         results: list[LaneResult | None] = [None] * len(lanes)
-        workers = min(8, len(lanes)) if lanes else 1
+        workers = min(_MAX_LANE_WORKERS, len(lanes)) if lanes else 1
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(self._run_one_lane, lane, **shared): lane.lane_id
+                pool.submit(
+                    self._run_one_lane, lane,
+                    select_quota=(quotas[lane.lane_id] if quotas else 1),
+                    **shared,
+                ): lane.lane_id
                 for lane in lanes
             }
             for future in as_completed(futures):
@@ -287,22 +303,28 @@ class ProposerOrchestrator:
         self, lane: LaneState, *, gen_context, goal, editable, frozen,
         memory_service, base_sha, source_path, repo_path, run_dir,
         current_round, gate_block, prompt_dir, hints, explore, max_steps,
+        select_quota=1,
+        gen_steps=216, cognitive_steps=148,
     ) -> LaneResult:
         """Run one lane: generate → cognitive (sieve + history audit + enrich).
 
+        The generator produces _HYPOTHESES_PER_LANE seed hypotheses; the
+        cognitive element audits them in batch and selects select_quota for
+        enrichment (funnel mode).
+
         The feedback loop (feedback_generator → regenerate → re-audit) is driven
-        by a ``generator_regenerate`` callback passed to ``research_branch``.
-        When the Cognitive element issues ``feedback_generator``, the callback
-        invokes ``generator.regenerate()``, enforces the ≤3 regeneration budget,
-        and returns the new hypothesis. The Cognitive transcript stays alive
-        across regenerations.
+        by a ``generator_regenerate`` callback. When the Cognitive element issues
+        ``feedback_generator``, the callback invokes ``generator.regenerate()``,
+        enforces the ≤3 regeneration budget, and returns the new hypothesis.
         """
         # --- INITIAL_GENERATE ---
         gen_result = self.generator.run(
             context=gen_context,
             source_path=source_path, repo_path=repo_path,
             run_dir=run_dir, prompt_dir=prompt_dir,
-            assigned_ops=lane.assigned_ops, max_steps=_GEN_STEPS,
+            assigned_ops=lane.assigned_ops, max_steps=gen_steps,
+            hypotheses_per_lane=_HYPOTHESES_PER_LANE,
+            ideas_per_lens=_IDEAS_PER_LENS,
         )
         if not gen_result.cards:
             return LaneResult(
@@ -311,22 +333,26 @@ class ProposerOrchestrator:
                 abstain_reason="generator produced no card",
                 deliberation_telemetry={"tool_calls": 0},
             )
-        card = gen_result.cards[0]
-        lane.hypothesis_versions.append(card)
+        cards = gen_result.cards
+        for card in cards:
+            lane.hypothesis_versions.append(card)
         lane.gen_transcript.append({"role": "assistant", "content": json.dumps({
-            "hypothesis": {
-                "generative_op": card.generative_op,
-                "region": card.region,
-                "mechanism": card.mechanism,
-                "intervention_family": card.intervention_family,
-                "why_plausible": card.why_plausible,
-                "critical_unknown": card.critical_unknown,
-                "facts_read": list(card.facts_read),
-            },
+            "hypotheses": [
+                {
+                    "generative_op": c.generative_op,
+                    "region": c.region,
+                    "mechanism": c.mechanism,
+                    "intervention_family": c.intervention_family,
+                    "why_plausible": c.why_plausible,
+                    "critical_unknown": c.critical_unknown,
+                    "facts_read": list(c.facts_read),
+                }
+                for c in cards
+            ],
         })})
 
         def generator_regenerate(feedback: dict):
-            """Callback for research_branch: handle a feedback_generator action."""
+            """Callback: handle a feedback_generator action."""
             if lane.regenerations >= _MAX_REGENERATIONS:
                 raise RuntimeError(
                     f"regeneration budget exhausted (≤{_MAX_REGENERATIONS})")
@@ -336,38 +362,45 @@ class ProposerOrchestrator:
                 transcript=lane.gen_transcript,
                 source_path=source_path, repo_path=repo_path,
                 run_dir=run_dir, prompt_dir=prompt_dir,
-                assigned_ops=lane.assigned_ops, max_steps=_GEN_STEPS,
+                assigned_ops=lane.assigned_ops, max_steps=gen_steps,
+                hypotheses_per_lane=_HYPOTHESES_PER_LANE,
+                ideas_per_lens=_IDEAS_PER_LENS,
             )
-            new_card = regen_result.cards[0]
-            lane.hypothesis_versions.append(new_card)
+            new_cards = regen_result.cards
+            for nc in new_cards:
+                lane.hypothesis_versions.append(nc)
             lane.gen_transcript.append({"role": "user", "content": json.dumps({
                 "feedback": feedback,
             })})
             lane.gen_transcript.append({"role": "assistant",
                                         "content": json.dumps({
-                "hypothesis": {
-                    "generative_op": new_card.generative_op,
-                    "region": new_card.region,
-                    "mechanism": new_card.mechanism,
-                    "intervention_family":
-                        new_card.intervention_family,
-                    "why_plausible": new_card.why_plausible,
-                    "critical_unknown": new_card.critical_unknown,
-                    "facts_read": list(new_card.facts_read),
-                },
+                "hypotheses": [
+                    {
+                        "generative_op": c.generative_op,
+                        "region": c.region,
+                        "mechanism": c.mechanism,
+                        "intervention_family": c.intervention_family,
+                        "why_plausible": c.why_plausible,
+                        "critical_unknown": c.critical_unknown,
+                        "facts_read": list(c.facts_read),
+                    }
+                    for c in new_cards
+                ],
             })})
-            return new_card
+            return new_cards[0] if new_cards else cards[0]
 
         # --- COGNITIVE_RESEARCH (with feedback loop) ---
         try:
-            branch = self.proposer.research_branch(
-                hypothesis=card,
+            branch = self.proposer.research_batch(
+                hypotheses=cards,
+                select_quota=select_quota,
                 goal=goal, editable=editable, frozen=frozen,
                 memory_service=memory_service, base_sha=base_sha,
                 source_path=source_path, repo_path=repo_path,
                 run_dir=run_dir, current_round=current_round,
                 gate_block=gate_block, prompt_dir=prompt_dir,
-                hints=hints, explore=explore, max_steps=_COGNITIVE_STEPS,
+                hints=hints, explore=explore,
+                max_steps=cognitive_steps,
                 generator_regenerate=generator_regenerate,
             )
         except Exception as exc:
@@ -377,13 +410,17 @@ class ProposerOrchestrator:
             )
             return LaneResult(
                 lane_id=lane.lane_id, assigned_ops=lane.assigned_ops,
-                hypothesis=card, outcome="error",
+                hypothesis=(cards[0] if cards else None), outcome="error",
+                all_cards=tuple(cards),
                 abstain_reason=str(exc),
                 deliberation_telemetry={"tool_calls": 0},
             )
         return LaneResult(
             lane_id=lane.lane_id, assigned_ops=lane.assigned_ops,
-            hypothesis=branch.hypothesis, proposal=branch.proposal,
+            hypothesis=branch.hypothesis,
+            all_cards=tuple(cards),
+            proposal=branch.proposal,
+            proposals=branch.proposals,
             outcome=branch.outcome,
             reason_kind=branch.reason_kind,
             explanation=branch.explanation,
@@ -401,9 +438,18 @@ class ProposerOrchestrator:
         return {"lanes": [
             {"lane_id": lr.lane_id,
              "assigned_ops": list(lr.assigned_ops),
+             "all_cards": [
+                 {"generative_op": c.generative_op,
+                  "region": c.region,
+                  "mechanism": c.mechanism,
+                  "intervention_family": c.intervention_family}
+                 for c in lr.all_cards
+             ] if lr.all_cards else [],
              "sig": lr.hypothesis.signature() if lr.hypothesis else None,
              "outcome": lr.outcome,
              "proposal": bool(lr.proposal),
+             "n_proposals": len(lr.proposals) if lr.proposals else (
+                 1 if lr.proposal else 0),
              "instruction": (lr.proposal.instruction
                              if lr.proposal is not None else None),
              "reason_kind": lr.reason_kind,

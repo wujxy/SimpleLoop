@@ -67,6 +67,27 @@ def _run_research(cmd="ls OMILRECV2/src/"):
                         "cwd": "source"})
 
 
+def _emit_lever_map():
+    return json.dumps({
+        "action": "emit_lever_map",
+        "levers": [
+            {"part": "foo function", "role": "hot path",
+             "structural_space": "can cache results"},
+        ],
+    })
+
+
+def _full_3step_sequence(cmd="ls src/", card=None):
+    """A complete valid flow: survey -> map -> submit."""
+    if card is None:
+        card = _card_json()
+    return [
+        ModelReply(_run_research(cmd)),
+        ModelReply(_emit_lever_map()),
+        ModelReply(_submit_hypothesis(card)),
+    ]
+
+
 def _agent(model, monkeypatch=None):
     """Build a GeneratorAgent with FakeTools."""
     FakeTools.instances.clear()
@@ -74,7 +95,7 @@ def _agent(model, monkeypatch=None):
         monkeypatch.setattr(gen_mod, "ResearchTools", FakeTools)
     return GeneratorAgent(
         model=model, runtime=None, timeout_seconds=30,
-        max_steps=10, command_timeout_seconds=10,
+        max_steps=20, command_timeout_seconds=10,
         command_output_cap_chars=10000,
     )
 
@@ -104,6 +125,11 @@ class TestParseAction:
         assert action["command"] == "grep -rn 'FCN' src/"
         assert action["cwd"] == "source"
 
+    def test_parses_emit_lever_map(self):
+        action = _parse_generator_action(_emit_lever_map())
+        assert action["action"] == "emit_lever_map"
+        assert len(action["levers"]) == 1
+
     def test_invalid_json_raises(self):
         with pytest.raises(GeneratorError):
             _parse_generator_action("not json")
@@ -120,7 +146,6 @@ class TestParseAction:
             }))
 
     def test_submit_without_facts_read_raises(self):
-        """Gate 2: facts_read is required."""
         card = _card_json()
         del card["facts_read"]
         with pytest.raises(GeneratorError, match="facts_read"):
@@ -129,7 +154,6 @@ class TestParseAction:
             }))
 
     def test_submit_with_empty_facts_read_raises(self):
-        """Gate 2: facts_read must be non-empty."""
         with pytest.raises(GeneratorError, match="facts_read"):
             _parse_generator_action(json.dumps({
                 "action": "submit_hypothesis",
@@ -137,7 +161,6 @@ class TestParseAction:
             }))
 
     def test_submit_with_facts_read_parsed(self):
-        """facts_read is parsed into a tuple on the card."""
         action = _parse_generator_action(_submit_hypothesis(_card_json(
             facts=["file X contains loop Y", "function Z calls W"],
         )))
@@ -145,6 +168,12 @@ class TestParseAction:
         assert card.facts_read == (
             "file X contains loop Y", "function Z calls W",
         )
+
+    def test_empty_lever_map_raises(self):
+        with pytest.raises(GeneratorError, match="non-empty"):
+            _parse_generator_action(json.dumps({
+                "action": "emit_lever_map", "levers": [],
+            }))
 
 
 class TestParseCard:
@@ -181,65 +210,59 @@ class TestBasis:
         assert "Invert" not in g6
 
 
-# --- Agent run() -----------------------------------------------------------
+# --- Agent run() with survey -> map -> submit flow ------------------------
 
 class TestAgentRun:
-    def test_run_reads_source_then_submits(self, tmp_path, monkeypatch):
-        """The generator reads the source tree, then submits a hypothesis."""
-        model = FakeModel([
-            ModelReply(_run_research("ls OMILRECV2/src/")),
-            ModelReply(_submit_hypothesis(_card_json(
-                region="OMILRECV2/src/OMILRECV2.cc", mech="recompute",
-            ))),
-        ])
+    def test_run_full_flow(self, tmp_path, monkeypatch):
+        """The generator surveys, emits a lever map, then submits."""
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         result = agent.run(context="objective: go fast", **_paths(tmp_path))
         assert isinstance(result, GenerationResult)
         assert len(result.cards) == 1
-        assert result.cards[0].region == "OMILRECV2/src/OMILRECV2.cc"
-        # The FakeTools should have received the research command
+        # One tool call executed (the survey command)
         assert len(FakeTools.instances[0].actions) == 1
-        assert FakeTools.instances[0].actions[0]["action"] == "run_research_command"
 
-    def test_run_rejects_submit_before_read(self, tmp_path, monkeypatch):
-        """Gate 1: submit_hypothesis before any run_research_command is
-        rejected. The generator gets a repair message, then reads and submits."""
+    def test_submit_before_map_rejected(self, tmp_path, monkeypatch):
+        """Prerequisite coupling: submit_hypothesis before emit_lever_map
+        is rejected. The generator gets a repair, then completes the flow."""
         model = FakeModel([
-            ModelReply(_submit_hypothesis()),       # rejected (no read yet)
-            ModelReply(_run_research("ls src/")),   # read source
-            ModelReply(_submit_hypothesis()),       # now accepted
+            ModelReply(_run_research()),
+            # Skip map, try to submit directly -- should be rejected
+            ModelReply(_submit_hypothesis()),
+            # Now emit the map
+            ModelReply(_emit_lever_map()),
+            # And submit
+            ModelReply(_submit_hypothesis()),
         ])
         agent = _agent(model, monkeypatch)
         result = agent.run(context="ctx", **_paths(tmp_path))
         assert len(result.cards) == 1
-        # The repair consumed the first submit; the tool was called once.
-        assert len(FakeTools.instances[0].actions) == 1
 
-    def test_run_submit_before_read_then_budget_exhausts(self, tmp_path, monkeypatch):
-        """Gate 1: if the generator keeps submitting without reading, it
-        eventually exhausts the budget and raises."""
+    def test_map_before_survey_rejected(self, tmp_path, monkeypatch):
+        """Prerequisite coupling: emit_lever_map before any survey is
+        rejected."""
         model = FakeModel([
-            ModelReply(_submit_hypothesis()) for _ in range(5)
-        ])
-        agent = _agent(model, monkeypatch)
-        with pytest.raises(GeneratorError, match="budget exhausted"):
-            agent.run(context="ctx", **_paths(tmp_path), max_steps=3)
-
-    def test_run_context_is_first_user_message(self, tmp_path, monkeypatch):
-        model = FakeModel([
+            # Skip survey, try to emit map -- should be rejected
+            ModelReply(_emit_lever_map()),
+            # Now survey
             ModelReply(_run_research()),
+            ModelReply(_emit_lever_map()),
             ModelReply(_submit_hypothesis()),
         ])
+        agent = _agent(model, monkeypatch)
+        result = agent.run(context="ctx", **_paths(tmp_path))
+        assert len(result.cards) == 1
+
+    def test_context_is_first_user_message(self, tmp_path, monkeypatch):
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         agent.run(context="my objective context", **_paths(tmp_path))
         msgs = model.calls[0]["messages"]
         assert msgs[0]["content"] == "my objective context"
 
-    def test_run_system_prompt_has_generator_semantics(self, tmp_path, monkeypatch):
-        model = FakeModel([
-            ModelReply(_run_research()),
-            ModelReply(_submit_hypothesis()),
-        ])
+    def test_system_prompt_has_generator_semantics(self, tmp_path, monkeypatch):
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         agent.run(context="ctx", **_paths(tmp_path))
         sys_prompt = model.calls[0]["system"]
@@ -247,12 +270,10 @@ class TestAgentRun:
         assert "submit_hypothesis" in sys_prompt
         assert "run_research_command" in sys_prompt
         assert "facts_read" in sys_prompt
+        assert "emit_lever_map" in sys_prompt
 
     def test_assigned_ops_replaces_basis(self, tmp_path, monkeypatch):
-        model = FakeModel([
-            ModelReply(_run_research()),
-            ModelReply(_submit_hypothesis()),
-        ])
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         agent.run(
             context="ctx", **_paths(tmp_path),
@@ -265,10 +286,7 @@ class TestAgentRun:
         assert "Invert: don't accelerate" not in sys_prompt    # G5
 
     def test_assigned_ops_none_keeps_full_basis(self, tmp_path, monkeypatch):
-        model = FakeModel([
-            ModelReply(_run_research()),
-            ModelReply(_submit_hypothesis()),
-        ])
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         agent.run(context="ctx", **_paths(tmp_path))
         sys_prompt = model.calls[0]["system"]
@@ -276,13 +294,59 @@ class TestAgentRun:
             assert op in sys_prompt
 
     def test_budget_exhausted_raises(self, tmp_path, monkeypatch):
-        """If the generator never submits, it raises (orchestrator treats as error)."""
+        """If the generator never submits, it raises."""
         model = FakeModel([
-            ModelReply(_run_research()) for _ in range(10)
-        ])
+            ModelReply(_run_research()),
+            ModelReply(_emit_lever_map()),
+        ] + [ModelReply(_run_research()) for _ in range(10)])
         agent = _agent(model, monkeypatch)
         with pytest.raises(GeneratorError, match="budget exhausted"):
-            agent.run(context="ctx", **_paths(tmp_path), max_steps=3)
+            agent.run(context="ctx", **_paths(tmp_path), max_steps=5)
+
+    def test_generative_op_not_in_assigned_ops_rejected(
+        self, tmp_path, monkeypatch,
+    ):
+        """When assigned_ops is set, a hypothesis with a generative_op outside
+        that set is rejected with a repair, then accepted when corrected."""
+        model = FakeModel([
+            ModelReply(_run_research()),
+            ModelReply(_emit_lever_map()),
+            # G3 is NOT in assigned_ops -> rejected
+            ModelReply(_submit_hypothesis(_card_json(op="G3"))),
+            # G6 IS in assigned_ops -> accepted
+            ModelReply(_submit_hypothesis(_card_json(op="G6"))),
+        ])
+        agent = _agent(model, monkeypatch)
+        result = agent.run(
+            context="ctx", **_paths(tmp_path),
+            assigned_ops=("G1", "G2", "G4", "G6", "G9"),
+        )
+        assert len(result.cards) == 1
+        assert result.cards[0].generative_op == "G6"
+
+    def test_generative_op_checked_in_regenerate(self, tmp_path, monkeypatch):
+        """The generative_op check also applies in regenerate()."""
+        model = FakeModel([
+            ModelReply(_run_research()),
+            ModelReply(_emit_lever_map()),
+            # G5 is NOT in assigned_ops -> rejected
+            ModelReply(_submit_hypothesis(_card_json(op="G5"))),
+            # G1 IS in assigned_ops -> accepted
+            ModelReply(_submit_hypothesis(_card_json(op="G1"))),
+        ])
+        agent = _agent(model, monkeypatch)
+        result = agent.regenerate(
+            context="ctx", feedback={
+                "observation": "no gain",
+                "relation_to_seed": "same",
+                "evidence_refs": [],
+                "implication": "try elsewhere",
+            },
+            transcript=[], **_paths(tmp_path),
+            assigned_ops=("G1", "G2", "G4", "G6", "G9"),
+        )
+        assert len(result.cards) == 1
+        assert result.cards[0].generative_op == "G1"
 
 
 # --- Agent regenerate() ----------------------------------------------------
@@ -298,23 +362,16 @@ class TestRegenerate:
         }
 
     def test_regenerate_produces_one_card(self, tmp_path, monkeypatch):
-        model = FakeModel([
-            ModelReply(_run_research()),
-            ModelReply(_submit_hypothesis(_card_json(mech="new"))),
-        ])
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         result = agent.regenerate(
             context="ctx", feedback=self._feedback(), transcript=[],
             **_paths(tmp_path),
         )
         assert len(result.cards) == 1
-        assert result.cards[0].mechanism == "new"
 
     def test_regenerate_sends_context_transcript_feedback(self, tmp_path, monkeypatch):
-        model = FakeModel([
-            ModelReply(_run_research()),
-            ModelReply(_submit_hypothesis()),
-        ])
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         transcript = [
             {"role": "user", "content": "initial ctx"},
@@ -333,10 +390,7 @@ class TestRegenerate:
         assert "the gain margin" in msgs[3]["content"]  # implication
 
     def test_regenerate_system_prompt_mentions_partner(self, tmp_path, monkeypatch):
-        model = FakeModel([
-            ModelReply(_run_research()),
-            ModelReply(_submit_hypothesis()),
-        ])
+        model = FakeModel(_full_3step_sequence())
         agent = _agent(model, monkeypatch)
         agent.regenerate(
             context="ctx", feedback=self._feedback(), transcript=[],
@@ -346,10 +400,8 @@ class TestRegenerate:
         assert "cognitive partner" in sys_prompt
 
     def test_regenerate_respects_assigned_ops(self, tmp_path, monkeypatch):
-        model = FakeModel([
-            ModelReply(_run_research()),
-            ModelReply(_submit_hypothesis()),
-        ])
+        model = FakeModel(_full_3step_sequence(
+            card=_card_json(op="G1")))
         agent = _agent(model, monkeypatch)
         agent.regenerate(
             context="ctx", feedback=self._feedback(), transcript=[],
@@ -361,15 +413,12 @@ class TestRegenerate:
             assert op in sys_prompt
         assert "Algorithm/representation/paradigm sweep" not in sys_prompt  # G6
 
-    def test_regenerate_can_read_source(self, tmp_path, monkeypatch):
-        """regenerate() also has the tool loop — the generator can read code
-        again to find a real region for the new hypothesis."""
-        model = FakeModel([
-            ModelReply(_run_research("grep -rn 'EVLikelihood' OMILRECV2/src/")),
-            ModelReply(_submit_hypothesis(_card_json(
-                region="OMILRECV2/src/OMILRECV2.cc", mech="precompute",
-            ))),
-        ])
+    def test_regenerate_uses_survey_map_submit(self, tmp_path, monkeypatch):
+        """regenerate() also enforces the survey -> map -> submit flow."""
+        model = FakeModel(_full_3step_sequence(
+            cmd="grep -rn 'EVLikelihood' OMILRECV2/src/",
+            card=_card_json(region="OMILRECV2/src/OMILRECV2.cc"),
+        ))
         agent = _agent(model, monkeypatch)
         result = agent.regenerate(
             context="ctx", feedback=self._feedback(), transcript=[],

@@ -21,7 +21,7 @@ import pytest
 
 from simpleloop.memory import MemoryService
 from simpleloop.roles.orchestrator import (
-    ProposerOrchestrator, _select_mode, _Mode,
+    ProposerOrchestrator, _lane_quotas, _Mode,
     _sample_generative_ops, _SCHEDULED_OP_COUNT,
     _MAX_REGENERATIONS, LaneState, LaneResult,
 )
@@ -108,12 +108,11 @@ def _run_args(tmp_path, candidates_per_round=2):
             "gate_block": "- gate: pass", "prompt_dir": None}
 
 
-def _orchestrator(model, *, max_steps=20, **kw):
+def _orchestrator(model, **kw):
     return ProposerOrchestrator(
         model=model, runtime=object(), timeout_seconds=60,
-        max_steps=max_steps, command_timeout_seconds=5,
+        command_timeout_seconds=5,
         command_output_cap_chars=1000,
-        branch_steps=kw.get("branch_steps"),
     )
 
 
@@ -132,34 +131,29 @@ class TestGenerativeOpScheduler:
         assert len(draws) > 1
 
 
-class TestSelectMode:
-    def test_first_round_depth_first(self):
-        m = _select_mode(first_round=True, n_experiments=0,
-                         max_steps=50, candidates_per_round=3)
-        assert m.label == "depth-first"
-        assert m.n_lanes <= 3
+class TestLaneQuotas:
+    def test_n4_k2_two_lanes(self):
+        assert _lane_quotas(4, 2) == [2, 2]
 
-    def test_later_round_breadth_first(self):
-        m = _select_mode(first_round=False, n_experiments=5,
-                         max_steps=50, candidates_per_round=3)
-        assert m.label == "breadth-first"
-        assert m.n_lanes == 3
+    def test_n5_k2_three_lanes(self):
+        assert _lane_quotas(5, 2) == [2, 2, 1]
 
-    def test_depth_first_gives_more_steps_per_branch(self):
-        depth = _select_mode(first_round=True, n_experiments=0,
-                             max_steps=50, candidates_per_round=3)
-        breadth = _select_mode(first_round=False, n_experiments=5,
-                               max_steps=50, candidates_per_round=3)
-        assert depth.max_branch_steps > breadth.max_branch_steps
+    def test_n4_k1_four_lanes(self):
+        assert _lane_quotas(4, 1) == [1, 1, 1, 1]
 
-    def test_explicit_branch_steps_overrides_formula(self):
-        depth = _select_mode(first_round=True, n_experiments=0, max_steps=50,
-                             candidates_per_round=3, branch_steps=28)
-        breadth = _select_mode(first_round=False, n_experiments=5,
-                               max_steps=50, candidates_per_round=3,
-                               branch_steps=28)
-        assert depth.max_branch_steps == 28
-        assert breadth.max_branch_steps == 28
+    def test_n7_k2_four_lanes(self):
+        assert _lane_quotas(7, 2) == [2, 2, 2, 1]
+
+    def test_n1_k1_one_lane(self):
+        assert _lane_quotas(1, 1) == [1]
+
+    def test_n3_k2_two_lanes(self):
+        assert _lane_quotas(3, 2) == [2, 1]
+
+    def test_total_equals_n(self):
+        for n in range(1, 20):
+            for k in range(1, 6):
+                assert sum(_lane_quotas(n, k)) == n
 
 
 # --- 1:1 lane architecture -------------------------------------------------
@@ -179,22 +173,25 @@ class TestPartnerLanes:
                 return generator_mod.GenerationResult(
                     cards=[_card(mech=f"m{len(gen_calls)}")])
 
-        # cpr=2 → depth-first caps at min(3, 2) = 2 lanes.
-        args = _run_args(tmp_path, candidates_per_round=2)
+        # cpr=4, K=2 → ceil(4/2) = 2 lanes.
+        args = _run_args(tmp_path, candidates_per_round=4)
         orch = _orchestrator(_gen_reply([_card()]))
         orch.generator = OneCardGenerator()
         branch_cards = []
 
-        def fake_research_branch(*, hypothesis, **_kwargs):
-            branch_cards.append(hypothesis)
+        def fake_research_batch(*, hypotheses, **_kwargs):
+            branch_cards.extend(hypotheses)
             return proposer_mod.BranchResult(
-                hypothesis=hypothesis,
+                hypothesis=hypotheses[0],
+                proposals=tuple(
+                    SimpleNamespace(instruction="ok") for _ in hypotheses
+                ),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 1},
             )
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-                            fake_research_branch)
+        monkeypatch.setattr(orch.proposer, "research_batch",
+                            fake_research_batch)
         result = orch.run(**args)
 
         n = len(gen_calls)
@@ -216,21 +213,25 @@ class TestPartnerLanes:
                 self.i += 1
                 return generator_mod.GenerationResult(cards=[c])
 
-        args = _run_args(tmp_path, candidates_per_round=2)
+        # cpr=4, K=2 → 2 lanes.
+        args = _run_args(tmp_path, candidates_per_round=4)
         orch = _orchestrator(_gen_reply([_card()]))
         orch.generator = ScheduledGenerator()
         seen = []
 
-        def fake_research_branch(*, hypothesis, **_kwargs):
-            seen.append(hypothesis)
+        def fake_research_batch(*, hypotheses, **_kwargs):
+            seen.extend(hypotheses)
             return proposer_mod.BranchResult(
-                hypothesis=hypothesis,
+                hypothesis=hypotheses[0],
+                proposals=tuple(
+                    SimpleNamespace(instruction="ok") for _ in hypotheses
+                ),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 1},
             )
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-                            fake_research_branch)
+        monkeypatch.setattr(orch.proposer, "research_batch",
+                            fake_research_batch)
         result = orch.run(**args)
 
         assert len(seen) == 2                    # both, despite same signature
@@ -252,16 +253,19 @@ class TestPartnerLanes:
         orch.generator = FrozenRegionGenerator()
         seen = []
 
-        def fake_research_branch(*, hypothesis, **_kwargs):
-            seen.append(hypothesis)
+        def fake_research_batch(*, hypotheses, **_kwargs):
+            seen.extend(hypotheses)
             return proposer_mod.BranchResult(
-                hypothesis=hypothesis,
+                hypothesis=hypotheses[0],
+                proposals=tuple(
+                    SimpleNamespace(instruction="ok") for _ in hypotheses
+                ),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 1},
             )
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-                            fake_research_branch)
+        monkeypatch.setattr(orch.proposer, "research_batch",
+                            fake_research_batch)
         result = orch.run(**args)
 
         assert len(seen) == 1                    # not prefilered
@@ -281,26 +285,28 @@ class TestPartnerLanes:
                 self.i += 1
                 return generator_mod.GenerationResult(cards=[c])
 
-        args = _run_args(tmp_path, candidates_per_round=2)
+        args = _run_args(tmp_path, candidates_per_round=4)
         orch = _orchestrator(_gen_reply([_card()]))
         orch.generator = TwoCardGenerator()
 
-        def fake_research_branch(*, hypothesis, **_kwargs):
-            if hypothesis.mechanism == "doomed":
+        def fake_research_batch(*, hypotheses, **_kwargs):
+            h = hypotheses[0]
+            if h.mechanism == "doomed":
                 return proposer_mod.BranchResult(
-                    hypothesis=hypothesis, outcome="block",
+                    hypothesis=h, outcome="block",
                     reason_kind="false_claim", explanation="no",
                     block_evidence_refs=("source:src/foo.cc",),
                     deliberation_telemetry={"tool_calls": 1},
                 )
             return proposer_mod.BranchResult(
-                hypothesis=hypothesis,
+                hypothesis=h,
+                proposals=(SimpleNamespace(instruction="ok"),),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 1},
             )
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-                            fake_research_branch)
+        monkeypatch.setattr(orch.proposer, "research_batch",
+                            fake_research_batch)
         result = orch.run(**args)
 
         assert len(result.proposals) == 1        # only the live lane
@@ -321,16 +327,17 @@ class TestPartnerLanes:
         orch = _orchestrator(_gen_reply([_card()]))
         orch.generator = BlockingGenerator()
 
-        def fake_research_branch(*, hypothesis, **_kwargs):
+        def fake_research_batch(*, hypotheses, **_kwargs):
+            h = hypotheses[0]
             return proposer_mod.BranchResult(
-                hypothesis=hypothesis, outcome="block",
+                hypothesis=h, outcome="block",
                 reason_kind="false_claim", explanation="no",
                 block_evidence_refs=("source:src/foo.cc",),
                 deliberation_telemetry={"tool_calls": 1},
             )
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-                            fake_research_branch)
+        monkeypatch.setattr(orch.proposer, "research_batch",
+                            fake_research_batch)
         result = orch.run(**args)
 
         assert result.abstained
@@ -351,9 +358,10 @@ class TestPartnerLanes:
         orch = _orchestrator(_gen_reply([_card()]))
         orch.generator = CapturingGenerator()
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-            lambda *, hypothesis, **_: proposer_mod.BranchResult(
-                hypothesis=hypothesis,
+        monkeypatch.setattr(orch.proposer, "research_batch",
+            lambda *, hypotheses, **_: proposer_mod.BranchResult(
+                hypothesis=hypotheses[0],
+                proposals=(SimpleNamespace(instruction="ok"),),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 0},
             ))
@@ -376,13 +384,14 @@ class TestPartnerLanes:
                 return generator_mod.GenerationResult(
                     cards=[_card(mech="m", region="src/foo.cc")])
 
-        args = _run_args(tmp_path, candidates_per_round=2)
+        args = _run_args(tmp_path, candidates_per_round=4)
         orch = _orchestrator(_gen_reply([_card()]))
         orch.generator = SimpleGenerator()
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-            lambda *, hypothesis, **_: proposer_mod.BranchResult(
-                hypothesis=hypothesis,
+        monkeypatch.setattr(orch.proposer, "research_batch",
+            lambda *, hypotheses, **_: proposer_mod.BranchResult(
+                hypothesis=hypotheses[0],
+                proposals=(SimpleNamespace(instruction="ok"),),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 2},
             ))
@@ -393,6 +402,7 @@ class TestPartnerLanes:
         for lane in result.trace["lanes"]:
             assert "lane_id" in lane
             assert "assigned_ops" in lane
+            assert "all_cards" in lane
             assert "sig" in lane
             assert "outcome" in lane
             assert "tool_calls" in lane
@@ -416,7 +426,8 @@ class TestFeedbackLoop:
                     cards=[_card(mech="initial")])
             def regenerate(self, *, context, feedback, transcript,
                            source_path=None, repo_path=None, run_dir=None,
-                           prompt_dir=None, assigned_ops=None, max_steps=None):
+                           prompt_dir=None, assigned_ops=None, max_steps=None,
+                           hypotheses_per_lane=1, ideas_per_lens=1):
                 regen_calls.append(feedback)
                 return generator_mod.GenerationResult(
                     cards=[_card(mech="regenerated")])
@@ -428,27 +439,30 @@ class TestFeedbackLoop:
 
         branch_calls = []
 
-        def fake_research_branch(*, hypothesis, generator_regenerate, **_kwargs):
-            branch_calls.append(hypothesis)
-            if hypothesis.mechanism == "initial":
+        def fake_research_batch(*, hypotheses, generator_regenerate, **_kwargs):
+            h = hypotheses[0]
+            branch_calls.append(h)
+            if h.mechanism == "initial":
                 # Cognitive finds history evidence → feed back to generator.
                 new_card = generator_regenerate(_feedback_action())
-                # The callback returns the new hypothesis; the branch would
-                # continue with it. For this test we simulate the branch
+                # The callback returns the new hypothesis; the batch would
+                # continue with it. For this test we simulate the batch
                 # re-auditing the new card and submitting.
                 return proposer_mod.BranchResult(
                     hypothesis=new_card,
+                    proposals=(SimpleNamespace(instruction="ok"),),
                     proposal=SimpleNamespace(instruction="ok"),
                     deliberation_telemetry={"tool_calls": 1},
                 )
             return proposer_mod.BranchResult(
-                hypothesis=hypothesis,
+                hypothesis=h,
+                proposals=(SimpleNamespace(instruction="ok"),),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 1},
             )
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-                            fake_research_branch)
+        monkeypatch.setattr(orch.proposer, "research_batch",
+                            fake_research_batch)
         result = orch.run(**args)
 
         assert len(regen_calls) == 1
@@ -465,7 +479,8 @@ class TestFeedbackLoop:
                     cards=[_card(mech="initial")])
             def regenerate(self, *, context, feedback, transcript,
                            source_path=None, repo_path=None, run_dir=None,
-                           prompt_dir=None, assigned_ops=None, max_steps=None):
+                           prompt_dir=None, assigned_ops=None, max_steps=None,
+                           hypotheses_per_lane=1, ideas_per_lens=1):
                 self.n += 1
                 return generator_mod.GenerationResult(
                     cards=[_card(mech=f"regen-{self.n}")])
@@ -475,10 +490,10 @@ class TestFeedbackLoop:
         gen = RegeneratingGenerator()
         orch.generator = gen
 
-        def fake_research_branch(*, hypothesis, generator_regenerate, **_kwargs):
-            # The feedback loop happens INSIDE research_branch. Call the
+        def fake_research_batch(*, hypotheses, generator_regenerate, **_kwargs):
+            # The feedback loop happens INSIDE research_batch. Call the
             # callback repeatedly until it raises, then submit.
-            last = hypothesis
+            last = hypotheses[0]
             for _ in range(_MAX_REGENERATIONS):
                 last = generator_regenerate(_feedback_action())
             # One more should exhaust the budget.
@@ -486,12 +501,13 @@ class TestFeedbackLoop:
                 generator_regenerate(_feedback_action())
             return proposer_mod.BranchResult(
                 hypothesis=last,
+                proposals=(SimpleNamespace(instruction="ok"),),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 1},
             )
 
-        monkeypatch.setattr(orch.proposer, "research_branch",
-                            fake_research_branch)
+        monkeypatch.setattr(orch.proposer, "research_batch",
+                            fake_research_batch)
         result = orch.run(**args)
 
         assert gen.n == _MAX_REGENERATIONS
@@ -519,6 +535,12 @@ class TestGeneratorRegenerate:
                     return ModelReply(json.dumps({
                         "action": "run_research_command",
                         "command": "ls src/", "cwd": "source",
+                    }))
+                if self._n == 2:
+                    return ModelReply(json.dumps({
+                        "action": "emit_lever_map",
+                        "levers": [{"part": "foo", "role": "hot",
+                                    "structural_space": "cache"}],
                     }))
                 return ModelReply(json.dumps({
                     "action": "submit_hypothesis",

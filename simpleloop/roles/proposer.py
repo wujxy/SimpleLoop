@@ -94,12 +94,14 @@ class BranchResult:
     - ``"submit"``: the card was enriched into an executor-ready proposal
       (``proposal`` set; ``enrichment_partial`` True if the budget ran out
       mid-enrich and a partial instruction was submitted instead).
+      In batch mode, ``proposals`` holds all K enriched proposals.
     - ``"block"``:  the card failed an objective bar (``reason_kind`` +
       ``block_evidence_refs`` set).
     - ``"error"``:  the branch worker faulted (set by the orchestrator).
     """
     hypothesis: object  # HypothesisCard
     proposal: ResearchProposal | None = None
+    proposals: tuple[ResearchProposal, ...] = ()  # batch mode: K proposals
     outcome: str = "submit"
     reason_kind: str | None = None        # set on block
     explanation: str | None = None        # set on block
@@ -133,33 +135,39 @@ _RESEARCH_PHASE_NOTE = (
 )
 
 _PROTOCOL_BLOCK = """Control actions (you are done only when you submit or block):
+- {"action":"select_for_enrich","selected":[
+    {"hypothesis_idx":0,"slot":"hotspot|new_direction",
+     "evidence_refs":["experiment:r0c0"],"rationale":"..."}]}
+  Declare which hypotheses you will enrich. This sets the scope for your
+  enrichment work, so submit_proposals can follow it. Each selection needs
+  evidence_refs (history + source reads) and a rationale.
 - {"action":"submit_proposals","proposals":[
     {"instruction":"...",
      "research_target":{"mode":"existing","finding_id":"F-NNN"},
      "evidence_refs":["source:src/foo.cc:FunctionName"],
      "material_difference":"..."}]}
-  Submit ONE enriched proposal. The instruction MUST embed: (a) precise
-  location (file / function / lines), (b) the code facts you read that motivate
-  the change, (c) the correctness constraint the executor must preserve, and
-  (d) which realization decisions you deliberately leave to the executor. Do
-  NOT write the implementation, line-level code, or derived math.
-  research_target declares an existing finding (mode=existing, F-NNN) or a new
-  question (mode=new, with question/mechanisms/code_regions). evidence_refs and
-  material_difference are optional. There is NO annotations field.
+  Submit enriched proposals — one per hypothesis you selected. The instruction
+  embeds: (a) location at the function/class level, (b) the code facts you
+  read that motivate the change, (c) the correctness constraint the executor
+  preserves, and (d) which realization decisions you leave to the executor.
+  research_target declares an existing finding (mode=existing, F-NNN) or a
+  new question (mode=new, with question/mechanisms/code_regions).
+  evidence_refs and material_difference are optional. There is NO annotations
+  field.
 - {"action":"block","reason_kind":"false_claim|frozen|contradiction",
   "explanation":"...","evidence_refs":["source:src/foo.cc:FunctionName"]}
-  Block ONLY for an objective failure, and EVERY block must cite at least one
-  source: ref you read this round. reason_kind is one of:
+  Block only for an objective failure, citing at least one source: ref you
+  read this round. reason_kind is one of:
     false_claim   — the card asserts a fact about the code that the code
                     refutes (cite the source:line that refutes it);
     frozen        — the only implementation site is under a frozen path
                     (cite it);
     contradiction — the card's own claims are mutually inconsistent (cite the
                     source that makes them so).
-  You MUST NOT block because an idea is too hard, too risky, unlikely to work,
-  too big a change, low ROI, or already tried — those are merit judgments
-  reserved for the Harness. Wanting to block for any of those is a signal to
-  enrich and submit_proposals instead.
+  "Too hard", "too risky", "unlikely to work", "low ROI", or "already tried"
+  are merit judgments reserved for the Harness. If you catch yourself wanting
+  to block for one of those, enrich and submit_proposals instead — let the
+  Harness decide.
 """
 
 _RUNTIME_BOUNDARIES = """Runtime boundaries:
@@ -172,7 +180,7 @@ _RUNTIME_BOUNDARIES = """Runtime boundaries:
 
 _PARTIAL_SUBMIT_REMINDER = (
     "Budget nearly exhausted. Submit your enriched proposal now — partial "
-    "enrichment is acceptable. Do NOT block unless you have found an objective "
+    "enrichment is acceptable. Block only if you have found an objective "
     "source conflict and can cite a source: ref for it. Return exactly one "
     "JSON action object."
 )
@@ -439,6 +447,39 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
         }
 
     # --- control actions ---
+    if name == "select_for_enrich":
+        _require_keys(action, {"action", "selected"})
+        selected = action["selected"]
+        if not isinstance(selected, list) or not selected:
+            raise ProposerError("select_for_enrich.selected must be non-empty")
+        parsed_sel = []
+        for item in selected:
+            if not isinstance(item, dict):
+                raise ProposerError("select_for_enrich items must be objects")
+            _require_keys(item, {"hypothesis_idx", "slot",
+                                 "evidence_refs", "rationale"})
+            idx = item["hypothesis_idx"]
+            if not isinstance(idx, int) or idx < 0:
+                raise ProposerError(
+                    "select_for_enrich.hypothesis_idx must be a non-negative int")
+            slot = item["slot"]
+            if not isinstance(slot, str) or not slot.strip():
+                raise ProposerError(
+                    "select_for_enrich.slot must be a non-empty string")
+            refs = _require_string_list(
+                item["evidence_refs"], name="select_for_enrich.evidence_refs")
+            rationale = item["rationale"]
+            if not isinstance(rationale, str) or not rationale.strip():
+                raise ProposerError(
+                    "select_for_enrich.rationale must be non-empty")
+            parsed_sel.append({
+                "hypothesis_idx": idx,
+                "slot": slot.strip(),
+                "evidence_refs": tuple(refs),
+                "rationale": rationale.strip(),
+            })
+        return {"action": name, "selected": parsed_sel}
+
     if name == "submit_proposals":
         _require_keys(action, {"action", "proposals"})
         proposals = action["proposals"]
@@ -550,10 +591,11 @@ class ProposerAgent(ResearchAgent):
     ) -> str | None:
         return _validate_action_guard(state, action, source_root)
 
-    def research_branch(
+    def research_batch(
         self,
         *,
-        hypothesis,  # HypothesisCard
+        hypotheses: list,  # list[HypothesisCard]
+        select_quota: int,
         goal: str,
         editable: list[str],
         frozen: list[str],
@@ -566,19 +608,33 @@ class ProposerAgent(ResearchAgent):
         gate_block: str,
         prompt_dir: Path | None,
         hints: list[str] | None = None,
-        explore: ExploreReport | None = None,
+        explore=None,
         max_steps: int | None = None,
         generator_regenerate=None,
     ) -> BranchResult:
-        """Sieve + enrich one hypothesis in isolation.
+        """Batch audit: sieve + dedup + select K + enrich K hypotheses.
 
-        Reads the target site, blocks only on an objective bar failure (with a
-        source ref), otherwise enriches the card into an executor-ready
-        instruction and submits. Budget exhaustion submits partial — it never
-        abandons an idea.
+        All seed hypotheses from the generator are audited in one context.
+        The cognitive element selects ``select_quota`` for enrichment with
+        evidence-based rationale, enriches each, and submits all K as
+        proposals. This is NOT merit judgment — selection is based on
+        historical coverage facts (ledger) and source facts, not predictions.
         """
-        from .hypothesis import HypothesisCard  # avoid top-level cycle
-        assert isinstance(hypothesis, HypothesisCard)
+        from .hypothesis import HypothesisCard, dedup_by_signature
+        assert all(isinstance(h, HypothesisCard) for h in hypotheses)
+        assert select_quota >= 1
+        self._candidates_per_round = select_quota
+
+        # Dedup by signature before presenting to the cognitive element.
+        deduped = dedup_by_signature(hypotheses, per_bin=1)
+        if not deduped:
+            return BranchResult(
+                hypothesis=hypotheses[0] if hypotheses else None,
+                outcome="block",
+                reason_kind="contradiction",
+                explanation="all hypotheses deduplicated to nothing",
+                block_evidence_refs=(),
+            )
 
         system_prompt = (
             f"{load_semantic('proposer', prompt_dir).rstrip()}\n\n"
@@ -593,33 +649,60 @@ class ProposerAgent(ResearchAgent):
         startup_pack = memory_service.build_startup_pack(
             goal=goal, editable=editable, frozen=frozen,
             base_sha=base_sha, gate_block=gate_block,
-            candidates_per_round=1, hints=hints,
+            candidates_per_round=select_quota, hints=hints,
             current_round=current_round, explore=explore,
         )
-        branch_intro = (
-            "You are researching ONE hypothesis in isolation. You are the "
-            "cognitive element — NOT a reviewer. Do not judge whether the idea "
-            "is worth trying; that is the Harness's job alone.\n\n"
-            f"Hypothesis (from {hypothesis.generative_op}):\n"
-            f"  region: {hypothesis.region}\n"
-            f"  mechanism: {hypothesis.mechanism}\n"
-            f"  intervention_family: {hypothesis.intervention_family}\n"
-            f"  why_plausible: {hypothesis.why_plausible}\n"
-            f"  critical_unknown: {hypothesis.critical_unknown}\n"
-            f"  facts_read (from your Generator partner):\n"
-            + "".join(f"    - {f}\n" for f in hypothesis.facts_read)
-            + "\nFirst SIEVE: read just enough at the target site to confirm the "
-            "three objective bars — the card's factual claims hold against the "
-            "code, the site is not under a frozen path, and the card is "
-            "self-consistent. The facts_read above are your partner's basis; "
-            "verify they are true. If an objective bar fails, block with a "
-            "source: ref. Then ENRICH: read until the executor can act without "
-            "further codebase search, and submit_proposals with an enriched "
-            "instruction. You are done only when you submit or block."
+
+        # Build the batch intro listing all deduped hypotheses.
+        hyp_lines = []
+        for i, h in enumerate(deduped):
+            hyp_lines.append(
+                f"  [{i}] (lens {h.generative_op})\n"
+                f"      region: {h.region}\n"
+                f"      mechanism: {h.mechanism}\n"
+                f"      intervention_family: {h.intervention_family}\n"
+                f"      why_plausible: {h.why_plausible}\n"
+                f"      critical_unknown: {h.critical_unknown}\n"
+                f"      facts_read:\n"
+                + "".join(f"        - {f}\n" for f in h.facts_read)
+            )
+        batch_intro = (
+            f"You are auditing {len(deduped)} seed hypotheses from your "
+            f"Generator partner, listed below. You have the experiment "
+            f"ledger and explore health in your startup context.\n\n"
+            f"## Hypotheses\n\n"
+            + "\n".join(hyp_lines)
+            + f"\n## Protocol: batch audit\n\n"
+            f"The work has three phases, each feeding the next.\n\n"
+            f"1. **Sieve:** check each hypothesis against the three objective "
+            f"bars — factual claims hold, site not frozen, self-consistent. "
+            f"You may read source to verify. This filters out leads that are "
+            f"factually wrong before you invest in enrichment.\n"
+            f"2. **Select:** your partner gave you leads, not plans. Choose "
+            f"{select_quota} worth pursuing via `select_for_enrich`, each "
+            f"with `evidence_refs` and a `rationale` grounded in facts. "
+            f"Diversity helps the loop explore — one hotspot and one new "
+            f"direction covers more ground than two similar picks — but "
+            f"this is your judgment, not a rule.\n"
+            f"3. **Enrich:** for each selected lead, read the actual "
+            f"implementation until you understand the function and class "
+            f"structure, the code facts, and the correctness constraints. "
+            f"Then `submit_proposals` with one proposal per selected lead. "
+            f"A proposal is a scheme direction between the lead and the "
+            f"implementation: locate at function/class level, state the "
+            f"constraint, declare what is left open. The executor reads the "
+            f"real source and makes the concrete changes.\n\n"
+            f"You are still NOT a reviewer. 'This will be faster' is a "
+            f"prediction — leave it to the Harness. 'This region has 0 "
+            f"prior attempts' is a fact. 'This family improved last round' "
+            f"is a fact. Select on facts, not predictions. You are done "
+            f"when you submit_proposals or block (block only if ALL "
+            f"hypotheses fail an objective bar)."
         )
+
         messages = [
             {"role": "user", "content": startup_pack},
-            {"role": "user", "content": branch_intro},
+            {"role": "user", "content": batch_intro},
         ]
         steps_budget = max_steps or self.max_steps
         started = time.monotonic()
@@ -627,17 +710,21 @@ class ProposerAgent(ResearchAgent):
         usages = []
         state = WorkingState()
         state.candidate_directions = (
-            f"{hypothesis.mechanism} → {hypothesis.intervention_family} "
-            f"in {hypothesis.region}")
-        state.current_information_goal = hypothesis.critical_unknown
+            f"batch audit of {len(deduped)} hypotheses, select {select_quota}")
         budget_reminder_step = int(0.8 * steps_budget)
         reminded = False
         print(
-            f"[branch {hypothesis.generative_op} "
-            f"{hypothesis.signature()}] started max_steps={steps_budget}",
+            f"[batch] {len(deduped)} hypotheses, select_quota={select_quota} "
+            f"max_steps={steps_budget}",
             flush=True,
         )
-        with TemporaryDirectory(prefix="simpleloop-branch-") as scratch:
+
+        selected_indices: list[int] = []
+        selected_rationales: list[str] = []
+        all_proposals: list[ResearchProposal] = []
+        has_selected = False
+
+        with TemporaryDirectory(prefix="simpleloop-batch-") as scratch:
             tools = ResearchTools(
                 runtime=self.runtime,
                 source=source_path,
@@ -651,7 +738,7 @@ class ProposerAgent(ResearchAgent):
             )
             for _step_num in range(steps_budget):
                 step = _step_num + 1
-                print(f"[branch step {step}/{steps_budget}] thinking", flush=True)
+                print(f"[batch step {step}/{steps_budget}] thinking", flush=True)
                 if (not reminded and budget_reminder_step > 0
                         and step >= budget_reminder_step):
                     messages.append({
@@ -665,34 +752,137 @@ class ProposerAgent(ResearchAgent):
                 name = action["action"]
                 state.action_log.append({"action": name, "step": step})
 
-                if name == "submit_proposals":
+                if name == "select_for_enrich":
                     _bump(state, name)
+                    new_sel = action["selected"]
+                    if len(selected_indices) + len(new_sel) > select_quota:
+                        state.protocol_repairs += 1
+                        print(
+                            f"[batch step {step}/{steps_budget}] "
+                            f"select exceeds quota: have {len(selected_indices)}, "
+                            f"adding {len(new_sel)}, quota {select_quota}",
+                            flush=True,
+                        )
+                        messages.extend([
+                            {"role": "assistant", "content": reply_text},
+                            {"role": "user", "content": (
+                                f"You have selected {len(selected_indices)} "
+                                f"hypothesis(es) and are adding {len(new_sel)}, "
+                                f"but the quota is {select_quota}. The quota "
+                                f"is the number of proposals you will enrich "
+                                f"and submit, so select {select_quota} total. "
+                                f"Return exactly one JSON action object."
+                            )},
+                        ])
+                        continue
+                    for sel in new_sel:
+                        idx = sel["hypothesis_idx"]
+                        if idx >= len(deduped):
+                            raise ProposerError(
+                                f"select_for_enrich idx {idx} out of range "
+                                f"(have {len(deduped)} hypotheses)")
+                        selected_indices.append(idx)
+                        selected_rationales.append(sel["rationale"])
+                    has_selected = True
                     print(
-                        f"[branch] submit steps={step} "
+                        f"[batch] selected {selected_indices} "
+                        f"steps={step}",
+                        flush=True,
+                    )
+                    # Prompt to start enriching the selected hypotheses.
+                    sel_cards = [deduped[i] for i in selected_indices]
+                    enrich_prompt = (
+                        f"Selected {len(sel_cards)} hypothesis/hypotheses. "
+                        f"Now enrich each one: read the target site until "
+                        f"the executor can act without further codebase "
+                        f"search, then submit_proposals with "
+                        f"{len(sel_cards)} enriched proposals — one per "
+                        f"selected hypothesis."
+                    )
+                    for i, h in enumerate(sel_cards):
+                        enrich_prompt += (
+                            f"\n\nHypothesis {i}: "
+                            f"region={h.region} mechanism={h.mechanism} "
+                            f"intervention_family={h.intervention_family}")
+                    messages.extend([
+                        {"role": "assistant", "content": reply_text},
+                        {"role": "user", "content": enrich_prompt},
+                    ])
+                    continue
+
+                if name == "submit_proposals":
+                    if not has_selected:
+                        state.protocol_repairs += 1
+                        print(
+                            f"[batch step {step}/{steps_budget}] "
+                            f"submit without select -- rejected",
+                            flush=True,
+                        )
+                        messages.extend([
+                            {"role": "assistant", "content": reply_text},
+                            {"role": "user", "content": (
+                                "You submitted proposals before calling "
+                                "select_for_enrich. Your partner gave you "
+                                f"{len(deduped)} leads; select_for_enrich "
+                                f"declares which {select_quota} you are "
+                                "taking on, and sets the scope for your "
+                                "enrichment. Select first, then enrich and "
+                                "submit. Return exactly one JSON action object."
+                            )},
+                        ])
+                        continue
+                    if len(action["proposals"]) != len(selected_indices):
+                        state.protocol_repairs += 1
+                        print(
+                            f"[batch step {step}/{steps_budget}] "
+                            f"submit count {len(action['proposals'])} != "
+                            f"selected {len(selected_indices)} -- rejected",
+                            flush=True,
+                        )
+                        messages.extend([
+                            {"role": "assistant", "content": reply_text},
+                            {"role": "user", "content": (
+                                f"You selected {len(selected_indices)} "
+                                f"hypothesis(es) but submitted "
+                                f"{len(action['proposals'])} proposal(s). "
+                                f"Each selected hypothesis gets one proposal, "
+                                f"so submit {len(selected_indices)} total. "
+                                "Return exactly one JSON action object."
+                            )},
+                        ])
+                        continue
+                    _bump(state, name)
+                    all_proposals = action["proposals"]
+                    print(
+                        f"[batch] submit {len(all_proposals)} proposal(s) "
+                        f"steps={step} "
                         f"elapsed={time.monotonic() - started:.1f}s",
                         flush=True,
                     )
                     return BranchResult(
-                        hypothesis=hypothesis,
-                        proposal=action["proposals"][0],
+                        hypothesis=deduped[selected_indices[0]]
+                        if selected_indices else deduped[0],
+                        proposal=all_proposals[0],
+                        proposals=tuple(all_proposals),
                         outcome="submit",
                         usage=usages,
                         deliberation_telemetry=_build_telemetry(
                             state, steps=step, outcome="submit"),
                         trace=_build_trace(
-                            state, round_id=current_round, outcome="submit",
-                            explore=explore),
+                            state, round_id=current_round,
+                            outcome="submit", explore=explore),
                     )
+
                 if name == "block":
                     _bump(state, name)
                     print(
-                        f"[branch] block steps={step} "
+                        f"[batch] block steps={step} "
                         f"reason_kind={action['reason_kind']} "
                         f"elapsed={time.monotonic() - started:.1f}s",
                         flush=True,
                     )
                     return BranchResult(
-                        hypothesis=hypothesis,
+                        hypothesis=deduped[0],
                         outcome="block",
                         reason_kind=action["reason_kind"],
                         explanation=action["explanation"],
@@ -704,7 +894,8 @@ class ProposerAgent(ResearchAgent):
                         trace=_build_trace(
                             state, round_id=current_round, outcome="block",
                             reason_kind=action["reason_kind"],
-                            evidence_refs=action["evidence_refs"], explore=explore),
+                            evidence_refs=action["evidence_refs"],
+                            explore=explore),
                     )
 
                 if name == "feedback_generator":
@@ -713,10 +904,7 @@ class ProposerAgent(ResearchAgent):
                         raise ProposerError(
                             "feedback_generator issued but no "
                             "generator_regenerate callback was provided")
-                    print(
-                        f"[branch] feedback_generator steps={step}",
-                        flush=True,
-                    )
+                    print(f"[batch] feedback_generator steps={step}", flush=True)
                     new_hypothesis = generator_regenerate(action)
                     envelope = {
                         "state": _render_state_header(state, explore),
@@ -737,18 +925,6 @@ class ProposerAgent(ResearchAgent):
                             envelope, ensure_ascii=False,
                         )},
                     ])
-                    hypothesis = new_hypothesis
-                    state.candidate_directions = (
-                        f"{hypothesis.mechanism} → "
-                        f"{hypothesis.intervention_family} "
-                        f"in {hypothesis.region}")
-                    state.current_information_goal = (
-                        hypothesis.critical_unknown)
-                    print(
-                        f"[branch] generator regenerated "
-                        f"{new_hypothesis.signature()} steps={step}",
-                        flush=True,
-                    )
                     continue
 
                 # tool call
@@ -760,7 +936,7 @@ class ProposerAgent(ResearchAgent):
                     _bump(state, "source_read")
                     state.located = True
                 print(
-                    f"[branch step {step}/{steps_budget}] "
+                    f"[batch step {step}/{steps_budget}] "
                     f"{_result_summary(action, observation)}",
                     flush=True,
                 )
@@ -775,45 +951,80 @@ class ProposerAgent(ResearchAgent):
                     )},
                 ])
 
-            # Budget exhausted without a terminal action — submit partial.
-            # Never abandon: the sieve job is bounded and a raw card is an
-            # acceptable floor; the orchestrator deprioritizes thin proposals
-            # by tool_calls and drops zero-read partials before execution.
-            print(
-                f"[branch] budget exhausted → partial submit (steps={steps_budget})",
-                flush=True,
+            # Budget exhausted — partial submit if we have any proposals.
+            if all_proposals:
+                print(
+                    f"[batch] budget exhausted with {len(all_proposals)} "
+                    f"proposals — returning partial",
+                    flush=True,
+                )
+                return BranchResult(
+                    hypothesis=deduped[selected_indices[0]]
+                    if selected_indices else deduped[0],
+                    proposal=all_proposals[0],
+                    proposals=tuple(all_proposals),
+                    outcome="submit",
+                    enrichment_partial=True,
+                    usage=usages,
+                    deliberation_telemetry=_build_telemetry(
+                        state, steps=steps_budget, outcome="submit",
+                        enrichment_partial=True),
+                    trace=_build_trace(
+                        state, round_id=current_round, outcome="submit",
+                        explore=explore),
+                )
+            # No proposals — partial submit from selected hypotheses.
+            if selected_indices:
+                print(
+                    f"[batch] budget exhausted after select, before enrich "
+                    f"— partial submit for {len(selected_indices)} selected",
+                    flush=True,
+                )
+                partial_proposals = []
+                for idx in selected_indices:
+                    h = deduped[idx]
+                    partial_proposals.append(ResearchProposal(
+                        instruction=(
+                            "Enrichment incomplete (batch budget exhausted); "
+                            "the executor should locate and implement the "
+                            "hypothesis directly.\n"
+                            f"region: {h.region}\n"
+                            f"mechanism: {h.mechanism}\n"
+                            f"intervention_family: {h.intervention_family}\n"
+                            f"why_plausible: {h.why_plausible}\n"
+                            f"critical_unknown: {h.critical_unknown}\n"
+                        ),
+                        research_target=NewFindingTarget(
+                            question=(h.why_plausible or h.mechanism)[:200],
+                        ),
+                    ))
+                return BranchResult(
+                    hypothesis=deduped[selected_indices[0]],
+                    proposal=partial_proposals[0],
+                    proposals=tuple(partial_proposals),
+                    outcome="submit",
+                    enrichment_partial=True,
+                    usage=usages,
+                    deliberation_telemetry=_build_telemetry(
+                        state, steps=steps_budget, outcome="submit",
+                        enrichment_partial=True),
+                    trace=_build_trace(
+                        state, round_id=current_round, outcome="submit",
+                        explore=explore),
+                )
+            # Nothing selected at all — block.
+            return BranchResult(
+                hypothesis=deduped[0],
+                outcome="block",
+                reason_kind="contradiction",
+                explanation="batch budget exhausted before any selection",
+                block_evidence_refs=(),
+                usage=usages,
+                deliberation_telemetry=_build_telemetry(
+                    state, steps=steps_budget, outcome="block",
+                    reason_kind="contradiction"),
+                trace=_build_trace(
+                    state, round_id=current_round, outcome="block",
+                    reason_kind="contradiction", explore=explore),
             )
-            return self._partial_submit(
-                hypothesis, state, usages, steps_budget, current_round, explore)
-
-    def _partial_submit(self, hypothesis, state, usages, steps_budget,
-                        current_round, explore):
-        instruction = (
-            "Enrichment incomplete (branch budget exhausted); the executor "
-            "should locate and implement the hypothesis directly.\n"
-            f"region: {hypothesis.region}\n"
-            f"mechanism: {hypothesis.mechanism}\n"
-            f"intervention_family: {hypothesis.intervention_family}\n"
-            f"why_plausible: {hypothesis.why_plausible}\n"
-            f"critical_unknown: {hypothesis.critical_unknown}\n"
-        )
-        proposal = ResearchProposal(
-            instruction=instruction,
-            research_target=NewFindingTarget(
-                question=(hypothesis.why_plausible or hypothesis.mechanism)[:200],
-            ),
-        )
-        return BranchResult(
-            hypothesis=hypothesis,
-            proposal=proposal,
-            outcome="submit",
-            enrichment_partial=True,
-            usage=usages,
-            deliberation_telemetry=_build_telemetry(
-                state, steps=steps_budget, outcome="submit",
-                enrichment_partial=True,
-            ),
-            trace=_build_trace(
-                state, round_id=current_round, outcome="submit", explore=explore),
-        )
 
