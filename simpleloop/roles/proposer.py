@@ -29,6 +29,15 @@ from __future__ import annotations
 
 import json
 import time
+from .inquiry import (
+    Explanation,
+    HypothesisSelection,
+    InquiryPhase,
+    LeveragePoint,
+    ResearchHypothesis,
+    ScientistSessionState,
+    Understanding,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -516,6 +525,249 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
     raise ProposerError(f"unknown proposer action: {name}")
 
 
+# --- Scientist phase protocol --------------------------------------------
+
+_FRESH_PHASE_ACTIONS = {
+    InquiryPhase.UNDERSTAND: {"run_research_command", "commit_understanding"},
+    InquiryPhase.MODEL: {"run_research_command", "propose_working_model", "continue_investigation", "commit_working_model"},
+    InquiryPhase.EXPLAIN: {"run_research_command", "submit_explanation", "commit_explanation_set", "reopen_model"},
+    InquiryPhase.EXPLORE: {"run_research_command", "emit_lever_map", "submit_hypothesis", "commit_hypothesis_portfolio", "reopen_explain", "reopen_model"},
+}
+_NARROW_ACTIONS = {"run_research_command", "select_for_deepen", "continue_explore", "reopen_explain", "reopen_model", "fresh_reframe", "abandon_portfolio"}
+_DEEPEN_ACTIONS = {"run_research_command", "submit_proposals", "return_to_narrow", "continue_explore", "reopen_explain", "reopen_model", "fresh_reframe", "abandon_direction"}
+
+
+def phase_allowed_actions(phase: InquiryPhase, history_visible: bool) -> frozenset[str]:
+    """The single source of truth for phase and history capabilities."""
+    if phase in {InquiryPhase.NARROW, InquiryPhase.DEEPEN}:
+        if not history_visible:
+            raise ValueError(f"{phase.value} requires history")
+        actions = _NARROW_ACTIONS if phase is InquiryPhase.NARROW else _DEEPEN_ACTIONS
+    else:
+        actions = _FRESH_PHASE_ACTIONS[phase]
+    if history_visible:
+        actions = actions | MEMORY_TOOL_ACTIONS
+    return frozenset(actions | {"block"})
+
+
+PHASE_ATTENTION = {
+    InquiryPhase.UNDERSTAND: "Current mode: UNDERSTAND. Do not search for modifications yet. Investigate broadly and form a coarse account of how the whole problem produces the target outcome; restating the goal is not understanding. Identify unknowns that could change your later model.",
+    InquiryPhase.MODEL: "Current mode: MODEL. Construct a working representation that can explain the target outcome and support counterfactual reasoning. A list of components or facts is not sufficient. Do not seek completeness; seek a model sufficient for the next consequential research decision.",
+    InquiryPhase.EXPLAIN: "Current mode: EXPLAIN. Form an account of the mechanism, structural limitation, obstruction, or dependency that produces the gap or creates the opportunity. Keep materially different accounts alive where evidence permits. Do not design the intervention yet.",
+    InquiryPhase.EXPLORE: "Current mode: EXPLORE. Using the working model and explanations, search broadly across materially different mechanism families before investing deeply in any one direction.",
+    InquiryPhase.NARROW: "Current mode: NARROW. Past experiments are now available as evidence. Use them to support, refute, or revise the independently formed model and hypotheses. Historical vocabulary must not replace your own representation.",
+    InquiryPhase.DEEPEN: "Current mode: DEEPEN. Detailed investigation is now justified. Test each selected hypothesis critical premise, trace its real scope, derive observable consequences, and submit only if the mechanism survives.",
+}
+
+_SCIENTIST_ACTION_SCHEMAS = {
+    "commit_understanding": '{"action":"commit_understanding","problem":"...","target_outcome":"...","boundary":"...","current_account_of_the_whole":"...","key_unknowns":["..."]}',
+    "continue_investigation": '{"action":"continue_investigation","question":"...","decision_impact":"..."}',
+    "propose_working_model": '{"action":"propose_working_model","working_model":{"representation":"...","explanatory_structure":"...","claims":[{"id":"M1","claim":"...","evidence_refs":["source:path"]}],"important_unknowns":["..."]}}',
+    "commit_working_model": '{"action":"commit_working_model","model_version":2,"model_check":{"explains_target":"...","counterfactual":{"change":"...","predicted_effect":"...","model_claim_refs":["M1"]},"important_unknowns":[{"question":"...","why_it_matters":"..."}],"blocking_unknown":null,"why_model_is_sufficient_for_next_stage":"..."}}',
+    "submit_explanation": '{"action":"submit_explanation","id":"E1","phenomenon":"...","account":"...","model_basis":["M1"],"expected_if_true":["..."],"evidence_needed":["..."]}',
+    "commit_explanation_set": '{"action":"commit_explanation_set","explanation_ids":["E1","E2"],"explanation_sufficiency_justification":null}',
+    "emit_lever_map": '{"action":"emit_lever_map","levers":[{"id":"L1","target_mechanism":"...","why_leverage_exists":"...","model_basis":["M1"],"explanation_basis":["E1"]}]}',
+    "submit_hypothesis": '{"action":"submit_hypothesis","id":"H1","generative_op":"G2","model_basis":["M1"],"explanation_basis":["E1"],"mechanism":"...","intervention_family":"...","scope":"...","why_plausible":"...","critical_unknown":"..."}',
+    "commit_hypothesis_portfolio": '{"action":"commit_hypothesis_portfolio","hypothesis_ids":["H1"],"coverage_rationale":"...","portfolio_sufficiency_justification":null,"unused_generative_ops":[]}',
+    "select_for_deepen": '{"action":"select_for_deepen","selected":[{"hypothesis_id":"H1","evidence_refs":["experiment:r0c0"],"rationale":"..."}]}',
+    "submit_proposals": '{"action":"submit_proposals","proposals":[{"instruction":"...","research_target":{"mode":"new","question":"..."},"model_claim_refs":["M1"],"explanation_refs":["E1"],"hypothesis_id":"H1","evidence_refs":["source:path"],"mechanism":"...","prediction":"...","affected_scope":"..."}]}',
+    "continue_explore": '{"action":"continue_explore","reason":"...","evidence_refs":["experiment:r0c0"]}',
+    "reopen_explain": '{"action":"reopen_explain","reason":"...","evidence_refs":["experiment:r0c0"]}',
+    "reopen_model": '{"action":"reopen_model","reason":"...","evidence_refs":["experiment:r0c0"]}',
+    "return_to_narrow": '{"action":"return_to_narrow","reason":"...","evidence_refs":["source:path"]}',
+    "fresh_reframe": '{"action":"fresh_reframe","reason":"...","evidence_refs":["experiment:r0c0"]}',
+    "abandon_portfolio": '{"action":"abandon_portfolio","reason":"...","evidence_refs":["experiment:r0c0"]}',
+    "abandon_direction": '{"action":"abandon_direction","hypothesis_id":"H1","reason":"...","evidence_refs":["source:path"]}',
+    "block": '{"action":"block","reason_kind":"false_claim|frozen|contradiction","explanation":"...","evidence_refs":["source:path"]}',
+}
+
+
+def render_scientist_action_protocol(actions) -> str:
+    schemas = [schema for name, schema in _SCIENTIST_ACTION_SCHEMAS.items() if name in actions]
+    return "Allowed control actions (return exactly one JSON object):\n- " + "\n- ".join(schemas)
+
+
+def _build_phase_system_prompt(prompt_dir: Path | None, phase: InquiryPhase, history_visible: bool) -> str:
+    actions = phase_allowed_actions(phase, history_visible)
+    tools = render_research_tool_prompt(actions & ({"run_research_command"} | MEMORY_TOOL_ACTIONS))
+    return "\n\n".join(filter(None, (
+        load_semantic("proposer", prompt_dir).rstrip(),
+        PHASE_ATTENTION[phase],
+        render_scientist_action_protocol(actions),
+        tools,
+        _RUNTIME_BOUNDARIES,
+    )))
+
+
+def _required_str(value: dict, name: str) -> str:
+    item = value.get(name)
+    if not isinstance(item, str) or not item.strip():
+        raise ProposerError(f"{name} must be a non-empty string")
+    return item.strip()
+
+
+def _optional_nonempty(value, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ProposerError(f"{name} must be null or a non-empty string")
+    return value.strip()
+
+
+def _parse_scientist_action(text: str) -> dict:
+    """Parse action structure independently of phase permissions."""
+    try:
+        raw = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProposerError("proposer response must be one JSON object") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("action"), str):
+        raise ProposerError("proposer action must be a JSON object with action")
+    name = raw["action"]
+    if name in ({"run_research_command"} | MEMORY_TOOL_ACTIONS | {"block"}):
+        return _parse_action(text, 1)
+    if name == "commit_understanding":
+        _require_keys(raw, {"action", "problem", "target_outcome", "boundary", "current_account_of_the_whole", "key_unknowns"})
+        return {"action": name, "understanding": Understanding(
+            problem=_required_str(raw, "problem"),
+            target_outcome=_required_str(raw, "target_outcome"),
+            boundary=_required_str(raw, "boundary"),
+            current_account_of_the_whole=_required_str(raw, "current_account_of_the_whole"),
+            key_unknowns=tuple(_require_string_list(raw["key_unknowns"], name="key_unknowns")),
+        )}
+    if name == "propose_working_model":
+        _require_keys(raw, {"action", "working_model"})
+        model = raw["working_model"]
+        if not isinstance(model, dict):
+            raise ProposerError("working_model must be an object")
+        _require_keys(model, {"representation", "explanatory_structure", "claims", "important_unknowns"})
+        if not isinstance(model["claims"], list) or not model["claims"]:
+            raise ProposerError("working_model.claims must be non-empty")
+        claims = []
+        for claim in model["claims"]:
+            if not isinstance(claim, dict):
+                raise ProposerError("working_model claims must be objects")
+            _require_keys(claim, {"id", "claim", "evidence_refs"})
+            claims.append({
+                "id": _required_str(claim, "id"),
+                "claim": _required_str(claim, "claim"),
+                "evidence_refs": tuple(_require_string_list(claim["evidence_refs"], name="claim.evidence_refs")),
+            })
+        return {"action": name, "working_model": {
+            "representation": _required_str(model, "representation"),
+            "explanatory_structure": _required_str(model, "explanatory_structure"),
+            "claims": claims,
+            "important_unknowns": tuple(_require_string_list(model["important_unknowns"], name="important_unknowns", allow_empty=True)),
+        }}
+    if name == "commit_working_model":
+        _require_keys(raw, {"action", "model_version", "model_check"})
+        version = raw["model_version"]
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ProposerError("model_version must be a positive integer")
+        check = raw["model_check"]
+        if not isinstance(check, dict):
+            raise ProposerError("model_check must be an object")
+        _require_keys(check, {"explains_target", "counterfactual", "important_unknowns", "blocking_unknown", "why_model_is_sufficient_for_next_stage"})
+        cf = check["counterfactual"]
+        if not isinstance(cf, dict):
+            raise ProposerError("counterfactual must be an object")
+        _require_keys(cf, {"change", "predicted_effect", "model_claim_refs"})
+        unknowns = check["important_unknowns"]
+        if not isinstance(unknowns, list):
+            raise ProposerError("important_unknowns must be a list")
+        for unknown in unknowns:
+            if not isinstance(unknown, dict):
+                raise ProposerError("important_unknowns items must be objects")
+            _require_keys(unknown, {"question", "why_it_matters"})
+            _required_str(unknown, "question")
+            _required_str(unknown, "why_it_matters")
+        blocking = check["blocking_unknown"]
+        if blocking is not None and (not isinstance(blocking, str) or not blocking.strip()):
+            raise ProposerError("blocking_unknown must be null or a non-empty string")
+        return {"action": name, "model_version": version, "model_check": {
+            "explains_target": _required_str(check, "explains_target"),
+            "counterfactual": {
+                "change": _required_str(cf, "change"),
+                "predicted_effect": _required_str(cf, "predicted_effect"),
+                "model_claim_refs": tuple(_require_string_list(cf["model_claim_refs"], name="model_claim_refs")),
+            },
+            "important_unknowns": tuple(unknowns),
+            "blocking_unknown": blocking.strip() if isinstance(blocking, str) else None,
+            "why_model_is_sufficient_for_next_stage": _required_str(check, "why_model_is_sufficient_for_next_stage"),
+        }}
+    if name == "submit_explanation":
+        _require_keys(raw, {"action", "id", "phenomenon", "account", "model_basis", "expected_if_true", "evidence_needed"})
+        return {"action": name, "explanation": Explanation(
+            id=_required_str(raw, "id"), phenomenon=_required_str(raw, "phenomenon"),
+            account=_required_str(raw, "account"),
+            model_basis=tuple(_require_string_list(raw["model_basis"], name="model_basis")),
+            expected_if_true=tuple(_require_string_list(raw["expected_if_true"], name="expected_if_true")),
+            evidence_needed=tuple(_require_string_list(raw["evidence_needed"], name="evidence_needed")),
+        )}
+    if name == "emit_lever_map":
+        _require_keys(raw, {"action", "levers"})
+        if not isinstance(raw["levers"], list) or not raw["levers"]:
+            raise ProposerError("levers must be a non-empty list")
+        levers = []
+        for item in raw["levers"]:
+            if not isinstance(item, dict):
+                raise ProposerError("levers must contain objects")
+            _require_keys(item, {"id", "target_mechanism", "why_leverage_exists", "model_basis", "explanation_basis"})
+            levers.append(LeveragePoint(
+                id=_required_str(item, "id"),
+                target_mechanism=_required_str(item, "target_mechanism"),
+                why_leverage_exists=_required_str(item, "why_leverage_exists"),
+                model_basis=tuple(_require_string_list(item["model_basis"], name="model_basis")),
+                explanation_basis=tuple(_require_string_list(item["explanation_basis"], name="explanation_basis")),
+            ))
+        return {"action": name, "levers": tuple(levers)}
+    if name == "submit_hypothesis":
+        _require_keys(raw, {"action", "id", "generative_op", "model_basis", "explanation_basis", "mechanism", "intervention_family", "scope", "why_plausible", "critical_unknown"}, {"evidence_refs"})
+        op = raw["generative_op"]
+        if op is not None and (not isinstance(op, str) or not op.strip()):
+            raise ProposerError("generative_op must be null or non-empty")
+        return {"action": name, "hypothesis": ResearchHypothesis(
+            id=_required_str(raw, "id"), generative_op=op.strip() if isinstance(op, str) else None,
+            model_basis=tuple(_require_string_list(raw["model_basis"], name="model_basis")),
+            explanation_basis=tuple(_require_string_list(raw["explanation_basis"], name="explanation_basis")),
+            mechanism=_required_str(raw, "mechanism"), intervention_family=_required_str(raw, "intervention_family"),
+            scope=_required_str(raw, "scope"), why_plausible=_required_str(raw, "why_plausible"),
+            critical_unknown=_required_str(raw, "critical_unknown"),
+            evidence_refs=tuple(_require_string_list(raw.get("evidence_refs", []), name="evidence_refs", allow_empty=True)),
+        )}
+    if name == "commit_explanation_set":
+        _require_keys(raw, {"action", "explanation_ids", "explanation_sufficiency_justification"})
+        return {"action": name, "explanation_ids": tuple(_require_string_list(raw["explanation_ids"], name="explanation_ids")), "explanation_sufficiency_justification": _optional_nonempty(raw["explanation_sufficiency_justification"], "explanation_sufficiency_justification")}
+    if name == "commit_hypothesis_portfolio":
+        _require_keys(raw, {"action", "hypothesis_ids", "coverage_rationale", "portfolio_sufficiency_justification", "unused_generative_ops"})
+        return {"action": name, "hypothesis_ids": tuple(_require_string_list(raw["hypothesis_ids"], name="hypothesis_ids")), "coverage_rationale": _required_str(raw, "coverage_rationale"), "portfolio_sufficiency_justification": _optional_nonempty(raw["portfolio_sufficiency_justification"], "portfolio_sufficiency_justification"), "unused_generative_ops": tuple(_require_string_list(raw["unused_generative_ops"], name="unused_generative_ops", allow_empty=True))}
+    if name == "select_for_deepen":
+        _require_keys(raw, {"action", "selected"})
+        if not isinstance(raw["selected"], list) or not raw["selected"]:
+            raise ProposerError("selected must be a non-empty list")
+        selected = []
+        for item in raw["selected"]:
+            if not isinstance(item, dict):
+                raise ProposerError("selected must contain objects")
+            _require_keys(item, {"hypothesis_id", "evidence_refs", "rationale"})
+            selected.append(HypothesisSelection(_required_str(item, "hypothesis_id"), tuple(_require_string_list(item["evidence_refs"], name="evidence_refs")), _required_str(item, "rationale")))
+        return {"action": name, "selected": tuple(selected)}
+    if name == "submit_proposals":
+        _require_keys(raw, {"action", "proposals"})
+        if not isinstance(raw["proposals"], list) or not raw["proposals"]:
+            raise ProposerError("proposals must be a non-empty list")
+        return {"action": name, "proposals": tuple(raw["proposals"])}
+    if name == "continue_investigation":
+        _require_keys(raw, {"action", "question", "decision_impact"})
+        return {"action": name, "question": _required_str(raw, "question"), "decision_impact": _required_str(raw, "decision_impact")}
+    if name in {"continue_explore", "reopen_explain", "reopen_model", "return_to_narrow", "fresh_reframe", "abandon_portfolio"}:
+        _require_keys(raw, {"action", "reason", "evidence_refs"})
+        return {"action": name, "reason": _required_str(raw, "reason"), "evidence_refs": tuple(_require_string_list(raw["evidence_refs"], name="evidence_refs"))}
+    if name == "abandon_direction":
+        _require_keys(raw, {"action", "hypothesis_id", "reason", "evidence_refs"})
+        return {"action": name, "hypothesis_id": _required_str(raw, "hypothesis_id"), "reason": _required_str(raw, "reason"), "evidence_refs": tuple(_require_string_list(raw["evidence_refs"], name="evidence_refs"))}
+    raise ProposerError(f"unknown proposer action: {name}")
+
+
 # --- Cognitive-specific guards -------------------------------------------
 
 from .research_agent import _source_path_exists  # noqa: E402
@@ -555,6 +807,76 @@ def _validate_action_guard(
             return "block_needs_source"
         return None
     # submit_proposals: no guard — merit is not the cognitive element's job.
+    return None
+
+
+def _validate_scientist_guard(
+    session: ScientistSessionState,
+    action: dict,
+    source_root: Path,
+    select_quota: int,
+) -> str | None:
+    """Validate structural commitments, never predicted scientific merit."""
+    name = action.get("action")
+    if name not in phase_allowed_actions(
+        session.inquiry.phase, session.inquiry.history_visible,
+    ):
+        return f"action_not_allowed_in_{session.inquiry.phase.value}"
+    if name == "block":
+        return None if _validate_block_evidence(
+            action["evidence_refs"], session.runtime, source_root,
+        ) else "block_needs_source"
+
+    model = session.inquiry.working_model
+    model_ids = {claim.id for claim in model.claims} if model else set()
+    explanation_ids = {item.id for item in session.inquiry.explanations}
+    hypothesis_ids = {item.id for item in session.inquiry.hypotheses}
+
+    if name == "commit_working_model":
+        if model is None or action["model_version"] != model.version:
+            return "stale_model_version"
+        refs = action["model_check"]["counterfactual"]["model_claim_refs"]
+        if not set(refs) <= model_ids:
+            return "unknown_model_claim"
+        if action["model_check"]["blocking_unknown"] is not None:
+            return "model_blocking_unknown"
+    elif name == "submit_explanation":
+        if not set(action["explanation"].model_basis) <= model_ids:
+            return "unknown_model_claim"
+    elif name == "commit_explanation_set":
+        ids = set(action["explanation_ids"])
+        if not ids <= explanation_ids:
+            return "unknown_explanation"
+        if len(ids) < 2 and not action["explanation_sufficiency_justification"]:
+            return "explanation_below_breadth_target"
+    elif name == "emit_lever_map":
+        for lever in action["levers"]:
+            if not set(lever.model_basis) <= model_ids:
+                return "unknown_model_claim"
+            if not set(lever.explanation_basis) <= explanation_ids:
+                return "unknown_explanation"
+    elif name == "submit_hypothesis":
+        hypothesis = action["hypothesis"]
+        if not set(hypothesis.model_basis) <= model_ids:
+            return "unknown_model_claim"
+        if not set(hypothesis.explanation_basis) <= explanation_ids:
+            return "unknown_explanation"
+    elif name == "commit_hypothesis_portfolio":
+        ids = set(action["hypothesis_ids"])
+        if not ids <= hypothesis_ids:
+            return "unknown_hypothesis"
+        committed = [h for h in session.inquiry.hypotheses if h.id in ids]
+        breadth = len({h.signature() for h in committed})
+        if breadth < max(4, select_quota * 2):
+            if not action["portfolio_sufficiency_justification"]:
+                return "portfolio_below_breadth_target"
+    elif name == "select_for_deepen":
+        if len(action["selected"]) > select_quota:
+            return "selection_exceeds_quota"
+        if any(item.hypothesis_id not in hypothesis_ids for item in action["selected"]):
+            return "unknown_hypothesis"
+    elif name == "fresh_reframe" and session.fresh_reframes >= 1:
+        return "fresh_reframe_limit"
     return None
 
 
