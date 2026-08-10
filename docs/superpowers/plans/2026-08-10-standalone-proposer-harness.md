@@ -216,7 +216,8 @@ missing.
 
 - [ ] **Step 4: Implement minimal runner**
 
-Implement:
+Implement the following exact public types and function signature; the body
+performs the ordered operations immediately below:
 
 ```python
 @dataclass(frozen=True)
@@ -235,7 +236,7 @@ def run_proposer(
     from_run: str | Path | None = None,
     seed: int | None = None,
 ) -> ProposerHarnessSummary:
-    ...
+    """Run one complete Proposer attempt and persist review artifacts."""
 ```
 
 The implementation order is:
@@ -296,12 +297,12 @@ git commit -m "feat: add standalone proposer runner"
 
 **Interfaces:**
 
-- Consumes: `run_proposer(...)`
+- Consumes: `run_proposer(config_path, output_dir, *, from_run=None, seed=None)`
 - Produces CLI: `simpleloop propose --config PATH --output-dir PATH [--from-run PATH] [--seed INT]`
 
 - [ ] **Step 1: Write failing CLI success test**
 
-Patch `simpleloop.proposer_harness.run_proposer`, call `cli.main([...])`, and
+Patch `simpleloop.proposer_harness.run_proposer`, call `cli.main` with the argument list below, and
 assert exact argument forwarding and concise output:
 
 ```python

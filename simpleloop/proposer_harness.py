@@ -215,9 +215,18 @@ def run_proposer(
             run_dir=output_dir,
         )
         runtime.preflight()
+        workspace_repo = (
+            history_dir / "repo"
+            if from_run is not None
+            else Path(cfg["repo_path"])
+        )
+        if not workspace_repo.is_dir():
+            raise ProposerHarnessError(
+                f"proposer source repository does not exist: {workspace_repo}"
+            )
         workspace = Workspace(
             run_dir=output_dir,
-            repo_path=cfg["repo_path"],
+            repo_path=str(workspace_repo),
             baseline_ref=cfg["baseline_ref"],
             editable=cfg["editable_paths"],
         )
@@ -225,7 +234,8 @@ def run_proposer(
         baseline_sha = workspace.baseline_sha()
         base_sha, current_round = _history_state(history_dir, baseline_sha)
         input_record.update({
-            "repo_path": cfg["repo_path"],
+            "repo_path": str(workspace_repo),
+            "configured_repo_path": cfg["repo_path"],
             "base_sha": base_sha,
             "simpleloop_revision": _simpleloop_revision(),
             "goal": cfg["goal"],
@@ -333,4 +343,3 @@ def run_proposer(
         abstained=bool(proposal_result.abstained),
         base_sha=input_record["base_sha"],
     )
-

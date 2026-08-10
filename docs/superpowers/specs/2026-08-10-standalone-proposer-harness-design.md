@@ -144,12 +144,15 @@ read history, findings, frontier and related artifacts from `--from-run`.
 
 The base SHA is derived from the last authoritative history record's selected
 SHA. If the history is empty, the runner falls back to the configured baseline
-revision. A malformed history or a selected SHA that does not resolve in the
-configured repository is a setup error.
+revision. The isolated Workspace clones from `--from-run/repo`, because
+accepted candidate commits are run-local and need not exist in the configured
+upstream repository. A malformed history, missing run repository, or selected
+SHA that does not resolve there is a setup error.
 
-The source run is passed only as a read location. Result artifacts and
-temporary repository state are created under `--output-dir`; no target
-resolution, finding allocation, history append, or memory update is performed.
+The source run, including its repository, is passed only as a read location.
+Result artifacts and temporary repository state are created under
+`--output-dir`; no target resolution, finding allocation, history append, or
+memory update is performed.
 
 ## Output Contract
 

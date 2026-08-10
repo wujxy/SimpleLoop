@@ -22,6 +22,7 @@ def _history_row(round_id: int, *, parent: str, selected: str | None) -> dict:
 
 
 def _resolved_config(tmp_path: Path) -> dict:
+    (tmp_path / "source-repo").mkdir(exist_ok=True)
     return {
         "goal": "make it faster",
         "hints": ["preserve numerical behavior"],
@@ -160,6 +161,7 @@ def test_run_proposer_reads_existing_run_without_modifying_it(
     calls = _install_runner_fakes(monkeypatch, tmp_path)
     history_dir = tmp_path / "old-run"
     history_dir.mkdir()
+    (history_dir / "repo").mkdir()
     history_path = history_dir / "history.jsonl"
     history_path.write_text(
         json.dumps(_history_row(0, parent="baseline-sha", selected="winner"))
@@ -175,6 +177,7 @@ def test_run_proposer_reads_existing_run_without_modifying_it(
     )
 
     assert calls["memory"]["run_dir"] == history_dir
+    assert calls["workspace"]["repo_path"] == str(history_dir / "repo")
     assert calls["orchestrator_run"]["run_dir"] == history_dir
     assert calls["orchestrator_run"]["base_sha"] == "winner"
     assert calls["orchestrator_run"]["current_round"] == 1
