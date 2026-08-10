@@ -111,6 +111,29 @@ commits valid edits, runs evaluation and physical/correctness gates, and decides
 eligibility and the next parent. Static `--proposals` mode bypasses HEPAI and
 Insight generation entirely.
 
+## Standalone Proposer testing
+
+Run the complete Generator + Cognitive Proposer without starting the Executor,
+evaluation, Gates, or optimization loop:
+
+    simpleloop propose \
+      --config examples/omilrec-v100-opt/task.yaml \
+      --output-dir proposer-tests/test-001
+
+To let the Cognitive side inspect an existing run while keeping the Generator
+history-free, add --from-run. The source run is read-only, and its latest
+selected SHA becomes the source snapshot:
+
+    simpleloop propose \
+      --config examples/omilrec-v100-opt/task.yaml \
+      --from-run runs/omilrec-v100-generator-proposer-008 \
+      --output-dir proposer-tests/test-002 \
+      --seed 42
+
+--seed fixes Python-side generative-lens scheduling, not remote model sampling.
+Each attempt writes authoritative result.json plus a human-readable
+proposals.md report under the output directory.
+
 ## Gates and selection
 
 Every attempt is recorded, including failed and rejected attempts. Gate results
