@@ -6,7 +6,24 @@ from pathlib import Path
 import pytest
 
 from simpleloop import cli
+from simpleloop.memory.context import (
+    build_fresh_inquiry_context,
+    build_history_entry_pack,
+)
+from simpleloop.memory.experiment_index import Experiment
 from simpleloop.harness import memory
+
+
+def _experiment() -> Experiment:
+    return Experiment(
+        experiment_id="r2c1", round=2, candidate=1,
+        proposal="old ownership vocabulary", parent_sha="parent",
+        candidate_sha="candidate", status="COMPLETED", gate_passed=True,
+        eligible=True, selected=True, metrics={"SPEED_MS": 90.0},
+        changed_paths=("src/a.cc",), finding_id="F-002", eval_block="",
+    )
+
+
 
 
 def _parallel_history() -> list[dict]:
@@ -50,6 +67,40 @@ def _parallel_history() -> list[dict]:
             },
         ],
     }]
+
+
+def test_fresh_inquiry_context_has_current_world_evidence_only():
+    text = build_fresh_inquiry_context(
+        goal="speed", editable=["src/**"], frozen=["tests/**"],
+        base_sha="abc", gate_block="FCN=true", hints=["preserve order"],
+    )
+
+    assert "speed" in text and "FCN=true" in text
+    assert "preserve order" in text
+    for historical in (
+        "dashboard", "frontier", "abstention", "search_experiments",
+    ):
+        assert historical not in text.lower()
+
+
+def test_history_entry_pack_is_a_factual_index_not_a_worldview_dump():
+    text = build_history_entry_pack(
+        experiments=[_experiment()],
+        tool_cheatsheet="search_experiments(query)",
+    )
+
+    assert "History is now available as evidence" in text
+    assert "r2c1" in text
+    assert "F-002" in text
+    assert "pass" in text
+    assert "SPEED_MS=90" in text
+    assert "src/a.cc" in text
+    assert "search_experiments" in text
+    for interpretation in (
+        "old ownership vocabulary", "frontier", "abstention",
+        "explore health", "submit between",
+    ):
+        assert interpretation not in text.lower()
 
 
 def test_read_history_rejects_records_without_current_candidate_facts(tmp_path):

@@ -135,6 +135,39 @@ def test_link_updates_best_objective_direction(tmp_path: Path):
     assert updated.experiment_refs == ("r0c0",)  # dedup on repeated id
 
 
+def test_memory_service_builds_fresh_context_without_history(tmp_path: Path):
+    svc = MemoryService(tmp_path, metrics_schema=METRICS)
+
+    text = svc.build_fresh_inquiry_context(
+        goal="fast", editable=["src/**"], frozen=["tests/**"],
+        base_sha="abc", gate_block="- physics: pass", hints=["keep order"],
+    )
+
+    assert "keep order" in text
+    assert "dashboard" not in text.lower()
+    assert "frontier" not in text.lower()
+
+
+def test_memory_service_builds_thin_history_entry_pack(tmp_path: Path):
+    svc = MemoryService(tmp_path, metrics_schema=METRICS)
+    _write_history(
+        tmp_path,
+        _round(0, _cand(
+            0, fid="F-001", proposal="old proposal narrative",
+            paths=("src/a.cc",), objective=95.0,
+        )),
+    )
+
+    text = svc.build_history_entry_pack(current_round=1)
+
+    assert "r0c0" in text
+    assert "F-001" in text
+    assert "src/a.cc" in text
+    assert "search_experiments" in text
+    assert "old proposal narrative" not in text
+    assert "frontier" not in text.lower()
+
+
 def test_startup_pack_has_no_notebook_or_annotation_language(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
     pack = svc.build_startup_pack(

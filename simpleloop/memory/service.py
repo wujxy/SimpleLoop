@@ -14,7 +14,11 @@ from pathlib import Path
 
 from ..explore import ExploreReport, analyze_explore_health
 from ..harness.memory import read_history, resolve_episode
-from .context import build_startup_pack, build_generation_context
+from .context import (
+    build_fresh_inquiry_context,
+    build_history_entry_pack,
+    build_startup_pack,
+)
 from .experiment_index import (
     Experiment,
     build_experiments,
@@ -150,7 +154,7 @@ class MemoryService:
             explore=explore,
         )
 
-    def build_generation_context(
+    def build_fresh_inquiry_context(
         self,
         *,
         goal: str,
@@ -158,12 +162,23 @@ class MemoryService:
         frozen: list[str],
         base_sha: str,
         gate_block: str,
+        hints: list[str] | None = None,
     ) -> str:
-        """History-free context for the Generator (partner design)."""
-        return build_generation_context(
+        return build_fresh_inquiry_context(
             goal=goal, editable=editable, frozen=frozen,
-            base_sha=base_sha, gate_block=gate_block,
+            base_sha=base_sha, gate_block=gate_block, hints=hints,
         )
+
+    def build_history_entry_pack(self, *, current_round: int) -> str:
+        experiments = [
+            experiment for experiment in self.load_experiments()
+            if experiment.round < current_round
+        ]
+        return build_history_entry_pack(
+            experiments=experiments,
+            tool_cheatsheet=MEMORY_TOOL_CHEATSHEET,
+        )
+
 
     # --- Write path: target resolution & experiment linking ---------------
 

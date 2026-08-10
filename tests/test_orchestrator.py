@@ -587,10 +587,10 @@ class TestGeneratorRegenerate:
 
 # --- history-free context builder ------------------------------------------
 
-class TestGenerationContext:
+class TestFreshInquiryContext:
     def test_context_contains_only_objective_and_gates(self):
-        from simpleloop.memory.context import build_generation_context
-        ctx = build_generation_context(
+        from simpleloop.memory.context import build_fresh_inquiry_context
+        ctx = build_fresh_inquiry_context(
             goal="make it faster", editable=["src/**"], frozen=["tests/**"],
             base_sha="abc123", gate_block="- gate: pass",
         )
@@ -606,16 +606,16 @@ class TestGenerationContext:
 
     def test_service_facade_delegates_to_context_builder(
             self, tmp_path, monkeypatch):
-        from simpleloop.memory.context import build_generation_context
+        from simpleloop.memory.context import build_fresh_inquiry_context
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         svc = MemoryService(
             run_dir=run_dir, metrics_schema=_METRICS_SCHEMA)
-        expected = build_generation_context(
+        expected = build_fresh_inquiry_context(
             goal="g", editable=["a"], frozen=["b"],
             base_sha="s", gate_block="gb",
         )
-        actual = svc.build_generation_context(
+        actual = svc.build_fresh_inquiry_context(
             goal="g", editable=["a"], frozen=["b"],
             base_sha="s", gate_block="gb",
         )

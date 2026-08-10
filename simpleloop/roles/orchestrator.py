@@ -192,10 +192,11 @@ class ProposerOrchestrator:
             flush=True,
         )
 
-        # --- History-free context for the Generator ---
-        gen_context = memory_service.build_generation_context(
+        # --- Current-world context; no prior search history ---
+        gen_context = memory_service.build_fresh_inquiry_context(
             goal=goal, editable=editable, frozen=frozen,
             base_sha=base_sha, gate_block=gate_block,
+            hints=hints,
         )
 
         # --- Build lane states ---
