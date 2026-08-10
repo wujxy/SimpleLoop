@@ -17,7 +17,7 @@ with Executor and evaluator behavior.
 
 The MVP includes:
 
-- one standalone CLI command, `simpleloop propose`;
+- one repository-local script, `scripts/proposer_harness.py`;
 - the complete existing `ProposerOrchestrator` pipeline;
 - fresh-history and existing-run-history modes;
 - an isolated read-only source snapshot at one Git revision;
@@ -37,7 +37,7 @@ model sampling randomness.
 Fresh-history mode:
 
 ```bash
-simpleloop propose \
+python scripts/proposer_harness.py \
   --config examples/omilrec-v100-opt/task.yaml \
   --output-dir proposer-tests/test-001
 ```
@@ -45,7 +45,7 @@ simpleloop propose \
 Existing-run-history mode:
 
 ```bash
-simpleloop propose \
+python scripts/proposer_harness.py \
   --config examples/omilrec-v100-opt/task.yaml \
   --from-run runs/omilrec-v100-generator-proposer-008 \
   --output-dir proposer-tests/test-002
@@ -54,7 +54,7 @@ simpleloop propose \
 Reproducible SimpleLoop scheduling:
 
 ```bash
-simpleloop propose \
+python scripts/proposer_harness.py \
   --config examples/omilrec-v100-opt/task.yaml \
   --output-dir proposer-tests/test-003 \
   --seed 42
@@ -81,7 +81,7 @@ The implementation is a thin adapter around the existing
 `ProposerOrchestrator.run()` interface:
 
 ```text
-CLI
+scripts/proposer_harness.py
   -> standalone proposer runner
       -> load task config
       -> resolve history source and base SHA
@@ -103,18 +103,19 @@ standalone command's boundary.
 
 ## Components
 
-### CLI registration
+### Script entry point
 
-`simpleloop/cli.py` registers the `propose` subcommand, parses its arguments,
-calls the standalone runner, prints the proposal count and artifact paths, and
-maps expected setup/model/proposer errors to a non-zero exit.
+`scripts/proposer_harness.py` parses arguments, runs the harness, prints the
+proposal count and artifact paths, and maps expected setup/model/proposer
+errors to a non-zero exit. `simpleloop/cli.py` does not register or import this
+testing entry point.
 
 ### Standalone runner
 
-A focused module, `simpleloop/proposer_harness.py`, owns input resolution,
-runtime and workspace setup, exact invocation of `ProposerOrchestrator`,
-artifact serialization, and cleanup. It exposes a Python function so tests and
-future comparison tools do not need to invoke the CLI.
+The same focused script owns input resolution, runtime and workspace setup,
+exact invocation of `ProposerOrchestrator`, artifact serialization, and
+cleanup. It exposes a Python function so tests and future repository-local
+comparison tools do not need to spawn a subprocess.
 
 The function returns a small summary containing the result path, report path,
 proposal count, abstention state, and base SHA.
@@ -198,7 +199,7 @@ The output directory may also contain the isolated local repository used by
 ## Failure Handling
 
 Setup errors fail before model execution where possible. Model, proposer,
-runtime, history, or serialization failures produce a non-zero CLI exit.
+runtime, history, or serialization failures produce a non-zero script exit.
 
 Once the output directory is available, a failed attempt writes a minimal
 `result.json` with `status: "failed"`, the resolved input available at that
@@ -231,7 +232,7 @@ process-global randomness for callers. Remote model output may still vary.
 Tests use fake model/runtime/orchestrator boundaries and temporary Git
 repositories. They verify:
 
-- `propose` does not construct or validate an Executor;
+- the script does not construct or validate an Executor;
 - the runner calls the complete `ProposerOrchestrator` with the same effective
   arguments as the normal loop;
 - fresh mode provides empty memory and resolves the configured baseline;
@@ -249,8 +250,9 @@ No test invokes a real model, Apptainer image, Executor, benchmark, or Gate.
 
 ## Compatibility and Minimality
 
-Normal `simpleloop run` behavior and the `ProposerOrchestrator` public result
-type remain unchanged. The feature adds one CLI branch, one focused runner
-module, and targeted tests. It deliberately avoids a broader Proposer service
+Normal `simpleloop` CLI behavior and the `ProposerOrchestrator` public result
+type remain unchanged. The feature adds one repository-local script and
+targeted tests, with no harness code or command registration in the
+`simpleloop` package. It deliberately avoids a broader Proposer service
 refactor until the standalone harness provides evidence that such a refactor
 is necessary.
