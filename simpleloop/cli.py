@@ -44,24 +44,6 @@ def main(argv: list[str] | None = None) -> None:
              "round's sha. Baseline evaluation is re-run for comparison.",
     )
 
-    propose = sub.add_parser(
-        "propose",
-        help="Run the complete Proposer without Executor or evaluation.",
-    )
-    propose.add_argument("--config", required=True, help="Task config (YAML/JSON).")
-    propose.add_argument(
-        "--output-dir", required=True,
-        help="Directory for the isolated source snapshot and review artifacts.",
-    )
-    propose.add_argument(
-        "--from-run",
-        help="Read Cognitive history and memory from an existing run directory.",
-    )
-    propose.add_argument(
-        "--seed", type=int,
-        help="Seed Python-side Generator lens scheduling.",
-    )
-
     validate = sub.add_parser("validate", help="Validate a config without running.")
     validate.add_argument("--config", required=True, help="Task config (YAML/JSON).")
 
@@ -150,38 +132,6 @@ def main(argv: list[str] | None = None) -> None:
     memory_show.add_argument("--run-dir")
 
     args = parser.parse_args(argv)
-
-    if args.command == "propose":
-        from . import proposer_harness
-        from .harness.workspace import WorkspaceError
-        from .roles import model as model_mod
-        from .roles import proposer as proposer_mod
-
-        try:
-            summary = proposer_harness.run_proposer(
-                args.config,
-                args.output_dir,
-                from_run=args.from_run,
-                seed=args.seed,
-            )
-        except (
-            config_mod.ConfigError,
-            RuntimePreflightError,
-            model_mod.ModelError,
-            proposer_mod.ProposerError,
-            WorkspaceError,
-            proposer_harness.ProposerHarnessError,
-            ValueError,
-        ) as exc:
-            print(f"Proposer error: {exc}", file=sys.stderr)
-            raise SystemExit(1)
-        print(
-            f"Generated {summary.proposal_count} proposal(s) from "
-            f"{summary.base_sha}."
-        )
-        print(f"  result: {summary.result_path}")
-        print(f"  report: {summary.report_path}")
-        return
 
     if args.command == "init":
         try:

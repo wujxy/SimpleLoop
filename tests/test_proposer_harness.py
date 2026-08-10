@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from simpleloop import proposer_harness as harness
+from scripts import proposer_harness as harness
 from simpleloop.memory.models import (
     ExistingFindingTarget,
     NewFindingTarget,

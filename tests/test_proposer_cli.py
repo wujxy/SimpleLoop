@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from simpleloop import cli as cli_mod
-from simpleloop import proposer_harness as harness
+from scripts import proposer_harness as harness
 
 
 def _summary(tmp_path: Path) -> harness.ProposerHarnessSummary:
@@ -32,8 +32,7 @@ def test_cli_propose_forwards_arguments(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(harness, "run_proposer", fake_run)
 
-    cli_mod.main([
-        "propose",
+    harness.main([
         "--config", "task.yaml",
         "--output-dir", "trial",
         "--from-run", "old-run",
@@ -59,11 +58,18 @@ def test_cli_propose_reports_harness_error(monkeypatch, capsys):
     monkeypatch.setattr(harness, "run_proposer", fail)
 
     with pytest.raises(SystemExit) as raised:
-        cli_mod.main([
-            "propose",
+        harness.main([
             "--config", "task.yaml",
             "--output-dir", "trial",
         ])
 
     assert raised.value.code == 1
     assert "Proposer error: bad history" in capsys.readouterr().err
+
+
+def test_simpleloop_cli_does_not_register_propose(capsys):
+    with pytest.raises(SystemExit) as raised:
+        cli_mod.main(["propose"])
+
+    assert raised.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

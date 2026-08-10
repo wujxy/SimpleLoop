@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop import proposer_harness as harness
+from scripts import proposer_harness as harness
 from simpleloop.memory.models import NewFindingTarget, ResearchProposal
 from simpleloop.roles.proposer import ProposerResult
 

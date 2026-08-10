@@ -1,26 +1,29 @@
 """Standalone execution and review artifacts for the complete Proposer."""
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config as config_mod
-from .container.runtime import ApptainerRuntime
-from .harness import memory
-from .harness import views
-from .harness.workspace import Workspace
-from .memory import MemoryService
-from .memory.models import (
+from simpleloop import config as config_mod
+from simpleloop.container.runtime import ApptainerRuntime, RuntimePreflightError
+from simpleloop.harness import memory
+from simpleloop.harness import views
+from simpleloop.harness.workspace import Workspace, WorkspaceError
+from simpleloop.memory import MemoryService
+from simpleloop.memory.models import (
     ExistingFindingTarget,
     NewFindingTarget,
     ResearchProposal,
 )
-from .roles import model as model_mod
-from .roles.orchestrator import ProposerOrchestrator
+from simpleloop.roles import model as model_mod
+from simpleloop.roles import proposer as proposer_mod
+from simpleloop.roles.orchestrator import ProposerOrchestrator
 
 
 class ProposerHarnessError(RuntimeError):
@@ -343,3 +346,45 @@ def run_proposer(
         abstained=bool(proposal_result.abstained),
         base_sha=input_record["base_sha"],
     )
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the complete SimpleLoop Proposer without Executor or "
+            "evaluation."
+        )
+    )
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--from-run")
+    parser.add_argument("--seed", type=int)
+    args = parser.parse_args(argv)
+    try:
+        summary = run_proposer(
+            args.config,
+            args.output_dir,
+            from_run=args.from_run,
+            seed=args.seed,
+        )
+    except (
+        config_mod.ConfigError,
+        RuntimePreflightError,
+        model_mod.ModelError,
+        proposer_mod.ProposerError,
+        WorkspaceError,
+        ProposerHarnessError,
+        ValueError,
+    ) as exc:
+        print(f"Proposer error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    print(
+        f"Generated {summary.proposal_count} proposal(s) from "
+        f"{summary.base_sha}."
+    )
+    print(f"  result: {summary.result_path}")
+    print(f"  report: {summary.report_path}")
+
+
+if __name__ == "__main__":
+    main()
