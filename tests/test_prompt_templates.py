@@ -49,6 +49,7 @@ def test_proposer_identity_is_scientific_not_a_phase_checklist():
     lowered = text.lower()
     for concept in ("working model", "explanation", "prediction", "counterfactual"):
         assert concept in lowered
+    assert text.rstrip().endswith("prose outside that JSON object.")
     for legacy in (
         "cognitive element", "sieve", "enrich", "generator partner",
         "feedback_generator", "eventcontext", "omilrec",

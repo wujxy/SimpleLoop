@@ -4,7 +4,7 @@ Moved verbatim from ``memory/signals.py`` (the text utilities and the
 per-experiment classification rules) and extended with ``classify_experiments``,
 a single pass that returns one :class:`ObjectiveClassification` per experiment —
 consumed by the monitor, the families aggregator, and the legacy
-``compute_deliberation_signals`` compat wrapper.
+Explore health analysis.
 
 Classification rules (unchanged from the original):
 

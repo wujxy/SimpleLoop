@@ -236,6 +236,7 @@ def _commit_model_action(*, blocking_unknown=None, version=2):
 
 def test_model_guard_uses_blocking_unknown_not_important_unknown(tmp_path: Path):
     session = _session_with_model()
+
     session.inquiry.phase = InquiryPhase.MODEL
 
     assert _validate_scientist_guard(
@@ -274,6 +275,7 @@ def _hypothesis_action(index):
 def test_fresh_cycle_preserves_one_session_and_artifact_lineage():
     session = ScientistSessionState.fresh()
     identity = id(session)
+    session.runtime.session_evidence.add("source:src/a.cc")
     actions = [
         _parse_scientist_action(json.dumps({
             "action": "commit_understanding", "problem": "slow",
@@ -388,6 +390,7 @@ class _LaneMemory:
 
 def _fresh_lane_actions():
     actions = [
+        {"action": "run_research_command", "command": "sed -n 1p src/a.cc", "cwd": "source", "evidence_paths": ["src/a.cc"]},
         {"action": "commit_understanding", "problem": "slow",
          "target_outcome": "lower cost", "boundary": "whole flow",
          "current_account_of_the_whole": "inputs trigger repeated work",
@@ -434,6 +437,7 @@ def _fresh_lane_actions():
          "coverage_rationale": "four mechanism families",
          "portfolio_sufficiency_justification": None,
          "unused_generative_ops": []},
+        {"action": "inspect_episode", "ref": "r0c0"},
         {"action": "select_for_deepen", "selected": [{
             "hypothesis_id": "H1", "evidence_refs": ["experiment:r0c0"],
             "rationale": "history tests the critical premise"}]},
@@ -448,12 +452,22 @@ def test_run_lane_switches_prompt_tools_and_history_together(tmp_path, monkeypat
         model=model, runtime=object(), timeout_seconds=30, max_steps=20,
         command_timeout_seconds=5, command_output_cap_chars=1000,
     )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.cc").write_text("target")
     tool_calls = []
 
     class Tools:
         def __init__(self, kwargs):
+            self.calls = 0
             self.history_enabled = kwargs["history_enabled"]
             self.memory = kwargs["memory_service"]
+
+        def execute(self, action, *, deadline):
+            self.calls += 1
+            return ({"ok": True, "result": {"experiment_id": "r0c0"}}
+                    if action["action"] == "inspect_episode" else
+                    {"ok": True, "returncode": 0, "output": "target found",
+                     "source_evidence": [{"path": "src/a.cc", "preview": "target", "truncated": False}]})
 
     def make_tools(**kwargs):
         tool_calls.append(kwargs)
@@ -481,24 +495,28 @@ def test_run_lane_switches_prompt_tools_and_history_together(tmp_path, monkeypat
         message["content"] == "THIN FACTUAL HISTORY"
         for message in model.calls[-1]["messages"]
     ) == 1
-    assert result.trace["history_injected_at_step"] == 12
+    assert result.trace["history_injected_at_step"] == 13
     assert result.trace["phase"] == "deepen"
     assert {
         "contexts", "phase_transitions", "actions", "understanding",
         "working_model", "model_revisions", "explanations", "lever_map",
         "fresh_hypotheses", "narrow_decisions", "selected_hypotheses",
         "deep_evidence", "proposals", "reopen_counts", "fresh_reframes",
-        "usage_by_phase", "tool_calls_by_phase", "steps_to_working_model",
+        "usage_by_phase", "wall_time_by_phase", "tool_calls_by_phase", "steps_to_working_model",
         "steps_to_portfolio", "steps_to_outcome", "outcome",
     } <= result.trace.keys()
     assert result.trace["model_revisions"][0]["version"] == 1
-    assert result.trace["steps_to_working_model"] == 3
-    assert result.trace["steps_to_portfolio"] == 12
-    assert result.trace["steps_to_outcome"] == 13
+    assert result.trace["steps_to_working_model"] == 4
+    assert result.trace["steps_to_portfolio"] == 13
+    assert result.trace["steps_to_outcome"] == 15
     assert result.trace["narrow_decisions"] == [{
-        "step": 13, "selected": ["H1"],
+        "step": 15, "selected": ["H1"],
     }]
     assert result.trace["outcome"] == "research_incomplete"
+    assert result.trace["wall_time_by_phase"]["understand"] > 0
+    tool_action = result.trace["actions"][0]
+    assert tool_action["observation_summary"] == "result=ok exit_code=0 output_chars=12"
+    assert tool_action["evidence_refs"] == ["source:src/a.cc"]
     json.dumps(result.trace)
 
 
@@ -567,10 +585,46 @@ def test_breadth_is_a_target_with_justification_not_a_minimum(tmp_path: Path):
     ) is None
 
 
+def test_source_evidence_must_be_declared_read_and_observed(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.cc").write_text("target")
+    session = ScientistSessionState.fresh()
+    action = _parse_scientist_action(json.dumps({
+        "action": "run_research_command", "command": "true",
+        "cwd": "source", "evidence_paths": ["src/a.cc"],
+    }))
+    assert _validate_scientist_guard(
+        session, action, tmp_path, select_quota=2,
+    ) is None
+
+    escaped = _parse_scientist_action(json.dumps({
+        "action": "run_research_command", "command": "true",
+        "cwd": "source", "evidence_paths": ["../outside"],
+    }))
+    assert _validate_scientist_guard(
+        session, escaped, tmp_path, select_quota=2,
+    ) == "invalid_source_evidence_path"
+
+    session.inquiry.phase = InquiryPhase.MODEL
+    model_action = _parse_scientist_action(json.dumps({
+        "action": "propose_working_model", "working_model": {
+            "representation": "cost model",
+            "explanatory_structure": "frequency times unit cost",
+            "claims": [{"id": "M1", "claim": "calls repeat",
+                        "evidence_refs": ["source:src/a.cc"]}],
+            "important_unknowns": [],
+        },
+    }))
+    assert _validate_scientist_guard(
+        session, model_action, tmp_path, select_quota=2,
+    ) == "ungrounded_evidence"
+
+
 def test_phase_guard_precedes_proposal_shape_checks(tmp_path: Path):
     session = _session_with_model()
     session.inquiry.phase = InquiryPhase.NARROW
     session.inquiry.set_history_visible(True, step=8)
+    session.runtime.session_evidence.add("experiment:r0c0")
 
     assert _validate_scientist_guard(
         session, {"action": "submit_proposals"}, tmp_path, select_quota=2,
@@ -613,6 +667,7 @@ def _history_session(phase=InquiryPhase.NARROW):
     session = _session_with_model()
     session.inquiry.phase = phase
     session.inquiry.set_history_visible(True, step=8)
+    session.runtime.session_evidence.add("experiment:r0c0")
     session.inquiry.explanations = [Explanation(
         id="E1", phenomenon="gap", account="repetition",
         model_basis=("M1",), expected_if_true=("repeat",),
@@ -651,15 +706,25 @@ def test_select_for_deepen_transitions_and_proposal_requires_deep_lineage(tmp_pa
         }],
     }
     proposal_action = _parse_scientist_action(json.dumps(raw))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.cc").write_text("// source")
+    session.runtime.session_evidence.add("source:src/a.cc")
     assert _validate_scientist_guard(
         session, proposal_action, tmp_path, select_quota=2,
     ) == "proposal_requires_deep_evidence"
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "a.cc").write_text("// source")
-    session.inquiry.deep_evidence_refs.add("__source_examined__")
+    session.inquiry.deep_evidence_refs.add("source:src/a.cc")
     assert _validate_scientist_guard(
         session, proposal_action, tmp_path, select_quota=2,
     ) is None
+    mixed = dict(raw)
+    mixed["proposals"] = [dict(raw["proposals"][0])]
+    mixed["proposals"][0]["evidence_refs"] = [
+        "source:src/a.cc", "experiment:fabricated",
+    ]
+    assert _validate_scientist_guard(
+        session, _parse_scientist_action(json.dumps(mixed)), tmp_path,
+        select_quota=2,
+    ) == "ungrounded_evidence"
     assert proposal_action["proposals"][0].hypothesis_id == "H1"
 
 
@@ -690,6 +755,16 @@ def test_rollbacks_preserve_history_and_clear_only_downstream_artifacts():
     assert session.inquiry.history_visible is True
     assert session.inquiry.working_model is None
     assert session.inquiry.explanations == []
+
+
+def test_trace_preserves_archived_reframe_artifacts():
+    session = _history_session(InquiryPhase.NARROW)
+    session.start_fresh_context()
+    trace = ProposerAgent._scientist_trace(session, outcome="research_incomplete")
+    archived = trace["contexts"][0]
+    assert archived["working_model"]["claims"][0]["id"] == "M1"
+    assert archived["explanations"][0]["id"] == "E1"
+    assert archived["fresh_hypotheses"][0]["id"] == "H1"
 
 
 def test_fresh_reframe_archives_context_and_resets_all_epistemic_state():

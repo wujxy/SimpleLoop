@@ -86,24 +86,17 @@ class ApptainerRuntime:
     ) -> list[str]:
         """Return one shell-free Apptainer argv for a payload command."""
         argv = [self.executable, "exec", "--cleanenv", "--no-eval"]
-        # --userns (default) avoids needing setuid on shared HPC nodes; set
-        # SIMPLELOOP_APPTAINER_USERNS=0 to fall back to setuid.
         if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
             argv.append("--userns")
         for bind in self.binds:
             if bind != self.run_dir:
                 argv.extend(["--bind", f"{bind}:{bind}"])
         argv.extend(["--bind", f"{self.run_dir}:{self.run_dir}:rw"])
-        argv.extend(
-            [
-                "--cwd",
-                str(Path(cwd).expanduser().resolve()),
-                str(self.image),
-            ]
-        )
+        argv.extend([
+            "--cwd", str(Path(cwd).expanduser().resolve()), str(self.image),
+        ])
         argv.extend(str(item) for item in payload)
         return argv
-
     def subprocess_env(
         self,
         overrides: Mapping[str, str] | None = None,
@@ -123,6 +116,7 @@ class ApptainerRuntime:
             env[f"APPTAINERENV_{key}"] = str(value)
         return env
 
+
     def research_exec_argv(
         self,
         payload: Sequence[str],
@@ -137,14 +131,8 @@ class ApptainerRuntime:
         if cwd not in {"source", "scratch"}:
             raise ValueError("research cwd must be 'source' or 'scratch'")
         argv = [
-            self.executable,
-            "exec",
-            "--cleanenv",
-            "--no-eval",
-            "--containall",
-            "--net",
-            "--network",
-            "none",
+            self.executable, "exec", "--cleanenv", "--no-eval",
+            "--containall", "--net", "--network", "none",
         ]
         if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
             argv.append("--userns")
@@ -153,14 +141,17 @@ class ApptainerRuntime:
             history_file = evidence / "history.jsonl"
             rounds = evidence / "rounds"
             if history_file.is_file():
-                argv.extend([
-                    "--bind", f"{history_file}:/history.jsonl:ro",
-                ])
+                argv.extend(["--bind", f"{history_file}:/history.jsonl:ro"])
             if rounds.is_dir():
                 argv.extend(["--bind", f"{rounds}:/rounds:ro"])
+        argv.extend(["--bind", f"{Path(source).resolve()}:/source:ro"])
+        if history is None:
+            git_mask = Path(scratch).resolve() / ".simpleloop-git-mask"
+            git_mask.write_text("", encoding="utf-8")
+            argv.extend(["--bind", f"{git_mask}:/source/.git:ro"])
+        else:
+            argv.extend(["--bind", f"{Path(repo).resolve()}:/repo:ro"])
         argv.extend([
-            "--bind", f"{Path(source).resolve()}:/source:ro",
-            "--bind", f"{Path(repo).resolve()}:/repo:ro",
             "--bind", f"{Path(scratch).resolve()}:/scratch:rw",
             "--cwd", f"/{cwd}", str(self.image),
         ])

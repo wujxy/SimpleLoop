@@ -186,6 +186,19 @@ def test_research_command_uses_process_group_and_returns_observation(
     }
 
 
+def test_fresh_research_command_has_no_git_metadata_view(tmp_path, monkeypatch):
+    runner, runtime = _runner(tmp_path)
+    runner.history_dir = None
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.subprocess.Popen",
+        lambda argv, **kwargs: _Process(returncode=0),
+    )
+    runner.run("git log --all", cwd="source")
+    payload, paths = runtime.argv_call
+    assert payload == ["bash", "-lc", "git log --all"]
+    assert paths["history"] is None
+
+
 def test_research_command_uses_the_snapshot_worktree_head(tmp_path):
     repo = tmp_path / "repo"
     source = tmp_path / "source"
@@ -405,6 +418,19 @@ def test_research_tools_search_experiments_default_buckets(tmp_path):
     ]
 
 
+def test_research_tool_itself_reads_declared_source_evidence(tmp_path, monkeypatch):
+    tools = _tools(tmp_path, history_enabled=False)
+    (tools.command_runner.source / "a.cc").write_text("observed source")
+    tools.command_runner.run = lambda *args, **kwargs: {"ok": True}
+    result = tools.execute({
+        "action": "run_research_command", "command": "true",
+        "cwd": "source", "evidence_paths": ["a.cc"],
+    }, deadline=time.monotonic() + 10)
+    assert result["source_evidence"] == [{
+        "path": "a.cc", "preview": "observed source", "truncated": False,
+    }]
+
+
 def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
     tools = _tools(tmp_path)
     calls = []
@@ -417,6 +443,7 @@ def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
 
     result = tools.execute({
         "action": "run_research_command", "command": "rg cache",
+        "evidence_paths": [],
         "cwd": "source",
     }, deadline=100)
 

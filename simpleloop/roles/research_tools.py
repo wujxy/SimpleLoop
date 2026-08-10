@@ -34,10 +34,10 @@ RESEARCH_TOOL_SPECS = (
         action="run_research_command",
         schema=(
             '{"action":"run_research_command","command":"...",'
-            '"cwd":"source|scratch"}'
+            '"cwd":"source|scratch","evidence_paths":["relative/path"]}'
         ),
         description=(
-            "Inspect the accepted source, Git state, or run evidence with a "
+            "Inspect the accepted source or, after history injection, Git/run evidence with a "
             "bounded shell command. Source is read-only; scratch is writable."
         ),
     ),
@@ -155,16 +155,14 @@ class ResearchCommandRunner:
             raise ValueError("research command must be non-empty")
         if cwd not in {"source", "scratch"}:
             raise ValueError("research cwd must be 'source' or 'scratch'")
-        git_dir = self._worktree_git_dir()
-        payload = [
-            "env",
-            f"GIT_DIR={git_dir}",
-            "GIT_COMMON_DIR=/repo/.git",
-            "GIT_WORK_TREE=/source",
-            "bash",
-            "-lc",
-            command,
-        ]
+        payload = ["bash", "-lc", command]
+        if self.history_dir is not None:
+            git_dir = self._worktree_git_dir()
+            payload = [
+                "env", f"GIT_DIR={git_dir}",
+                "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/source",
+                *payload,
+            ]
         argv = self.runtime.research_exec_argv(
             payload,
             source=self.source,
@@ -327,6 +325,27 @@ class ResearchTools:
             output_cap_chars=command_output_cap_chars,
         )
 
+    def _read_source_evidence(self, paths) -> list[dict]:
+        root = self.command_runner.source.resolve()
+        evidence = []
+        for relative in paths:
+            try:
+                path = (root / relative).resolve()
+                path.relative_to(root)
+                if relative == ".git" or relative.startswith(".git/"):
+                    continue
+                limit = self.command_runner.output_cap_chars
+                with path.open(encoding="utf-8", errors="replace") as stream:
+                    text = stream.read(limit + 1)
+            except (OSError, ValueError):
+                continue
+            evidence.append({
+                "path": relative, "preview": text[:limit],
+                "truncated": len(text) > limit,
+            })
+        return evidence
+
+
     def execute(self, action: dict, *, deadline: float) -> dict:
         name = action["action"]
         if name in MEMORY_TOOL_ACTIONS and not self.history_enabled:
@@ -340,13 +359,18 @@ class ResearchTools:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return {"ok": False, "error": "proposer deadline exceeded"}
-                return self.command_runner.run(
+                observation = self.command_runner.run(
                     action["command"],
                     cwd=action["cwd"],
                     timeout_seconds=min(
                         self.command_timeout_seconds, remaining,
                     ),
                 )
+                if observation.get("ok"):
+                    observation["source_evidence"] = self._read_source_evidence(
+                        action["evidence_paths"]
+                    )
+                return observation
             if name == "inspect_episode":
                 return {
                     "ok": True,

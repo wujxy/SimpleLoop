@@ -31,20 +31,3 @@ def render_generative_basis(ops: tuple[str, ...]) -> str:
     return "## Assigned Generative Basis\n\n" + "\n\n".join(
         g_definition(op) for op in ops
     )
-
-
-def replace_basis(semantic: str, ops: tuple[str, ...]) -> str:
-    """Replace one markdown generative-basis section with an assigned subset."""
-    lines = semantic.splitlines()
-    start = next((
-        index for index, line in enumerate(lines)
-        if line.startswith("## The Generative Basis")
-    ), None)
-    if start is None:
-        return semantic
-    end = next((
-        index for index in range(start + 1, len(lines))
-        if lines[index].startswith("## ")
-    ), len(lines))
-    replacement = render_generative_basis(ops).splitlines()
-    return "\n".join(lines[:start] + replacement + lines[end:])

@@ -3,7 +3,6 @@ from pathlib import Path
 from simpleloop.roles.generative import (
     GENERATIVE_OPS,
     g_definition,
-    replace_basis,
     render_generative_basis,
 )
 from simpleloop.roles.inquiry import (
@@ -28,13 +27,6 @@ def test_generative_basis_exposes_exact_g1_to_g9():
     assert "G2" in render_generative_basis(("G2",))
     assert "G1" not in render_generative_basis(("G2",))
 
-
-def test_replace_basis_keeps_only_assigned_subset():
-    semantic = "before\n## The Generative Basis (lenses)\nold\n## After\nafter"
-    replaced = replace_basis(semantic, ("G3", "G8"))
-    assert "G3" in replaced and "G8" in replaced
-    assert "G1 —" not in replaced
-    assert "## After" in replaced
 
 
 def _explore_session(*, with_lever):

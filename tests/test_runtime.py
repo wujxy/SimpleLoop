@@ -337,6 +337,8 @@ def test_research_argv_without_history_has_no_history_bind(tmp_path: Path):
 
     assert not any("/history.jsonl" in arg for arg in argv)
     assert not any("/rounds" in arg for arg in argv)
+    assert not any(":/repo:ro" in arg for arg in argv)
+    assert any(arg.endswith(":/source/.git:ro") for arg in argv)
 
 
 

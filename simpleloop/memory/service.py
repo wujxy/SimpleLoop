@@ -12,12 +12,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from ..explore import ExploreReport, analyze_explore_health
 from ..harness.memory import read_history, resolve_episode
 from .context import (
     build_fresh_inquiry_context,
     build_history_entry_pack,
-    build_startup_pack,
 )
 from .experiment_index import (
     Experiment,
@@ -87,72 +85,6 @@ class MemoryService:
             editable_prefixes=editable_prefixes,
         )
 
-    def analyze_explore(self, *, current_round: int) -> ExploreReport:
-        """Compute the search-health report from the current Ledger + Finding
-        archive. This is the single source of truth the Proposer consults —
-        compute it once per wakeup and reuse for the startup pack, the
-        per-step state header, the nudges, and the challenge guard."""
-        objective = (self.metrics_schema or {}).get("objective") or {}
-        return analyze_explore_health(
-            self.load_findings(),
-            self.load_experiments(),
-            current_round=current_round,
-            objective_key=objective.get("key"),
-            lower_is_better=bool(objective.get("lower_is_better")),
-        )
-
-    def build_startup_pack(
-        self,
-        *,
-        goal: str,
-        editable: list[str],
-        frozen: list[str],
-        base_sha: str,
-        gate_block: str,
-        candidates_per_round: int,
-        hints: list[str] | None,
-        current_round: int,
-        recent_rounds: int = 2,
-        explore: ExploreReport | None = None,
-    ) -> str:
-        history = read_history(self.history_path)
-        experiments = build_experiments(history)
-        findings = self.load_findings()
-        frontier = compute_frontier(
-            findings,
-            experiments,
-            current_round=current_round,
-            dormancy_rounds=self.dormancy_rounds,
-            editable_prefixes=tuple(editable or ()),
-        )
-        abstentions = [
-            {
-                "round": record.get("round", 0),
-                "reason": (record.get("abstention") or {}).get("reason"),
-                "blocking_unknown": (record.get("abstention") or {}).get(
-                    "blocking_unknown"
-                ),
-            }
-            for record in history
-            if isinstance(record, dict) and record.get("abstention")
-        ][-recent_rounds:]
-        if explore is None:
-            explore = self.analyze_explore(current_round=current_round)
-        return build_startup_pack(
-            goal=goal,
-            editable=editable,
-            frozen=frozen,
-            base_sha=base_sha,
-            gate_block=gate_block,
-            candidates_per_round=candidates_per_round,
-            hints=hints,
-            experiments=experiments,
-            frontier=frontier,
-            recent_rounds=recent_rounds,
-            tool_cheatsheet=MEMORY_TOOL_CHEATSHEET,
-            recent_abstentions=abstentions,
-            explore=explore,
-        )
 
     def build_fresh_inquiry_context(
         self,

@@ -15,8 +15,6 @@ from tempfile import TemporaryDirectory
 from .model import ChatModel
 from .research_tools import ResearchTools
 from ..container.runtime import ApptainerRuntime
-from ..explore.models import ExploreReport
-from ..explore.render import render_explore_for_state_header
 
 
 class AgentError(RuntimeError):
@@ -34,9 +32,6 @@ class WorkingState:
     new_evidence: set[str] = field(default_factory=set)
     action_log: list[dict] = field(default_factory=list)
     protocol_repairs: int = 0
-    candidate_directions: str = ""
-    current_information_goal: str = ""
-    located: bool = False
     last_tool_fingerprint: str | None = None
 
 
@@ -49,11 +44,6 @@ _MAX_PROTOCOL_REPAIRS = 2
 
 def _bump(state: WorkingState, name: str) -> None:
     state.counts[name] = state.counts.get(name, 0) + 1
-
-
-def _truncate(text: str, limit: int) -> str:
-    text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _fingerprint(action: dict) -> str:
@@ -83,79 +73,65 @@ def _iter_experiment_hits(result) -> list:
     return []
 
 
-def _register_evidence(state: WorkingState, action: dict, observation: dict) -> None:
-    """Record the references a successful tool call made available to cite."""
+def _observation_evidence_refs(action: dict, observation: dict) -> set[str]:
+    """Return refs directly exposed by this successful tool observation."""
     if not observation.get("ok"):
-        return
+        return set()
     name = action["action"]
-    if name == "run_research_command":
-        state.session_evidence.add("__source_examined__")
-        state.new_evidence.add("__source_examined__")
-        return
     result = observation.get("result")
+    if name == "run_research_command":
+        return {
+            f"source:{item['path']}"
+            for item in observation.get("source_evidence", [])
+            if isinstance(item, dict) and item.get("path")
+        }
     if name == "inspect_episode":
-        eid = (result or {}).get("experiment_id")
-        if eid:
-            ref = f"experiment:{eid}"
-            state.session_evidence.add(ref)
-            state.new_evidence.add(ref)
-    elif name == "inspect_finding":
-        fid = (result or {}).get("id")
-        if fid:
-            ref = f"finding:{fid}"
-            state.session_evidence.add(ref)
-            state.new_evidence.add(ref)
-    elif name in ("search_findings", "list_findings"):
-        for item in result or []:
-            fid = item.get("id") if isinstance(item, dict) else None
-            if fid:
-                ref = f"finding:{fid}"
-                state.session_evidence.add(ref)
-                state.new_evidence.add(ref)
-    elif name == "search_experiments":
-        for exp in _iter_experiment_hits(result):
-            eid = exp.get("experiment_id") if isinstance(exp, dict) else None
-            if eid:
-                ref = f"experiment:{eid}"
-                state.session_evidence.add(ref)
-                state.new_evidence.add(ref)
+        experiment_id = (result or {}).get("experiment_id")
+        return {f"experiment:{experiment_id}"} if experiment_id else set()
+    if name == "inspect_finding":
+        finding_id = (result or {}).get("id")
+        return {f"finding:{finding_id}"} if finding_id else set()
+    if name in ("search_findings", "list_findings"):
+        return {
+            f"finding:{item['id']}" for item in (result or [])
+            if isinstance(item, dict) and item.get("id")
+        }
+    if name == "search_experiments":
+        return {
+            f"experiment:{item['experiment_id']}"
+            for item in _iter_experiment_hits(result)
+            if isinstance(item, dict) and item.get("experiment_id")
+        }
+    return set()
+
+
+def _register_evidence(state: WorkingState, action: dict, observation: dict) -> None:
+    """Record references directly exposed by one tool observation."""
+    refs = _observation_evidence_refs(action, observation)
+    state.session_evidence.update(refs)
+    state.new_evidence.update(refs)
 
 
 def _source_path_exists(relpath: str, source_root: Path) -> bool:
-    relpath = relpath.strip().lstrip("/")
-    candidates = [relpath]
-    if ":" in relpath:
-        candidates.append(relpath.rsplit(":", 1)[0])
-    for cand in candidates:
+    """Return true only for an existing path contained by the source tree."""
+    raw = relpath.strip()
+    if not raw or raw.startswith("/"):
+        return False
+    candidates = [raw]
+    if ":" in raw:
+        candidates.append(raw.rsplit(":", 1)[0])
+    root = source_root.resolve()
+    for candidate in candidates:
+        if candidate == ".git" or candidate.startswith(".git/"):
+            continue
         try:
-            if cand and (source_root / cand).exists():
+            path = (root / candidate).resolve()
+            path.relative_to(root)
+            if path.exists():
                 return True
-        except OSError:
+        except (OSError, ValueError):
             continue
     return False
-
-
-def _render_state_header(
-    state: WorkingState, explore: ExploreReport | None,
-) -> str:
-    """Compact position, injected so the agent keeps its goal in view."""
-    lines = ["Working state (your current position):"]
-    lines.append(
-        f"  source_reads={state.counts.get('source_read', 0)}  "
-        f"tool_calls={state.counts.get('tool', 0)}  "
-        f"located={'yes' if state.located else 'no'}"
-    )
-    if state.candidate_directions:
-        lines.append(
-            f"  hypothesis: {_truncate(state.candidate_directions, 160)}")
-    if state.current_information_goal:
-        lines.append(
-            f"  current_goal: {_truncate(state.current_information_goal, 120)}")
-    explore_block = render_explore_for_state_header(explore)
-    if explore_block:
-        lines.append(explore_block)
-    return "\n".join(lines)
-
 
 
 def _action_summary(action: dict) -> str:
