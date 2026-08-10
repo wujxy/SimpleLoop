@@ -43,8 +43,8 @@ _SELECT_PER_LANE = 2
 _MAX_LANE_WORKERS = 8
 
 
-def _sample_generative_ops() -> tuple[str, ...]:
-    return tuple(random.sample(GENERATIVE_OPS, _SCHEDULED_OP_COUNT))
+def _sample_generative_ops(rng: random.Random) -> tuple[str, ...]:
+    return tuple(rng.sample(GENERATIVE_OPS, _SCHEDULED_OP_COUNT))
 
 
 def _lane_quotas(candidates_per_round: int, select_per_lane: int) -> list[int]:
@@ -68,15 +68,16 @@ class ProposerOrchestrator:
         command_output_cap_chars: int,
         usage_observer=None,
     ):
-        self.proposer = ProposerAgent(
-            model=model,
-            runtime=runtime,
-            timeout_seconds=timeout_seconds,
-            max_steps=1,
-            command_timeout_seconds=command_timeout_seconds,
-            command_output_cap_chars=command_output_cap_chars,
-            usage_observer=usage_observer,
-        )
+        self._proposer_kwargs = {
+            "model": model, "runtime": runtime,
+            "timeout_seconds": timeout_seconds, "max_steps": 1,
+            "command_timeout_seconds": command_timeout_seconds,
+            "command_output_cap_chars": command_output_cap_chars,
+            "usage_observer": usage_observer,
+        }
+
+    def _new_proposer(self) -> ProposerAgent:
+        return ProposerAgent(**self._proposer_kwargs)
 
     def run(
         self,
@@ -95,11 +96,13 @@ class ProposerOrchestrator:
         prompt_dir: Path | None,
         hints: list[str] | None = None,
         scientist_steps: int = 364,
+        random_seed: int | None = None,
     ) -> ProposerResult:
         started = time.monotonic()
+        rng = random.Random(random_seed)
         quotas = _lane_quotas(candidates_per_round, _SELECT_PER_LANE)
         lanes = [
-            LaneState(index, _sample_generative_ops())
+            LaneState(index, _sample_generative_ops(rng))
             for index in range(len(quotas))
         ]
         mode = _Mode(len(lanes), scientist_steps)
@@ -127,7 +130,7 @@ class ProposerOrchestrator:
         )
         proposals = [
             proposal
-            for lane in lane_results if lane.outcome == "submit"
+            for lane in lane_results if lane.outcome == "proposals"
             for proposal in lane.proposals
         ]
         elapsed = time.monotonic() - started
@@ -192,7 +195,7 @@ class ProposerOrchestrator:
         scientist_steps: int,
         **shared,
     ) -> LaneResult:
-        result: ScientistResult = self.proposer.run_lane(
+        result: ScientistResult = self._new_proposer().run_lane(
             assigned_ops=lane.assigned_ops,
             select_quota=select_quota,
             scientist_steps=scientist_steps,
@@ -212,11 +215,11 @@ class ProposerOrchestrator:
     def _lane_trace(lanes: list[LaneResult]) -> dict:
         return {"lanes": [{
             "lane_id": lane.lane_id,
-            "assigned_ops": list(lane.assigned_ops),
+            "assigned_generative_ops": list(lane.assigned_ops),
             "outcome": lane.outcome,
             "reason": lane.reason,
             "n_proposals": len(lane.proposals),
-            "scientist": lane.trace,
+            **lane.trace,
         } for lane in lanes]}
 
     @staticmethod

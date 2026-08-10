@@ -10,6 +10,23 @@ from simpleloop.memory.models import (
     NewFindingTarget,
     ResearchProposal,
 )
+def _proposal(
+    *, instruction, research_target, evidence_refs=(),
+    affected_scope="src/default.cc",
+):
+    return ResearchProposal(
+        instruction=instruction,
+        research_target=research_target,
+        model_claim_refs=("M1",),
+        explanation_refs=("E1",),
+        hypothesis_id="H1",
+        evidence_refs=evidence_refs,
+        mechanism="remove repeated work",
+        prediction="work count falls while gates remain satisfied",
+        affected_scope=affected_scope,
+    )
+
+
 
 
 def _history_row(round_id: int, *, parent: str, selected: str | None) -> dict:
@@ -23,7 +40,7 @@ def _history_row(round_id: int, *, parent: str, selected: str | None) -> dict:
 
 
 def test_proposal_to_dict_preserves_new_target():
-    proposal = ResearchProposal(
+    proposal = _proposal(
         instruction="change the data layout",
         research_target=NewFindingTarget(
             question="Can SoA remove repeated gathers?",
@@ -31,7 +48,7 @@ def test_proposal_to_dict_preserves_new_target():
             code_regions=("src/fcn.cc",),
         ),
         evidence_refs=("source:src/fcn.cc:42",),
-        material_difference="moves ownership across the interface",
+        affected_scope="moves ownership across the interface",
     )
 
     assert harness._proposal_to_dict(proposal) == {
@@ -42,13 +59,19 @@ def test_proposal_to_dict_preserves_new_target():
             "mechanisms": ["SoA"],
             "code_regions": ["src/fcn.cc"],
         },
+        "model_claim_refs": ["M1"],
+        "explanation_refs": ["E1"],
+        "hypothesis_id": "H1",
+        "mechanism": "remove repeated work",
+        "prediction": "work count falls while gates remain satisfied",
+        "affected_scope": "moves ownership across the interface",
         "evidence_refs": ["source:src/fcn.cc:42"],
-        "material_difference": "moves ownership across the interface",
+        "affected_scope": "moves ownership across the interface",
     }
 
 
 def test_proposal_to_dict_preserves_existing_target():
-    proposal = ResearchProposal(
+    proposal = _proposal(
         instruction="continue the indexed path",
         research_target=ExistingFindingTarget(finding_id="F-012"),
     )
@@ -99,15 +122,15 @@ def test_render_markdown_numbers_final_proposals():
             "seed": 42,
         },
         "proposals": [
-            harness._proposal_to_dict(ResearchProposal(
+            harness._proposal_to_dict(_proposal(
                 instruction="first change",
                 research_target=NewFindingTarget(question="first question"),
                 evidence_refs=("source:src/a.cc:foo",),
             )),
-            harness._proposal_to_dict(ResearchProposal(
+            harness._proposal_to_dict(_proposal(
                 instruction="second change",
                 research_target=ExistingFindingTarget(finding_id="F-003"),
-                material_difference="different ownership boundary",
+                affected_scope="different ownership boundary",
             )),
         ],
     }

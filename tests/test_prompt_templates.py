@@ -39,6 +39,23 @@ def test_load_semantic_default_proposer_loads():
     assert isinstance(text, str) and text.strip()
 
 
+def test_generator_is_not_an_active_prompt_role():
+    with pytest.raises(ValueError, match="unknown prompt role"):
+        load_semantic("generator")
+
+
+def test_proposer_identity_is_scientific_not_a_phase_checklist():
+    text = load_semantic("proposer")
+    lowered = text.lower()
+    for concept in ("working model", "explanation", "prediction", "counterfactual"):
+        assert concept in lowered
+    for legacy in (
+        "cognitive element", "sieve", "enrich", "generator partner",
+        "feedback_generator", "eventcontext", "omilrec",
+    ):
+        assert legacy not in lowered
+
+
 def test_load_semantic_uses_active_prompt_directory(tmp_path: Path):
     (tmp_path / "proposer.md").write_text("active proposer", encoding="utf-8")
     assert load_semantic("proposer", tmp_path) == "active proposer"

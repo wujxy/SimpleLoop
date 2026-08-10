@@ -16,6 +16,20 @@ from simpleloop.memory.models import (
 
 METRICS = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
            "gates": []}
+def _proposal(*, instruction, research_target):
+    return ResearchProposal(
+        instruction=instruction,
+        research_target=research_target,
+        model_claim_refs=("M1",),
+        explanation_refs=("E1",),
+        hypothesis_id="H1",
+        evidence_refs=("source:src/a.cc",),
+        mechanism="test mechanism",
+        prediction="test prediction",
+        affected_scope="src/a.cc",
+    )
+
+
 
 
 def _write_history(run_dir: Path, *records: dict) -> None:
@@ -59,11 +73,11 @@ def _cand(cid: int, *, fid: str | None = None,
 def test_resolve_new_target_allocates_finding_id_and_persists(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
     proposals = [
-        ResearchProposal(
+        _proposal(
             instruction="Hoist QPDF lookup.",
             research_target=NewFindingTarget(question="Is QPDF the cost?"),
         ),
-        ResearchProposal(
+        _proposal(
             instruction="Pack cache values.",
             research_target=NewFindingTarget(
                 question="Does packing help?",
@@ -83,7 +97,7 @@ def test_resolve_existing_target_requires_known_finding(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
     with pytest.raises(ValueError, match="unknown finding"):
         svc.resolve_targets(
-            [ResearchProposal(
+            [_proposal(
                 instruction="continue F-999",
                 research_target=ExistingFindingTarget(finding_id="F-999"),
             )],
@@ -94,7 +108,7 @@ def test_resolve_existing_target_requires_known_finding(tmp_path: Path):
 def test_link_completed_experiments_updates_finding(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
     proposals = [
-        ResearchProposal(
+        _proposal(
             instruction="First look.",
             research_target=NewFindingTarget(question="Q?"),
         ),
@@ -116,7 +130,7 @@ def test_link_completed_experiments_updates_finding(tmp_path: Path):
 def test_link_updates_best_objective_direction(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
     fid = svc.resolve_targets(
-        [ResearchProposal(
+        [_proposal(
             instruction="x",
             research_target=NewFindingTarget(question="Q?"),
         )],
@@ -223,7 +237,7 @@ def test_startup_pack_surfaces_deliberation_signals(tmp_path: Path):
     kept distinct, never framed as a scientific conclusion)."""
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
     fid = svc.resolve_targets(
-        [ResearchProposal(
+        [_proposal(
             instruction="x",
             research_target=NewFindingTarget(question="Is QPDF the cost?"),
         )],
@@ -281,7 +295,7 @@ def test_search_experiments_returns_buckets(tmp_path: Path):
 def test_list_findings_effective_state_reflects_dormancy(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS, dormancy_rounds=1)
     fid = svc.resolve_targets(
-        [ResearchProposal(
+        [_proposal(
             instruction="x",
             research_target=NewFindingTarget(question="Q"),
         )],

@@ -8,6 +8,20 @@ import pytest
 
 from scripts import proposer_harness as harness
 from simpleloop.memory.models import NewFindingTarget, ResearchProposal
+def _proposal(*, instruction, research_target):
+    return ResearchProposal(
+        instruction=instruction,
+        research_target=research_target,
+        model_claim_refs=("M1",),
+        explanation_refs=("E1",),
+        hypothesis_id="H1",
+        evidence_refs=("source:src/a.cc",),
+        mechanism="test mechanism",
+        prediction="test prediction",
+        affected_scope="src/a.cc",
+    )
+
+
 from simpleloop.roles.proposer import ProposerResult
 
 
@@ -112,7 +126,7 @@ def _install_runner_fakes(monkeypatch, tmp_path, *, result=None, failure=None):
                 raise failure
             if result is not None:
                 return result
-            return ProposerResult(proposals=[ResearchProposal(
+            return ProposerResult(proposals=[_proposal(
                 instruction="try SoA",
                 research_target=NewFindingTarget(question="layout question"),
             )])
@@ -201,7 +215,7 @@ def test_run_proposer_serializes_abstention(monkeypatch, tmp_path):
 
 
 def test_run_proposer_restores_random_state(monkeypatch, tmp_path):
-    _install_runner_fakes(monkeypatch, tmp_path)
+    calls = _install_runner_fakes(monkeypatch, tmp_path)
     random.seed(913)
     state = random.getstate()
 
@@ -210,6 +224,7 @@ def test_run_proposer_restores_random_state(monkeypatch, tmp_path):
     )
 
     assert random.getstate() == state
+    assert calls["orchestrator_run"]["random_seed"] == 42
 
 
 def test_run_proposer_failure_records_error_and_cleans_worktree(

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import subprocess
 import sys
 import time
@@ -47,8 +46,13 @@ def _proposal_to_dict(proposal: ResearchProposal) -> dict:
     return {
         "instruction": proposal.instruction,
         "research_target": _target_to_dict(proposal.research_target),
+        "model_claim_refs": list(proposal.model_claim_refs),
+        "explanation_refs": list(proposal.explanation_refs),
+        "hypothesis_id": proposal.hypothesis_id,
         "evidence_refs": list(proposal.evidence_refs),
-        "material_difference": proposal.material_difference,
+        "mechanism": proposal.mechanism,
+        "prediction": proposal.prediction,
+        "affected_scope": proposal.affected_scope,
     }
 
 
@@ -98,6 +102,12 @@ def _render_proposals_markdown(result: dict) -> str:
             proposal["instruction"],
             "",
             f"Research target: {_render_target(proposal['research_target'])}",
+            f"Hypothesis: `{proposal['hypothesis_id']}`",
+            f"Model claims: {', '.join(proposal['model_claim_refs'])}",
+            f"Explanations: {', '.join(proposal['explanation_refs'])}",
+            f"Mechanism: {proposal['mechanism']}",
+            f"Prediction: {proposal['prediction']}",
+            f"Affected scope: {proposal['affected_scope']}",
         ])
         evidence = proposal.get("evidence_refs") or []
         if evidence:
@@ -106,9 +116,6 @@ def _render_proposals_markdown(result: dict) -> str:
                 "Evidence:",
                 *[f"- `{ref}`" for ref in evidence],
             ])
-        difference = proposal.get("material_difference")
-        if difference:
-            lines.extend(["", f"Material difference: {difference}"])
     return "\n".join(lines) + "\n"
 
 @dataclass(frozen=True)
@@ -199,7 +206,6 @@ def run_proposer(
     }
     workspace = None
     worktree_created = False
-    random_state = None
     proposal_result = None
     caught: Exception | None = None
     cleanup_error: Exception | None = None
@@ -264,9 +270,6 @@ def run_proposer(
                 _json_safe(usage)
             ),
         )
-        if seed is not None:
-            random_state = random.getstate()
-            random.seed(seed)
         proposal_result = orchestrator.run(
             goal=cfg["goal"],
             editable=cfg["editable_paths"],
@@ -282,12 +285,11 @@ def run_proposer(
             prompt_dir=None,
             hints=cfg.get("hints") or None,
             scientist_steps=cfg["scientist_steps"],
+            random_seed=seed,
         )
     except Exception as exc:
         caught = exc
     finally:
-        if random_state is not None:
-            random.setstate(random_state)
         if workspace is not None and worktree_created:
             try:
                 workspace.remove_worktree("proposer-test")

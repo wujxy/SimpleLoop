@@ -1,15 +1,8 @@
-"""Shared infrastructure for code-reading research agents.
+"""Shared infrastructure for the code-reading Scientist runtime.
 
-Both the Generator (hypothesis producer) and the Cognitive element (sieve +
-enrich) are agents that can read code via ``run_research_command``. They share
-the same tool loop, protocol-repair logic, and state tracking — they differ
-only in prompt (role-specific semantics), context (history-free vs
-history-rich), and terminal actions (``submit_hypothesis`` vs
-``submit_proposals``/``block``).
-
-This module provides the shared base class ``ResearchAgent`` and the helpers
-both agents use. Each subclass plugs its own ``_parse_action`` and
-``_validate_action_guard``.
+The base class owns model calls, research-tool construction, protocol repair,
+and round-local evidence tracking. Scientist inquiry state and phase semantics
+live in ``proposer.py`` and ``inquiry.py``.
 """
 from __future__ import annotations
 
@@ -163,35 +156,6 @@ def _render_state_header(
         lines.append(explore_block)
     return "\n".join(lines)
 
-
-def _build_telemetry(
-    state: WorkingState, *, steps: int, outcome: str,
-    reason_kind: str | None = None, enrichment_partial: bool = False,
-) -> dict:
-    return {
-        "steps": steps,
-        "tool_calls": state.counts.get("tool", 0),
-        "source_reads": state.counts.get("source_read", 0),
-        "protocol_repairs": state.protocol_repairs,
-        "outcome": outcome,
-        "reason_kind": reason_kind,
-        "enrichment_partial": enrichment_partial,
-    }
-
-
-def _build_trace(
-    state: WorkingState, *, round_id: int, outcome: str,
-    reason_kind: str | None = None, evidence_refs: tuple[str, ...] = (),
-    explore: ExploreReport | None = None,
-) -> dict:
-    return {
-        "round": round_id,
-        "candidate_directions": state.candidate_directions,
-        "actions": list(state.action_log),
-        "outcome": outcome,
-        "reason_kind": reason_kind,
-        "evidence_refs": list(evidence_refs),
-    }
 
 
 def _action_summary(action: dict) -> str:

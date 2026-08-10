@@ -337,8 +337,13 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                     {
                         "instruction": prop.instruction,
                         "finding_id": fid,
+                        "model_claim_refs": list(prop.model_claim_refs),
+                        "explanation_refs": list(prop.explanation_refs),
+                        "hypothesis_id": prop.hypothesis_id,
                         "evidence_refs": list(prop.evidence_refs),
-                        "material_difference": prop.material_difference,
+                        "mechanism": prop.mechanism,
+                        "prediction": prop.prediction,
+                        "affected_scope": prop.affected_scope,
                     }
                     for prop, fid in zip(
                         proposal_result.proposals, finding_ids,
@@ -597,8 +602,13 @@ def _write_proposals_handoff(
             "index": i,
             "instruction": prop.instruction,
             "finding_id": None,  # resolved later by memory_service
+            "model_claim_refs": list(prop.model_claim_refs),
+            "explanation_refs": list(prop.explanation_refs),
+            "hypothesis_id": prop.hypothesis_id,
             "evidence_refs": list(prop.evidence_refs),
-            "material_difference": prop.material_difference,
+            "mechanism": prop.mechanism,
+            "prediction": prop.prediction,
+            "affected_scope": prop.affected_scope,
         })
     write_handoff(ctx.run_dir, round_id, "proposals.json", {
         "round_id": round_id,
@@ -628,6 +638,13 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
                     research_target=NewFindingTarget(
                         question=proposal_text[:200],
                     ),
+                    model_claim_refs=(),
+                    explanation_refs=(),
+                    hypothesis_id="static-input",
+                    evidence_refs=(),
+                    mechanism="user-supplied static proposal",
+                    prediction="evaluate the supplied instruction",
+                    affected_scope="declared by the static instruction",
                 ),
             ],
         )

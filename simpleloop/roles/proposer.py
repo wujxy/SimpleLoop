@@ -1,29 +1,9 @@
-"""Cognitive element: per-hypothesis Sieve + Enricher.
+"""Scientist-Proposer inquiry runtime.
 
-Each hypothesis card from the generator is researched in isolation by one agent
-loop. The cognitive element is NOT a reviewer: it never judges whether an idea
-is worth trying. Merit — will the change preserve correctness, will it be
-faster — is structurally unknowable by an LLM in this domain and is reserved
-for the Harness, which is the only source of truth. The cognitive element has
-exactly two jobs:
-
-- **Sieve (light):** read just enough at the target site to confirm the three
-  objective bars. Block ONLY on an objective failure — a false factual claim
-  about the code, a frozen-path conflict, or a self-contradiction — each backed
-  by a ``source:`` ref read this round.
-- **Enrich (deep):** rewrite the card into an executor-ready ``instruction``
-  (precise location + the code facts read + the correctness constraint the
-  executor must preserve + a declaration of which realization decisions are
-  left to the executor), then ``submit``. It never writes the implementation,
-  line-level code, or derived math.
-
-This runtime never restricts the search space on a judgment. Submit is the
-default terminal; block is rare and evidence-bound; budget exhaustion submits
-partial (it never abandons an idea).
-
-Doc reference: prompts/proposer.md.
-Continuity across rounds is supplied by the persistent Experiment Ledger,
-Finding Archive, and Frontier — NOT by this runtime's round-local state.
+One lane develops an independent whole-problem account, an explicit working
+model, competing explanations, a broad hypothesis portfolio, and only then
+uses experiment history to narrow and deepen selected directions. Proposals
+must preserve model, explanation, hypothesis, and direct-evidence lineage.
 """
 from __future__ import annotations
 
@@ -57,13 +37,9 @@ from .research_agent import (
     ResearchAgent,
     WorkingState,
     _bump,
-    _build_telemetry,
-    _build_trace,
     _fingerprint,
     _register_evidence,
     _render_state_header,
-    _result_summary,
-    _action_summary,
 )
 from ..container.runtime import ApptainerRuntime
 from ..memory.models import (
@@ -71,13 +47,11 @@ from ..memory.models import (
     NewFindingTarget,
     ResearchProposal,
 )
-from ..explore.models import ExploreReport
-from ..explore.render import render_explore_for_state_header
 from ..prompts import load_semantic
 
 
 class ProposerError(AgentError):
-    """The cognitive element violated its action or budget contract."""
+    """The Scientist violated its action or budget contract."""
 
 
 @dataclass(frozen=True)
@@ -97,6 +71,7 @@ class ProposerResult:
     abstain_blocking_unknown: str | None = None
     deliberation_telemetry: dict = field(default_factory=dict)
     trace: dict = field(default_factory=dict)
+
 @dataclass(frozen=True)
 class ScientistResult:
     """Outcome of one Scientist lane under one total research budget."""
@@ -111,7 +86,8 @@ class ScientistResult:
 
 
 
-# --- Tunables (cognitive-specific) -----------------------------------------
+
+# --- Scientist inquiry tunables -----------------------------------------
 
 _BLOCK_REASON_KINDS = frozenset({"false_claim", "frozen", "contradiction"})
 
@@ -203,29 +179,26 @@ def _parse_research_target(value) -> ExistingFindingTarget | NewFindingTarget:
 def _parse_proposal(value) -> ResearchProposal:
     if not isinstance(value, dict):
         raise ProposerError("proposal must be an object")
-    allowed = {
-        "instruction", "research_target", "evidence_refs", "material_difference",
+    required = {
+        "instruction", "research_target", "model_claim_refs",
+        "explanation_refs", "hypothesis_id", "evidence_refs", "mechanism",
+        "prediction", "affected_scope",
     }
-    if set(value) - allowed:
-        raise ProposerError(f"proposal has unexpected keys: {sorted(value)}")
-    instruction = value.get("instruction")
-    if not isinstance(instruction, str) or not instruction.strip():
-        raise ProposerError("proposal.instruction must be non-empty")
-    target = _parse_research_target(value.get("research_target"))
-    evidence_refs = tuple(_require_string_list(
-        value.get("evidence_refs", []),
-        name="proposal.evidence_refs", allow_empty=True,
-    ))
-    md = value.get("material_difference")
-    if md is not None and (not isinstance(md, str) or not md.strip()):
-        raise ProposerError(
-            "proposal.material_difference must be a non-empty string when present"
-        )
+    if set(value) != required:
+        raise ProposerError(f"proposal keys must be {sorted(required)}")
     return ResearchProposal(
-        instruction=instruction.strip(),
-        research_target=target,
-        evidence_refs=evidence_refs,
-        material_difference=(md.strip() if isinstance(md, str) else None),
+        instruction=_required_str(value, "instruction"),
+        research_target=_parse_research_target(value["research_target"]),
+        model_claim_refs=tuple(_require_string_list(
+            value["model_claim_refs"], name="proposal.model_claim_refs")),
+        explanation_refs=tuple(_require_string_list(
+            value["explanation_refs"], name="proposal.explanation_refs")),
+        hypothesis_id=_required_str(value, "hypothesis_id"),
+        evidence_refs=tuple(_require_string_list(
+            value["evidence_refs"], name="proposal.evidence_refs")),
+        mechanism=_required_str(value, "mechanism"),
+        prediction=_required_str(value, "prediction"),
+        affected_scope=_required_str(value, "affected_scope"),
     )
 
 
@@ -536,7 +509,9 @@ def _parse_scientist_action(text: str) -> dict:
         _require_keys(raw, {"action", "proposals"})
         if not isinstance(raw["proposals"], list) or not raw["proposals"]:
             raise ProposerError("proposals must be a non-empty list")
-        return {"action": name, "proposals": tuple(raw["proposals"])}
+        return {"action": name, "proposals": tuple(
+            _parse_proposal(item) for item in raw["proposals"]
+        )}
     if name == "continue_investigation":
         _require_keys(raw, {"action", "question", "decision_impact"})
         return {"action": name, "question": _required_str(raw, "question"), "decision_impact": _required_str(raw, "decision_impact")}
@@ -549,7 +524,7 @@ def _parse_scientist_action(text: str) -> dict:
     raise ProposerError(f"unknown proposer action: {name}")
 
 
-# --- Cognitive-specific guards -------------------------------------------
+# --- Scientist-specific guards -------------------------------------------
 
 from .research_agent import _source_path_exists  # noqa: E402
 
@@ -582,7 +557,7 @@ def _upsert_by_id(items: list, item) -> None:
 def _apply_scientist_action(
     session: ScientistSessionState, action: dict, *, step: int,
 ) -> None:
-    """Apply one already-parsed and already-guarded cognitive commitment."""
+    """Apply one already-parsed and already-guarded Scientist commitment."""
     inquiry = session.inquiry
     source_phase = inquiry.phase
     name = action["action"]
@@ -608,6 +583,7 @@ def _apply_scientist_action(
             ) for claim in raw["claims"]),
             important_unknowns=raw["important_unknowns"],
         )
+        inquiry.model_revisions.append(inquiry.working_model)
     elif name == "commit_working_model":
         inquiry.transition(InquiryPhase.EXPLAIN, step=step, reason=name)
     elif name == "submit_explanation":
@@ -625,6 +601,43 @@ def _apply_scientist_action(
         inquiry.hypotheses = [by_id[item_id] for item_id in action["hypothesis_ids"]]
         inquiry.set_history_visible(True, step=step)
         inquiry.transition(InquiryPhase.NARROW, step=step, reason=name)
+    elif name == "select_for_deepen":
+        inquiry.selections = list(action["selected"])
+        inquiry.narrow_decisions.append({
+            "step": step,
+            "selected": [item.hypothesis_id for item in action["selected"]],
+        })
+        inquiry.deep_evidence_refs.clear()
+        inquiry.transition(InquiryPhase.DEEPEN, step=step, reason=name)
+    elif name in {"continue_explore", "return_to_narrow"}:
+        inquiry.selections.clear()
+        inquiry.proposals.clear()
+        target = InquiryPhase.EXPLORE if name == "continue_explore" else InquiryPhase.NARROW
+        inquiry.transition(target, step=step, reason=name)
+    elif name == "reopen_explain":
+        inquiry.explanations.clear()
+        inquiry.lever_map.clear()
+        inquiry.hypotheses.clear()
+        inquiry.selections.clear()
+        inquiry.proposals.clear()
+        inquiry.reopen_counts[name] = inquiry.reopen_counts.get(name, 0) + 1
+        inquiry.transition(InquiryPhase.EXPLAIN, step=step, reason=name)
+    elif name == "reopen_model":
+        inquiry.working_model = None
+        inquiry.explanations.clear()
+        inquiry.lever_map.clear()
+        inquiry.hypotheses.clear()
+        inquiry.selections.clear()
+        inquiry.proposals.clear()
+        inquiry.reopen_counts[name] = inquiry.reopen_counts.get(name, 0) + 1
+        inquiry.transition(InquiryPhase.MODEL, step=step, reason=name)
+    elif name == "fresh_reframe":
+        session.start_fresh_context()
+    elif name in {"abandon_portfolio", "abandon_direction"}:
+        inquiry.selections.clear()
+        inquiry.proposals.clear()
+    elif name == "submit_proposals":
+        inquiry.proposals = list(action["proposals"])
 
 
 def _validate_scientist_guard(
@@ -703,12 +716,33 @@ def _validate_scientist_guard(
             return "selection_exceeds_quota"
         if any(item.hypothesis_id not in hypothesis_ids for item in action["selected"]):
             return "unknown_hypothesis"
+    elif name == "submit_proposals":
+        selected_ids = {item.hypothesis_id for item in session.inquiry.selections}
+        proposal_ids = [item.hypothesis_id for item in action["proposals"]]
+        if len(proposal_ids) > select_quota or not set(proposal_ids) <= selected_ids:
+            return "proposal_requires_selected_hypothesis"
+        for proposal in action["proposals"]:
+            if not set(proposal.model_claim_refs) <= model_ids:
+                return "unknown_model_claim"
+            if not set(proposal.explanation_refs) <= explanation_ids:
+                return "unknown_explanation"
+            direct = any(
+                ref in session.inquiry.deep_evidence_refs
+                or (
+                    ref.startswith("source:")
+                    and "__source_examined__" in session.inquiry.deep_evidence_refs
+                    and _source_path_exists(ref.removeprefix("source:"), source_root)
+                )
+                for ref in proposal.evidence_refs
+            )
+            if not direct:
+                return "proposal_requires_deep_evidence"
     elif name == "fresh_reframe" and session.fresh_reframes >= 1:
         return "fresh_reframe_limit"
     return None
 
 
-# --- The cognitive element ------------------------------------------------
+# --- Scientist-Proposer ------------------------------------------------
 
 class ProposerAgent(ResearchAgent):
     _error_class = ProposerError
@@ -767,24 +801,84 @@ class ProposerAgent(ResearchAgent):
     @staticmethod
     def _scientist_trace(session: ScientistSessionState, *, outcome: str) -> dict:
         inquiry = session.inquiry
+        contexts = [*session.archived_contexts, session.context]
+        actions = list(session.cumulative_action_log)
+
+        def first_step(action_name: str):
+            return next((
+                item["step"] for item in actions
+                if item["action"] == action_name
+            ), None)
+
+        def target_dict(target):
+            if isinstance(target, ExistingFindingTarget):
+                return {"mode": "existing", "finding_id": target.finding_id}
+            return {
+                "mode": "new", "question": target.question,
+                "mechanisms": list(target.mechanisms),
+                "code_regions": list(target.code_regions),
+            }
+
+        def proposal_dict(proposal):
+            return {
+                "instruction": proposal.instruction,
+                "research_target": target_dict(proposal.research_target),
+                "model_claim_refs": list(proposal.model_claim_refs),
+                "explanation_refs": list(proposal.explanation_refs),
+                "hypothesis_id": proposal.hypothesis_id,
+                "evidence_refs": list(proposal.evidence_refs),
+                "mechanism": proposal.mechanism,
+                "prediction": proposal.prediction,
+                "affected_scope": proposal.affected_scope,
+            }
+
+        context_summaries = [{
+            "context_id": context.inquiry.context_id,
+            "phase": context.inquiry.phase.value,
+            "history_visible": context.inquiry.history_visible,
+            "understanding": (
+                asdict(context.inquiry.understanding)
+                if context.inquiry.understanding else None
+            ),
+            "working_model": (
+                asdict(context.inquiry.working_model)
+                if context.inquiry.working_model else None
+            ),
+        } for context in contexts]
+        tool_calls_by_phase: dict[str, int] = {}
+        for item in actions:
+            if item["action"] in _RESEARCH_TOOL_ACTIONS:
+                phase = item["phase"]
+                tool_calls_by_phase[phase] = tool_calls_by_phase.get(phase, 0) + 1
         return {
             "outcome": outcome,
-            "context_id": inquiry.context_id,
             "phase": inquiry.phase.value,
+            "current_phase": inquiry.phase.value,
+            "contexts": context_summaries,
             "history_visible": inquiry.history_visible,
             "history_injected_at_step": inquiry.history_injected_at_step,
-            "phase_transitions": [asdict(item) for item in inquiry.phase_transitions],
-            "actions": list(session.cumulative_action_log),
-            "working_model_versions": (
-                [inquiry.working_model.version] if inquiry.working_model else []
-            ),
-            "artifact_counts": {
-                "explanations": len(inquiry.explanations),
-                "levers": len(inquiry.lever_map),
-                "hypotheses": len(inquiry.hypotheses),
-                "selections": len(inquiry.selections),
-                "proposals": len(inquiry.proposals),
-            },
+            "phase_transitions": [
+                asdict(item) for context in contexts
+                for item in context.inquiry.phase_transitions
+            ],
+            "actions": actions,
+            "understanding": asdict(inquiry.understanding) if inquiry.understanding else None,
+            "working_model": asdict(inquiry.working_model) if inquiry.working_model else None,
+            "model_revisions": [asdict(item) for item in inquiry.model_revisions],
+            "explanations": [asdict(item) for item in inquiry.explanations],
+            "lever_map": [asdict(item) for item in inquiry.lever_map],
+            "fresh_hypotheses": [asdict(item) for item in inquiry.hypotheses],
+            "narrow_decisions": list(inquiry.narrow_decisions),
+            "selected_hypotheses": [asdict(item) for item in inquiry.selections],
+            "deep_evidence": sorted(inquiry.deep_evidence_refs),
+            "proposals": [proposal_dict(item) for item in inquiry.proposals],
+            "reopen_counts": dict(inquiry.reopen_counts),
+            "fresh_reframes": session.fresh_reframes,
+            "usage_by_phase": session.usage_by_phase,
+            "tool_calls_by_phase": tool_calls_by_phase,
+            "steps_to_working_model": first_step("commit_working_model"),
+            "steps_to_portfolio": first_step("commit_hypothesis_portfolio"),
+            "steps_to_outcome": max((item["step"] for item in actions), default=0),
         }
 
     def run_lane(
@@ -847,12 +941,28 @@ class ProposerAgent(ResearchAgent):
                     )
                     name = action["action"]
                     session.runtime.action_log.append({"action": name, "step": step})
+                    if name in _RESEARCH_TOOL_ACTIONS or name == "block":
+                        session.cumulative_action_log.append({
+                            "context_id": session.inquiry.context_id,
+                            "phase": phase.value,
+                            "action": name,
+                            "step": step,
+                        })
                     if name in _RESEARCH_TOOL_ACTIONS:
+                        evidence_before = set(session.runtime.new_evidence)
                         observation = tools.execute(action, deadline=deadline)
                         _bump(session.runtime, "tool")
                         if name == "run_research_command":
                             _bump(session.runtime, "source_read")
                         _register_evidence(session.runtime, action, observation)
+                        if phase is InquiryPhase.DEEPEN and observation.get("ok"):
+                            if name == "run_research_command":
+                                session.inquiry.deep_evidence_refs.add(
+                                    "__source_examined__"
+                                )
+                            else:
+                                session.inquiry.deep_evidence_refs.update(
+                                    session.runtime.new_evidence - evidence_before)
                         session.runtime.last_tool_fingerprint = _fingerprint(action)
                         messages.extend([
                             {"role": "assistant", "content": reply_text},
@@ -869,7 +979,43 @@ class ProposerAgent(ResearchAgent):
                             trace=self._scientist_trace(session, outcome="block"),
                         )
                     was_history_visible = session.inquiry.history_visible
+                    old_context_id = session.inquiry.context_id
                     _apply_scientist_action(session, action, step=step)
+                    if name == "submit_proposals":
+                        return ScientistResult(
+                            proposals=tuple(session.inquiry.proposals),
+                            outcome="proposals", usage=tuple(usages),
+                            deliberation_telemetry={
+                                "steps": step,
+                                "usage_by_phase": session.usage_by_phase,
+                            },
+                            trace=self._scientist_trace(session, outcome="proposals"),
+                        )
+                    if name in {"abandon_portfolio", "abandon_direction"}:
+                        return ScientistResult(
+                            outcome="research_incomplete", reason=action["reason"],
+                            usage=tuple(usages),
+                            deliberation_telemetry={
+                                "steps": step,
+                                "usage_by_phase": session.usage_by_phase,
+                            },
+                            trace=self._scientist_trace(
+                                session, outcome="research_incomplete",
+                            ),
+                        )
+                    if session.inquiry.context_id != old_context_id:
+                        messages = [{"role": "user", "content": (
+                            memory_service.build_fresh_inquiry_context(
+                                goal=goal, editable=editable, frozen=frozen,
+                                base_sha=base_sha, gate_block=gate_block, hints=hints,
+                            ) + "\nFresh reframe: construct an independent account without prior inquiry artifacts or history."
+                        )}]
+                        tools = self._make_tools(
+                            source=source_path, repo=repo_path, history_dir=None,
+                            scratch=Path(scratch), memory_service=None,
+                            current_round=current_round, history_enabled=False,
+                        )
+                        continue
                     messages.append({"role": "assistant", "content": reply_text})
                     if not was_history_visible and session.inquiry.history_visible:
                         messages.append({"role": "user", "content": (

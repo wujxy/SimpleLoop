@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from simpleloop.memory.models import NewFindingTarget, ResearchProposal
+
 from simpleloop.roles.inquiry import (
     Explanation,
     InquiryPhase,
+    HypothesisSelection,
     InquiryState,
     ModelClaim,
     ResearchHypothesis,
@@ -479,7 +482,24 @@ def test_run_lane_switches_prompt_tools_and_history_together(tmp_path, monkeypat
         for message in model.calls[-1]["messages"]
     ) == 1
     assert result.trace["history_injected_at_step"] == 12
-    assert result.trace["phase"] == "narrow"
+    assert result.trace["phase"] == "deepen"
+    assert {
+        "contexts", "phase_transitions", "actions", "understanding",
+        "working_model", "model_revisions", "explanations", "lever_map",
+        "fresh_hypotheses", "narrow_decisions", "selected_hypotheses",
+        "deep_evidence", "proposals", "reopen_counts", "fresh_reframes",
+        "usage_by_phase", "tool_calls_by_phase", "steps_to_working_model",
+        "steps_to_portfolio", "steps_to_outcome", "outcome",
+    } <= result.trace.keys()
+    assert result.trace["model_revisions"][0]["version"] == 1
+    assert result.trace["steps_to_working_model"] == 3
+    assert result.trace["steps_to_portfolio"] == 12
+    assert result.trace["steps_to_outcome"] == 13
+    assert result.trace["narrow_decisions"] == [{
+        "step": 13, "selected": ["H1"],
+    }]
+    assert result.trace["outcome"] == "research_incomplete"
+    json.dumps(result.trace)
 
 
 
@@ -567,3 +587,125 @@ def test_phase_prompt_exposes_only_current_actions():
     narrow = _build_phase_system_prompt(None, InquiryPhase.NARROW, True)
     assert '"action":"search_experiments"' in narrow
     assert '"action":"commit_understanding"' not in narrow
+
+
+def test_research_proposal_requires_scientist_lineage_metadata():
+    with pytest.raises(TypeError):
+        ResearchProposal(
+            instruction="change X",
+            research_target=NewFindingTarget(question="why X"),
+        )
+
+    proposal = ResearchProposal(
+        instruction="change X",
+        research_target=NewFindingTarget(question="why X"),
+        model_claim_refs=("M1",), explanation_refs=("E1",),
+        hypothesis_id="H1", evidence_refs=("source:src/x.cc",),
+        mechanism="remove repeated work",
+        prediction="call count falls while gates remain satisfied",
+        affected_scope="src/x.cc:X",
+    )
+    assert proposal.hypothesis_id == "H1"
+    assert proposal.model_claim_refs == ("M1",)
+
+
+def _history_session(phase=InquiryPhase.NARROW):
+    session = _session_with_model()
+    session.inquiry.phase = phase
+    session.inquiry.set_history_visible(True, step=8)
+    session.inquiry.explanations = [Explanation(
+        id="E1", phenomenon="gap", account="repetition",
+        model_basis=("M1",), expected_if_true=("repeat",),
+        evidence_needed=("trace",),
+    )]
+    session.inquiry.hypotheses = [ResearchHypothesis(
+        id="H1", generative_op="G2", model_basis=("M1",),
+        explanation_basis=("E1",), mechanism="lifetime",
+        intervention_family="reuse", scope="whole flow",
+        why_plausible="state repeats", critical_unknown="sharing",
+    )]
+    return session
+
+
+def test_select_for_deepen_transitions_and_proposal_requires_deep_lineage(tmp_path):
+    session = _history_session()
+    selected = _parse_scientist_action(json.dumps({
+        "action": "select_for_deepen", "selected": [{
+            "hypothesis_id": "H1", "evidence_refs": ["experiment:r0c0"],
+            "rationale": "history bears on sharing",
+        }],
+    }))
+    _apply_scientist_action(session, selected, step=9)
+    assert session.inquiry.phase is InquiryPhase.DEEPEN
+    assert session.inquiry.selections[0].hypothesis_id == "H1"
+
+    raw = {
+        "action": "submit_proposals", "proposals": [{
+            "instruction": "Lift invariant state to the event lifetime.",
+            "research_target": {"mode": "new", "question": "is state shared?"},
+            "model_claim_refs": ["M1"], "explanation_refs": ["E1"],
+            "hypothesis_id": "H1", "evidence_refs": ["source:src/a.cc"],
+            "mechanism": "avoid repeated construction",
+            "prediction": "construction count falls without gate changes",
+            "affected_scope": "src/a.cc:Builder",
+        }],
+    }
+    proposal_action = _parse_scientist_action(json.dumps(raw))
+    assert _validate_scientist_guard(
+        session, proposal_action, tmp_path, select_quota=2,
+    ) == "proposal_requires_deep_evidence"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.cc").write_text("// source")
+    session.inquiry.deep_evidence_refs.add("__source_examined__")
+    assert _validate_scientist_guard(
+        session, proposal_action, tmp_path, select_quota=2,
+    ) is None
+    assert proposal_action["proposals"][0].hypothesis_id == "H1"
+
+
+def test_rollbacks_preserve_history_and_clear_only_downstream_artifacts():
+    session = _history_session(InquiryPhase.DEEPEN)
+    model = session.inquiry.working_model
+    explanations = list(session.inquiry.explanations)
+    session.inquiry.selections = [HypothesisSelection(
+        "H1", ("experiment:r0c0",), "evidence",
+    )]
+    action = _parse_scientist_action(json.dumps({
+        "action": "continue_explore", "reason": "premise failed",
+        "evidence_refs": ["experiment:r0c0"],
+    }))
+    _apply_scientist_action(session, action, step=12)
+    assert session.inquiry.phase is InquiryPhase.EXPLORE
+    assert session.inquiry.history_visible is True
+    assert session.inquiry.working_model is model
+    assert session.inquiry.explanations == explanations
+    assert session.inquiry.selections == []
+
+    reopen = _parse_scientist_action(json.dumps({
+        "action": "reopen_model", "reason": "counterfactual failed",
+        "evidence_refs": ["experiment:r0c0"],
+    }))
+    _apply_scientist_action(session, reopen, step=13)
+    assert session.inquiry.phase is InquiryPhase.MODEL
+    assert session.inquiry.history_visible is True
+    assert session.inquiry.working_model is None
+    assert session.inquiry.explanations == []
+
+
+def test_fresh_reframe_archives_context_and_resets_all_epistemic_state():
+    session = _history_session(InquiryPhase.NARROW)
+    old_context = session.context
+    action = _parse_scientist_action(json.dumps({
+        "action": "fresh_reframe", "reason": "historical frame dominates",
+        "evidence_refs": ["experiment:r0c0"],
+    }))
+    _apply_scientist_action(session, action, step=14)
+    assert session.archived_contexts == [old_context]
+    assert session.inquiry.context_id == 1
+    assert session.inquiry.phase is InquiryPhase.UNDERSTAND
+    assert session.inquiry.history_visible is False
+    assert session.inquiry.working_model is None
+    assert session.runtime.new_evidence == set()
+    assert _validate_scientist_guard(
+        session, action, Path("."), select_quota=2,
+    ) == "action_not_allowed_in_understand"

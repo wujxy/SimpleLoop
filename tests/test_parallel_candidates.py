@@ -22,6 +22,20 @@ EXAMPLES = Path(__file__).parents[1] / "examples"
 
 _SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
            "gates": [{"key": "CORRECTNESS"}]}
+def _proposal(*, instruction, research_target):
+    return ResearchProposal(
+        instruction=instruction,
+        research_target=research_target,
+        model_claim_refs=("M1",),
+        explanation_refs=("E1",),
+        hypothesis_id="H1",
+        evidence_refs=("source:src/a.cc",),
+        mechanism="test mechanism",
+        prediction="test prediction",
+        affected_scope="src/a.cc",
+    )
+
+
 
 
 def _example_yaml(relative_path: str) -> dict:
@@ -531,7 +545,7 @@ def test_next_proposals_uses_readonly_parent_snapshot_and_memory_service(tmp_pat
 
         def run(self, **kwargs):
             self.kwargs = kwargs
-            proposal = ResearchProposal(
+            proposal = _proposal(
                 instruction="try cache",
                 research_target=NewFindingTarget(question="cache?"),
             )
@@ -681,7 +695,7 @@ def _run_loop_integration(
             assert kwargs["current_round"] == 1
             assert kwargs["prompt_dir"] == prompt_dir
             return ProposerResult(
-                [ResearchProposal(
+                [_proposal(
                     instruction="test another sparse gather",
                     research_target=NewFindingTarget(
                         question="Does sparse gather still dominate?",
@@ -723,10 +737,17 @@ def _run_loop_integration(
             # NOT annotations.
             assert "annotations" not in journal.meta
             assert journal.meta["proposals"] == [
-                {"instruction": "test another sparse gather",
-                 "finding_id": "F-001",
-                 "evidence_refs": [],
-                 "material_difference": None},
+                {
+                    "instruction": "test another sparse gather",
+                    "finding_id": "F-001",
+                    "model_claim_refs": ["M1"],
+                    "explanation_refs": ["E1"],
+                    "hypothesis_id": "H1",
+                    "evidence_refs": ["source:src/a.cc"],
+                    "mechanism": "test mechanism",
+                    "prediction": "test prediction",
+                    "affected_scope": "src/a.cc",
+                },
             ]
             assert finding_ids == ["F-001"]
             return fake_run_candidates()

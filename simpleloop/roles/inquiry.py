@@ -113,6 +113,7 @@ class InquiryState:
     history_injected_at_step: int | None = None
     understanding: Understanding | None = None
     working_model: WorkingModel | None = None
+    model_revisions: list[WorkingModel] = field(default_factory=list)
     explanations: list[Explanation] = field(default_factory=list)
     lever_map: list[LeveragePoint] = field(default_factory=list)
     hypotheses: list[ResearchHypothesis] = field(default_factory=list)

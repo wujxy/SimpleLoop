@@ -563,7 +563,7 @@ def test_supervisor_restores_parent_after_optimizer_error(tmp_path: Path):
     assert [event["status"] for event in history.events()] == ["rejected", "rejected"]
 
 
-def test_supervisor_removes_unexpected_files_after_rejection(tmp_path: Path):
+def test_supervisor_rejects_obsolete_generator_prompt(tmp_path: Path):
     task = _task_file(tmp_path, _enabled(interval_rounds=2))
     run_dir = tmp_path / "run"
 
@@ -573,7 +573,7 @@ def test_supervisor_removes_unexpected_files_after_rejection(tmp_path: Path):
 
     class PollutingOptimizer:
         def run(self, *, prompt_dir, **_kwargs):
-            Path(prompt_dir, "unexpected.txt").write_text("outside contract")
+            Path(prompt_dir, "generator.md").write_text("obsolete prompt")
             _write_report(Path(prompt_dir))
 
     supervisor.run(

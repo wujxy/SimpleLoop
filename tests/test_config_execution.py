@@ -54,6 +54,24 @@ def test_default_backend_is_local(tmp_path: Path):
     assert cfg["hepjob"]["max_attempts"] == 2
 
 
+def test_scientist_budget_is_the_only_proposer_budget(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["loop"]["scientist_steps"] = 48
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert config_mod.load(path)["scientist_steps"] == 48
+
+
+@pytest.mark.parametrize("legacy", ["gen_steps", "cognitive_steps"])
+def test_removed_proposer_budgets_are_rejected(tmp_path: Path, legacy: str):
+    raw = _base_task(tmp_path)
+    raw["loop"][legacy] = 24
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(config_mod.ConfigError, match="were removed"):
+        config_mod.load(path)
+
+
 def test_researcher_defaults(tmp_path: Path):
     raw = _base_task(tmp_path)
     raw["roles"] = {"researcher": {}}
