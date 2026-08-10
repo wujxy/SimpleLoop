@@ -649,8 +649,7 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
             gate_block=ctx.gate_lines,
             prompt_dir=ctx.prompt_dir,
             hints=cfg.get("hints") or None,
-            gen_steps=cfg.get("gen_steps", 216),
-            cognitive_steps=cfg.get("cognitive_steps", 148),
+            scientist_steps=cfg.get("scientist_steps", 364),
         )
     except (model_mod.ModelError, proposer_mod.ProposerError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.

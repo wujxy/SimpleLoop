@@ -246,8 +246,7 @@ def run_proposer(
             "frozen_paths": list(cfg["frozen_paths"]),
             "gate_block": views.gate_block(cfg.get("metrics")),
             "candidates_per_round": cfg["candidates_per_round"],
-            "gen_steps": cfg["gen_steps"],
-            "cognitive_steps": cfg["cognitive_steps"],
+            "scientist_steps": cfg["scientist_steps"],
         })
         source_path = workspace.add_worktree("proposer-test", base_sha)
         worktree_created = True
@@ -282,8 +281,7 @@ def run_proposer(
             gate_block=input_record["gate_block"],
             prompt_dir=None,
             hints=cfg.get("hints") or None,
-            gen_steps=cfg["gen_steps"],
-            cognitive_steps=cfg["cognitive_steps"],
+            scientist_steps=cfg["scientist_steps"],
         )
     except Exception as exc:
         caught = exc

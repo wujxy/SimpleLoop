@@ -45,8 +45,7 @@ loop:
   max_rounds: 10                 # required, positive int
   # candidates_per_round: 1       # optional, default 1 — fanout per round
   # max_workers: 1                # optional, default 1 — candidate concurrency
-  # gen_steps: 216                # optional, default 216 — generator step budget per lane
-  # cognitive_steps: 148          # optional, default 148 — cognitive element step budget per lane
+  # scientist_steps: 364          # optional, default 364 — total Scientist budget per lane
   # agent_timeout_seconds: 3600   # optional, default 3600 — per agent turn budget
 
 roles:

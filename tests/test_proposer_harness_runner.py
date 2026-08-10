@@ -30,8 +30,7 @@ def _resolved_config(tmp_path: Path) -> dict:
         "frozen_paths": ["tests/**"],
         "agent_timeout_seconds": 120,
         "candidates_per_round": 4,
-        "gen_steps": 216,
-        "cognitive_steps": 148,
+        "scientist_steps": 364,
         "runtime_image": str(tmp_path / "runtime.sif"),
         "runtime_binds": [],
         "metrics": {
@@ -144,8 +143,7 @@ def test_run_proposer_invokes_complete_pipeline_without_executor(
     assert kwargs["base_sha"] == "baseline-sha"
     assert kwargs["current_round"] == 0
     assert kwargs["candidates_per_round"] == 4
-    assert kwargs["gen_steps"] == 216
-    assert kwargs["cognitive_steps"] == 148
+    assert kwargs["scientist_steps"] == 364
     assert kwargs["run_dir"] == tmp_path / "out"
     assert calls["workspace_removed"] == ["proposer-test"]
     assert summary.proposal_count == 1
