@@ -34,11 +34,13 @@ from .inquiry import (
     HypothesisSelection,
     InquiryPhase,
     LeveragePoint,
+    ModelClaim,
     ResearchHypothesis,
     ScientistSessionState,
+    WorkingModel,
     Understanding,
 )
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -93,6 +95,18 @@ class ProposerResult:
     abstain_blocking_unknown: str | None = None
     deliberation_telemetry: dict = field(default_factory=dict)
     trace: dict = field(default_factory=dict)
+@dataclass(frozen=True)
+class ScientistResult:
+    """Outcome of one Scientist lane under one total research budget."""
+
+    proposals: tuple[ResearchProposal, ...] = ()
+    outcome: str = "research_incomplete"
+    reason: str | None = None
+    usage: tuple[object, ...] = ()
+    deliberation_telemetry: dict = field(default_factory=dict)
+    trace: dict = field(default_factory=dict)
+
+
 
 
 @dataclass(frozen=True)
@@ -810,6 +824,62 @@ def _validate_action_guard(
     return None
 
 
+def _upsert_by_id(items: list, item) -> None:
+    for index, current in enumerate(items):
+        if current.id == item.id:
+            items[index] = item
+            return
+    items.append(item)
+
+
+def _apply_scientist_action(
+    session: ScientistSessionState, action: dict, *, step: int,
+) -> None:
+    """Apply one already-parsed and already-guarded cognitive commitment."""
+    inquiry = session.inquiry
+    source_phase = inquiry.phase
+    name = action["action"]
+    session.cumulative_action_log.append({
+        "context_id": inquiry.context_id,
+        "phase": source_phase.value,
+        "action": name,
+        "step": step,
+    })
+    if name == "commit_understanding":
+        inquiry.understanding = action["understanding"]
+        inquiry.transition(InquiryPhase.MODEL, step=step, reason=name)
+    elif name == "propose_working_model":
+        raw = action["working_model"]
+        version = 1 if inquiry.working_model is None else inquiry.working_model.version + 1
+        inquiry.working_model = WorkingModel(
+            version=version,
+            representation=raw["representation"],
+            explanatory_structure=raw["explanatory_structure"],
+            claims=tuple(ModelClaim(
+                id=claim["id"], claim=claim["claim"],
+                evidence_refs=claim["evidence_refs"],
+            ) for claim in raw["claims"]),
+            important_unknowns=raw["important_unknowns"],
+        )
+    elif name == "commit_working_model":
+        inquiry.transition(InquiryPhase.EXPLAIN, step=step, reason=name)
+    elif name == "submit_explanation":
+        _upsert_by_id(inquiry.explanations, action["explanation"])
+    elif name == "commit_explanation_set":
+        by_id = {item.id: item for item in inquiry.explanations}
+        inquiry.explanations = [by_id[item_id] for item_id in action["explanation_ids"]]
+        inquiry.transition(InquiryPhase.EXPLORE, step=step, reason=name)
+    elif name == "emit_lever_map":
+        inquiry.lever_map = list(action["levers"])
+    elif name == "submit_hypothesis":
+        _upsert_by_id(inquiry.hypotheses, action["hypothesis"])
+    elif name == "commit_hypothesis_portfolio":
+        by_id = {item.id: item for item in inquiry.hypotheses}
+        inquiry.hypotheses = [by_id[item_id] for item_id in action["hypothesis_ids"]]
+        inquiry.set_history_visible(True, step=step)
+        inquiry.transition(InquiryPhase.NARROW, step=step, reason=name)
+
+
 def _validate_scientist_guard(
     session: ScientistSessionState,
     action: dict,
@@ -827,6 +897,8 @@ def _validate_scientist_guard(
             action["evidence_refs"], session.runtime, source_root,
         ) else "block_needs_source"
 
+    if name in _RESEARCH_TOOL_ACTIONS:
+        return _validate_action_guard(session.runtime, action, source_root)
     model = session.inquiry.working_model
     model_ids = {claim.id for claim in model.claims} if model else set()
     explanation_ids = {item.id for item in session.inquiry.explanations}
@@ -904,14 +976,174 @@ class ProposerAgent(ResearchAgent):
             usage_observer=usage_observer,
         )
         self._candidates_per_round = 1
+        self._scientist_session = None
 
     def _parse_action(self, text: str) -> dict:
+        if self._scientist_session is not None:
+            return _parse_scientist_action(text)
         return _parse_action(text, self._candidates_per_round)
 
     def _validate_guard(
         self, state: WorkingState, action: dict, source_root: Path,
     ) -> str | None:
         return _validate_action_guard(state, action, source_root)
+        if self._scientist_session is not None:
+            return _validate_scientist_guard(
+                self._scientist_session, action, source_root,
+                self._scientist_select_quota,
+            )
+
+    @staticmethod
+    def _scientist_state_message(session: ScientistSessionState) -> str:
+        inquiry = session.inquiry
+        model = inquiry.working_model
+        payload = {
+            "context_id": inquiry.context_id,
+            "phase": inquiry.phase.value,
+            "history_visible": inquiry.history_visible,
+            "understanding": asdict(inquiry.understanding) if inquiry.understanding else None,
+            "working_model": asdict(model) if model else None,
+            "explanations": [asdict(item) for item in inquiry.explanations],
+            "lever_map": [asdict(item) for item in inquiry.lever_map],
+            "hypotheses": [asdict(item) for item in inquiry.hypotheses],
+            "selections": [asdict(item) for item in inquiry.selections],
+        }
+        return "Accepted. Current committed inquiry state:\n" + json.dumps(
+            payload, ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _scientist_trace(session: ScientistSessionState, *, outcome: str) -> dict:
+        inquiry = session.inquiry
+        return {
+            "outcome": outcome,
+            "context_id": inquiry.context_id,
+            "phase": inquiry.phase.value,
+            "history_visible": inquiry.history_visible,
+            "history_injected_at_step": inquiry.history_injected_at_step,
+            "phase_transitions": [asdict(item) for item in inquiry.phase_transitions],
+            "actions": list(session.cumulative_action_log),
+            "working_model_versions": (
+                [inquiry.working_model.version] if inquiry.working_model else []
+            ),
+            "artifact_counts": {
+                "explanations": len(inquiry.explanations),
+                "levers": len(inquiry.lever_map),
+                "hypotheses": len(inquiry.hypotheses),
+                "selections": len(inquiry.selections),
+                "proposals": len(inquiry.proposals),
+            },
+        }
+
+    def run_lane(
+        self,
+        *,
+        assigned_ops: tuple[str, ...],
+        select_quota: int,
+        scientist_steps: int,
+        goal: str,
+        editable: list[str],
+        frozen: list[str],
+        memory_service,
+        base_sha: str,
+        source_path: Path,
+        repo_path: Path,
+        run_dir: Path,
+        current_round: int,
+        gate_block: str,
+        prompt_dir: Path | None,
+        hints: list[str] | None = None,
+    ) -> ScientistResult:
+        """Run one Scientist session under one total lane-local step budget."""
+        if select_quota < 1 or scientist_steps < 1:
+            raise ValueError("select_quota and scientist_steps must be positive")
+        session = ScientistSessionState.fresh()
+        messages = [{"role": "user", "content": (
+            memory_service.build_fresh_inquiry_context(
+                goal=goal, editable=editable, frozen=frozen,
+                base_sha=base_sha, gate_block=gate_block, hints=hints,
+            )
+        )}]
+        usages: list[object] = []
+        deadline = time.monotonic() + self.timeout_seconds
+        self._scientist_session = session
+        self._scientist_select_quota = select_quota
+        try:
+            with TemporaryDirectory(prefix="simpleloop-scientist-") as scratch:
+                tools = self._make_tools(
+                    source=source_path, repo=repo_path, history_dir=None,
+                    scratch=Path(scratch), memory_service=None,
+                    current_round=current_round, history_enabled=False,
+                )
+                for step in range(1, scientist_steps + 1):
+                    phase = session.inquiry.phase
+                    system = _build_phase_system_prompt(
+                        prompt_dir, phase, session.inquiry.history_visible,
+                    )
+                    usage_start = len(usages)
+                    action, reply_text = self._step(
+                        session.runtime, messages, system, deadline, usages, step,
+                        source_root=source_path, steps_budget=scientist_steps,
+                    )
+                    phase_usage = usages[usage_start:]
+                    session.usage_by_phase.setdefault(phase.value, []).extend(phase_usage)
+                    session.cumulative_usage.extend(
+                        item for item in phase_usage if isinstance(item, dict)
+                    )
+                    name = action["action"]
+                    session.runtime.action_log.append({"action": name, "step": step})
+                    if name in _RESEARCH_TOOL_ACTIONS:
+                        observation = tools.execute(action, deadline=deadline)
+                        _bump(session.runtime, "tool")
+                        if name == "run_research_command":
+                            _bump(session.runtime, "source_read")
+                        _register_evidence(session.runtime, action, observation)
+                        session.runtime.last_tool_fingerprint = _fingerprint(action)
+                        messages.extend([
+                            {"role": "assistant", "content": reply_text},
+                            {"role": "user", "content": json.dumps(
+                                observation, ensure_ascii=False,
+                            )},
+                        ])
+                        continue
+                    if name == "block":
+                        return ScientistResult(
+                            outcome="block", reason=action["explanation"],
+                            usage=tuple(usages),
+                            deliberation_telemetry={"steps": step, "usage_by_phase": session.usage_by_phase},
+                            trace=self._scientist_trace(session, outcome="block"),
+                        )
+                    was_history_visible = session.inquiry.history_visible
+                    _apply_scientist_action(session, action, step=step)
+                    messages.append({"role": "assistant", "content": reply_text})
+                    if not was_history_visible and session.inquiry.history_visible:
+                        messages.append({"role": "user", "content": (
+                            memory_service.build_history_entry_pack(
+                                current_round=current_round,
+                            )
+                        )})
+                        tools = self._make_tools(
+                            source=source_path, repo=repo_path,
+                            history_dir=run_dir, scratch=Path(scratch),
+                            memory_service=memory_service,
+                            current_round=current_round, history_enabled=True,
+                        )
+                    messages.append({
+                        "role": "user",
+                        "content": self._scientist_state_message(session),
+                    })
+        finally:
+            self._scientist_session = None
+        return ScientistResult(
+            outcome="research_incomplete",
+            reason="scientist step budget exhausted before proposal commitment",
+            usage=tuple(usages),
+            deliberation_telemetry={
+                "steps": scientist_steps,
+                "usage_by_phase": session.usage_by_phase,
+            },
+            trace=self._scientist_trace(session, outcome="research_incomplete"),
+        )
 
     def research_batch(
         self,

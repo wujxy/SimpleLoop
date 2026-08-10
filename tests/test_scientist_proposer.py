@@ -15,10 +15,13 @@ from simpleloop.roles.inquiry import (
     Understanding,
     WorkingModel,
 )
+from simpleloop.roles.model import ModelReply
 from simpleloop.roles.proposer import (
+    ProposerAgent,
     _build_phase_system_prompt,
     _parse_scientist_action,
     _validate_scientist_guard,
+    _apply_scientist_action,
     phase_allowed_actions,
 )
 
@@ -242,6 +245,242 @@ def test_model_guard_uses_blocking_unknown_not_important_unknown(tmp_path: Path)
     assert _validate_scientist_guard(
         session, _commit_model_action(version=1), tmp_path, select_quota=2,
     ) == "stale_model_version"
+
+
+
+def _explanation_action(eid):
+    return _parse_scientist_action(json.dumps({
+        "action": "submit_explanation", "id": eid,
+        "phenomenon": f"gap {eid}", "account": f"account {eid}",
+        "model_basis": ["M1"], "expected_if_true": [f"signal {eid}"],
+        "evidence_needed": [f"evidence {eid}"],
+    }))
+
+
+def _hypothesis_action(index):
+    return _parse_scientist_action(json.dumps({
+        "action": "submit_hypothesis", "id": f"H{index}",
+        "generative_op": f"G{index}", "model_basis": ["M1"],
+        "explanation_basis": ["E1"], "mechanism": f"mechanism {index}",
+        "intervention_family": f"family {index}", "scope": f"scope {index}",
+        "why_plausible": "the account predicts this direction",
+        "critical_unknown": f"premise {index}",
+    }))
+
+
+def test_fresh_cycle_preserves_one_session_and_artifact_lineage():
+    session = ScientistSessionState.fresh()
+    identity = id(session)
+    actions = [
+        _parse_scientist_action(json.dumps({
+            "action": "commit_understanding", "problem": "slow",
+            "target_outcome": "lower cost", "boundary": "whole flow",
+            "current_account_of_the_whole": "inputs trigger repeated work",
+            "key_unknowns": ["dominant term"],
+        })),
+        _parse_scientist_action(json.dumps({
+            "action": "propose_working_model", "working_model": {
+                "representation": "cost = frequency * unit cost",
+                "explanatory_structure": "counterfactual cost model",
+                "claims": [{"id": "M1", "claim": "calls repeat",
+                            "evidence_refs": ["source:src/a.cc"]}],
+                "important_unknowns": ["dominant term"],
+            },
+        })),
+        _commit_model_action(version=1),
+        _explanation_action("E1"), _explanation_action("E2"),
+        _parse_scientist_action(json.dumps({
+            "action": "commit_explanation_set",
+            "explanation_ids": ["E1", "E2"],
+            "explanation_sufficiency_justification": None,
+        })),
+        _parse_scientist_action(json.dumps({
+            "action": "emit_lever_map", "levers": [{
+                "id": "L1", "target_mechanism": "repetition",
+                "why_leverage_exists": "frequency multiplies unit cost",
+                "model_basis": ["M1"], "explanation_basis": ["E1"],
+            }],
+        })),
+        *[_hypothesis_action(i) for i in range(1, 5)],
+        _parse_scientist_action(json.dumps({
+            "action": "commit_hypothesis_portfolio",
+            "hypothesis_ids": ["H1", "H2", "H3", "H4"],
+            "coverage_rationale": "four distinct mechanism families",
+            "portfolio_sufficiency_justification": None,
+            "unused_generative_ops": [],
+        })),
+    ]
+
+    for step, action in enumerate(actions, 1):
+        assert _validate_scientist_guard(
+            session, action, Path("."), select_quota=2,
+        ) is None
+        _apply_scientist_action(session, action, step=step)
+
+    assert id(session) == identity
+    assert session.inquiry.understanding.current_account_of_the_whole
+    assert session.inquiry.working_model.version == 1
+    assert [item.id for item in session.inquiry.explanations] == ["E1", "E2"]
+    assert [item.id for item in session.inquiry.hypotheses] == [
+        "H1", "H2", "H3", "H4",
+    ]
+    assert session.inquiry.phase is InquiryPhase.NARROW
+    assert session.inquiry.history_visible is True
+    assert session.inquiry.history_injected_at_step == len(actions)
+    assert [(item.source, item.target) for item in session.inquiry.phase_transitions] == [
+        (InquiryPhase.UNDERSTAND, InquiryPhase.MODEL),
+        (InquiryPhase.MODEL, InquiryPhase.EXPLAIN),
+        (InquiryPhase.EXPLAIN, InquiryPhase.EXPLORE),
+        (InquiryPhase.EXPLORE, InquiryPhase.NARROW),
+    ]
+
+
+def test_history_injection_policy_flips_atomically_at_portfolio_commit():
+    session = ScientistSessionState.fresh()
+    session.inquiry.phase = InquiryPhase.EXPLORE
+    session.inquiry.hypotheses = [ResearchHypothesis(
+        id="H1", generative_op="G1", model_basis=("M1",),
+        explanation_basis=("E1",), mechanism="frequency",
+        intervention_family="reuse", scope="whole flow",
+        why_plausible="repeated state", critical_unknown="sharing",
+    )]
+    action = _parse_scientist_action(json.dumps({
+        "action": "commit_hypothesis_portfolio", "hypothesis_ids": ["H1"],
+        "coverage_rationale": "attempted mechanism and representation space",
+        "portfolio_sufficiency_justification": "other ideas lack lineage",
+        "unused_generative_ops": ["G2"],
+    }))
+    assert "search_experiments" not in _build_phase_system_prompt(
+        None, session.inquiry.phase, session.inquiry.history_visible,
+    )
+    _apply_scientist_action(session, action, step=9)
+    assert session.inquiry.phase is InquiryPhase.NARROW
+    assert session.inquiry.history_visible is True
+    assert '"action":"search_experiments"' in _build_phase_system_prompt(
+        None, session.inquiry.phase, session.inquiry.history_visible,
+    )
+
+
+class _LaneModel:
+    def __init__(self, actions):
+        self.actions = list(actions)
+        self.calls = []
+
+    def complete(self, **kwargs):
+        self.calls.append({**kwargs, "messages": list(kwargs["messages"])})
+        return ModelReply(json.dumps(self.actions.pop(0)), usage={"total_tokens": 1})
+
+
+class _LaneMemory:
+    def __init__(self):
+        self.history_calls = 0
+
+    def build_fresh_inquiry_context(self, **kwargs):
+        return "FRESH WORLD ONLY"
+
+    def build_history_entry_pack(self, **kwargs):
+        self.history_calls += 1
+        return "THIN FACTUAL HISTORY"
+
+
+def _fresh_lane_actions():
+    actions = [
+        {"action": "commit_understanding", "problem": "slow",
+         "target_outcome": "lower cost", "boundary": "whole flow",
+         "current_account_of_the_whole": "inputs trigger repeated work",
+         "key_unknowns": ["dominant term"]},
+        {"action": "propose_working_model", "working_model": {
+            "representation": "cost = frequency * unit cost",
+            "explanatory_structure": "counterfactual cost model",
+            "claims": [{"id": "M1", "claim": "calls repeat",
+                        "evidence_refs": ["source:src/a.cc"]}],
+            "important_unknowns": ["dominant term"]}},
+        {"action": "commit_working_model", "model_version": 1,
+         "model_check": {
+             "explains_target": "yes", "counterfactual": {
+                 "change": "halve calls", "predicted_effect": "lower cost",
+                 "model_claim_refs": ["M1"]},
+             "important_unknowns": [{"question": "dominant term",
+                                      "why_it_matters": "focus"}],
+             "blocking_unknown": None,
+             "why_model_is_sufficient_for_next_stage": "supports accounts"}},
+        {"action": "submit_explanation", "id": "E1", "phenomenon": "gap",
+         "account": "repetition", "model_basis": ["M1"],
+         "expected_if_true": ["repeat"], "evidence_needed": ["trace"]},
+        {"action": "submit_explanation", "id": "E2", "phenomenon": "gap",
+         "account": "unit cost", "model_basis": ["M1"],
+         "expected_if_true": ["expensive calls"], "evidence_needed": ["profile"]},
+        {"action": "commit_explanation_set", "explanation_ids": ["E1", "E2"],
+         "explanation_sufficiency_justification": None},
+        {"action": "emit_lever_map", "levers": [{
+            "id": "L1", "target_mechanism": "repetition",
+            "why_leverage_exists": "frequency multiplies cost",
+            "model_basis": ["M1"], "explanation_basis": ["E1"]}]},
+    ]
+    for index in range(1, 5):
+        actions.append({
+            "action": "submit_hypothesis", "id": f"H{index}",
+            "generative_op": f"G{index}", "model_basis": ["M1"],
+            "explanation_basis": ["E1"], "mechanism": f"mechanism {index}",
+            "intervention_family": f"family {index}", "scope": f"scope {index}",
+            "why_plausible": "lineage supports it",
+            "critical_unknown": f"premise {index}"})
+    actions.extend([
+        {"action": "commit_hypothesis_portfolio",
+         "hypothesis_ids": ["H1", "H2", "H3", "H4"],
+         "coverage_rationale": "four mechanism families",
+         "portfolio_sufficiency_justification": None,
+         "unused_generative_ops": []},
+        {"action": "select_for_deepen", "selected": [{
+            "hypothesis_id": "H1", "evidence_refs": ["experiment:r0c0"],
+            "rationale": "history tests the critical premise"}]},
+    ])
+    return actions
+
+
+def test_run_lane_switches_prompt_tools_and_history_together(tmp_path, monkeypatch):
+    model = _LaneModel(_fresh_lane_actions())
+    memory = _LaneMemory()
+    agent = ProposerAgent(
+        model=model, runtime=object(), timeout_seconds=30, max_steps=20,
+        command_timeout_seconds=5, command_output_cap_chars=1000,
+    )
+    tool_calls = []
+
+    class Tools:
+        def __init__(self, kwargs):
+            self.history_enabled = kwargs["history_enabled"]
+            self.memory = kwargs["memory_service"]
+
+    def make_tools(**kwargs):
+        tool_calls.append(kwargs)
+        return Tools(kwargs)
+
+    monkeypatch.setattr(agent, "_make_tools", make_tools)
+    result = agent.run_lane(
+        assigned_ops=("G1", "G2", "G3", "G4"), select_quota=2,
+        scientist_steps=len(_fresh_lane_actions()), goal="lower cost",
+        editable=["src/**"], frozen=["tests/**"], memory_service=memory,
+        base_sha="abc", source_path=tmp_path, repo_path=tmp_path,
+        run_dir=tmp_path, current_round=1, gate_block="must pass",
+        prompt_dir=None,
+    )
+
+    assert [call["history_enabled"] for call in tool_calls] == [False, True]
+    assert tool_calls[0]["history_dir"] is None
+    assert tool_calls[0]["memory_service"] is None
+    assert tool_calls[1]["history_dir"] == tmp_path
+    assert tool_calls[1]["memory_service"] is memory
+    assert memory.history_calls == 1
+    assert '"action":"search_experiments"' not in model.calls[0]["system"]
+    assert '"action":"search_experiments"' in model.calls[-1]["system"]
+    assert sum(
+        message["content"] == "THIN FACTUAL HISTORY"
+        for message in model.calls[-1]["messages"]
+    ) == 1
+    assert result.trace["history_injected_at_step"] == 12
+    assert result.trace["phase"] == "narrow"
+
 
 
 def test_lineage_guards_reject_unknown_model_and_explanation(tmp_path: Path):

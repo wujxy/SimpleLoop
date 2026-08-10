@@ -160,6 +160,7 @@ class ScientistSessionState:
     archived_contexts: list[ScientistContextState] = field(default_factory=list)
     cumulative_usage: list[dict] = field(default_factory=list)
     cumulative_action_log: list[dict] = field(default_factory=list)
+    usage_by_phase: dict[str, list] = field(default_factory=dict)
     fresh_reframes: int = 0
 
     @classmethod
