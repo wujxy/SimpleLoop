@@ -275,7 +275,8 @@ class ResearchAgent:
     # ---- shared tool loop ----
 
     def _make_tools(self, *, source, repo, history_dir, scratch,
-                    memory_service, current_round) -> ResearchTools:
+                    memory_service, current_round,
+                    history_enabled: bool) -> ResearchTools:
         return ResearchTools(
             runtime=self.runtime,
             source=source,
@@ -286,6 +287,7 @@ class ResearchAgent:
             command_timeout_seconds=self.command_timeout_seconds,
             command_output_cap_chars=self.command_output_cap_chars,
             current_round=current_round,
+            history_enabled=history_enabled,
         )
 
     def _step(

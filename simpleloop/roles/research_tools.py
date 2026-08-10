@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
@@ -107,10 +108,15 @@ MEMORY_TOOL_ACTIONS = frozenset({
 })
 
 
-def render_research_tool_prompt() -> str:
+def render_research_tool_prompt(allowed_actions: Collection[str]) -> str:
+    allowed = frozenset(allowed_actions)
+    known = {spec.action for spec in RESEARCH_TOOL_SPECS}
+    unknown = allowed - known
+    if unknown:
+        raise ValueError(f"unknown research actions: {sorted(unknown)}")
     return "\n".join(
         f"- {spec.schema}\n  {spec.description}"
-        for spec in RESEARCH_TOOL_SPECS
+        for spec in RESEARCH_TOOL_SPECS if spec.action in allowed
     )
 
 
@@ -123,7 +129,7 @@ class ResearchCommandRunner:
         runtime,
         source: Path,
         repo: Path,
-        history_dir: Path,
+        history_dir: Path | None,
         scratch: Path,
         timeout_seconds: int,
         output_cap_chars: int,
@@ -131,7 +137,9 @@ class ResearchCommandRunner:
         self.runtime = runtime
         self.source = Path(source)
         self.repo = Path(repo)
-        self.history_dir = Path(history_dir)
+        self.history_dir = (
+            None if history_dir is None else Path(history_dir)
+        )
         self.scratch = Path(scratch)
         self.timeout_seconds = timeout_seconds
         self.output_cap_chars = output_cap_chars
@@ -290,14 +298,23 @@ class ResearchTools:
         runtime,
         source: Path,
         repo: Path,
-        history_dir: Path,
+        history_dir: Path | None,
         scratch: Path,
         memory_service,
         command_timeout_seconds: int,
         command_output_cap_chars: int,
         current_round: int,
+        history_enabled: bool,
     ):
-        self.memory = memory_service
+        if history_enabled and (
+            history_dir is None or memory_service is None
+        ):
+            raise ValueError(
+                "history-enabled tools require history_dir and memory_service"
+            )
+        self.history_enabled = bool(history_enabled)
+        self.memory = memory_service if self.history_enabled else None
+        history_dir = history_dir if self.history_enabled else None
         self.current_round = int(current_round)
         self.command_timeout_seconds = command_timeout_seconds
         self.command_runner = ResearchCommandRunner(
@@ -312,6 +329,12 @@ class ResearchTools:
 
     def execute(self, action: dict, *, deadline: float) -> dict:
         name = action["action"]
+        if name in MEMORY_TOOL_ACTIONS and not self.history_enabled:
+            return {
+                "ok": False,
+                "error": "history is not available in this phase",
+            }
+
         try:
             if name == "run_research_command":
                 remaining = deadline - time.monotonic()

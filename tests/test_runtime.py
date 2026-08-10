@@ -327,6 +327,18 @@ def test_research_argv_is_contained_read_only_and_offline(tmp_path: Path):
     assert not any(str(secret) in arg for arg in argv)
     assert argv[argv.index("--cwd") + 1] == "/source"
 
+def test_research_argv_without_history_has_no_history_bind(tmp_path: Path):
+    runtime = _make_runtime(tmp_path)
+
+    argv = runtime.research_exec_argv(
+        ["true"], source=tmp_path, repo=tmp_path,
+        history=None, scratch=tmp_path, cwd="source",
+    )
+
+    assert not any("/history.jsonl" in arg for arg in argv)
+    assert not any("/rounds" in arg for arg in argv)
+
+
 
 def test_research_argv_accepts_only_source_or_scratch_cwd(tmp_path: Path):
     runtime = _make_runtime(tmp_path)

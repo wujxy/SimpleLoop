@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -92,7 +93,9 @@ class _FakeMemoryService:
 # --- tool prompt ---------------------------------------------------------
 
 def test_research_tool_prompt_is_composed_from_tool_specs():
-    prompt = render_research_tool_prompt()
+    prompt = render_research_tool_prompt(
+        {spec.action for spec in RESEARCH_TOOL_SPECS},
+    )
 
     assert {spec.action for spec in RESEARCH_TOOL_SPECS} == {
         "run_research_command",
@@ -105,6 +108,18 @@ def test_research_tool_prompt_is_composed_from_tool_specs():
     for spec in RESEARCH_TOOL_SPECS:
         assert spec.schema in prompt
         assert spec.description in prompt
+
+def test_tool_prompt_matches_allowed_actions():
+    prompt = render_research_tool_prompt({"run_research_command"})
+
+    assert "run_research_command" in prompt
+    assert "search_experiments" not in prompt
+
+
+def test_tool_prompt_rejects_unknown_actions():
+    with pytest.raises(ValueError, match="unknown research actions"):
+        render_research_tool_prompt({"invent_history"})
+
 
 
 # --- ResearchCommandRunner (unchanged behavior) --------------------------
@@ -279,7 +294,8 @@ def test_research_command_rejects_invalid_input(tmp_path, command, cwd):
 
 # --- ResearchTools memory-tool dispatch ----------------------------------
 
-def _tools(tmp_path, *, memory=None, current_round=0):
+def _tools(tmp_path, *, memory=None, current_round=0,
+           history_enabled=True):
     runner, runtime = _runner(tmp_path)
     return ResearchTools(
         runtime=runtime, source=runner.source, repo=runner.repo,
@@ -288,8 +304,37 @@ def _tools(tmp_path, *, memory=None, current_round=0):
         command_timeout_seconds=12,
         command_output_cap_chars=100,
         current_round=current_round,
+        history_enabled=history_enabled,
     )
 
+
+def test_history_disabled_tools_reject_memory_actions(tmp_path):
+    memory = _FakeMemoryService()
+    tools = _tools(tmp_path, memory=memory, history_enabled=False)
+
+    result = tools.execute(
+        {"action": "search_experiments", "query": "cache"},
+        deadline=time.monotonic() + 10,
+    )
+
+    assert result == {
+        "ok": False,
+        "error": "history is not available in this phase",
+    }
+    assert tools.memory is None
+    assert tools.command_runner.history_dir is None
+    assert memory.calls == []
+
+
+def test_history_enabled_tools_require_both_history_views(tmp_path):
+    runner, runtime = _runner(tmp_path)
+    with pytest.raises(ValueError, match="require history_dir and memory_service"):
+        ResearchTools(
+            runtime=runtime, source=runner.source, repo=runner.repo,
+            history_dir=None, scratch=runner.scratch, memory_service=None,
+            command_timeout_seconds=12, command_output_cap_chars=100,
+            current_round=0, history_enabled=True,
+        )
 
 def test_research_tools_inspect_episode_goes_through_memory(tmp_path):
     memory = _FakeMemoryService()

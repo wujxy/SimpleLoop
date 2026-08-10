@@ -129,7 +129,7 @@ class ApptainerRuntime:
         *,
         source: str | Path,
         repo: str | Path,
-        history: str | Path,
+        history: str | Path | None,
         scratch: str | Path,
         cwd: str,
     ) -> list[str]:
@@ -148,15 +148,16 @@ class ApptainerRuntime:
         ]
         if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
             argv.append("--userns")
-        evidence = Path(history).resolve()
-        history_file = evidence / "history.jsonl"
-        rounds = evidence / "rounds"
-        if history_file.is_file():
-            argv.extend([
-                "--bind", f"{history_file}:/history.jsonl:ro",
-            ])
-        if rounds.is_dir():
-            argv.extend(["--bind", f"{rounds}:/rounds:ro"])
+        if history is not None:
+            evidence = Path(history).resolve()
+            history_file = evidence / "history.jsonl"
+            rounds = evidence / "rounds"
+            if history_file.is_file():
+                argv.extend([
+                    "--bind", f"{history_file}:/history.jsonl:ro",
+                ])
+            if rounds.is_dir():
+                argv.extend(["--bind", f"{rounds}:/rounds:ro"])
         argv.extend([
             "--bind", f"{Path(source).resolve()}:/source:ro",
             "--bind", f"{Path(repo).resolve()}:/repo:ro",

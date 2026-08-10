@@ -131,7 +131,7 @@ _PROTOCOL_ENVELOPE = (
 
 _RESEARCH_PHASE_NOTE = (
     "Research tools (use freely to locate and read the target):\n"
-    + render_research_tool_prompt()
+    + render_research_tool_prompt(_RESEARCH_TOOL_ACTIONS)
 )
 
 _PROTOCOL_BLOCK = """Control actions (you are done only when you submit or block):
@@ -735,6 +735,7 @@ class ProposerAgent(ResearchAgent):
                 command_timeout_seconds=self.command_timeout_seconds,
                 command_output_cap_chars=self.command_output_cap_chars,
                 current_round=current_round,
+                history_enabled=True,
             )
             for _step_num in range(steps_budget):
                 step = _step_num + 1

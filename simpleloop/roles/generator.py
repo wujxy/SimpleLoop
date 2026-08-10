@@ -461,12 +461,13 @@ class GeneratorAgent(ResearchAgent):
                 runtime=self.runtime,
                 source=source_path,
                 repo=repo_path,
-                history_dir=run_dir,
+                history_dir=None,
                 scratch=Path(scratch),
                 memory_service=None,  # no history tools
                 command_timeout_seconds=self.command_timeout_seconds,
                 command_output_cap_chars=self.command_output_cap_chars,
                 current_round=0,
+                history_enabled=False,
             )
             for _step_num in range(steps_budget):
                 step = _step_num + 1
