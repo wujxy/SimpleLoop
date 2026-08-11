@@ -1,0 +1,66 @@
+kind: task
+
+task:
+  goal: >
+    Minimize reconstruction SPEED_MS while satisfying every configured gate.
+    The current implementation is the starting artifact, not a constraint on
+    the form or scale of a valid solution.
+
+workspace:
+  seed:
+    path: ../../../omilrec-v100-gated
+    ref: simpleloop-v100-gated-baseline
+  copy:
+    - OMILRECV2
+    - CMakeLists.txt
+
+loop:
+  max_rounds: 100
+  candidates_per_round: 4
+  max_workers: 4
+  agent_timeout_seconds: 7200
+
+roles:
+  researcher:
+    api: hepai
+    model: gpt-5.5
+    base_url: https://aiapi.ihep.ac.cn/apiv2
+    command_timeout_seconds: 120
+    command_output_cap_chars: 12000
+  executor:
+    api: anthropic
+    model: glm-5.2
+    base_url: https://aiapi.ihep.ac.cn/apiv2
+
+runtime:
+  image: ../junosw-apptainer.sif
+  definition: ../junosw-apptainer.def
+  binds: []
+
+evaluation:
+  runner: evaluator/eval.sh
+  args:
+    - --assets
+    - /datafs/users/wujxy/agent-sci/omilrec_opt/v1.0/omilrec-v100-postv107-gated
+    - --evtmax
+    - "100"
+  binds:
+    - /cvmfs
+    - /data/juno
+    - /datafs/users/wujxy/agent-sci/omilrec_opt/v1.0/omilrec-v100-postv107-gated
+  metrics:
+    objective:
+      key: SPEED_MS
+      lower_is_better: true
+    gates:
+      - key: CONTRACT
+        description: Production artifact and immutable gate contract remain valid.
+      - key: FCN
+        description: Production FCN matches the frozen numerical reference.
+      - key: CONSISTENCY
+        description: End-to-end reconstruction remains within configured tolerances.
+      - key: EVAL_RESULT
+        description: The complete external evaluation finishes successfully.
+
+execution:
+  backend: local

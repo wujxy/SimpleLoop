@@ -81,14 +81,14 @@ def _install_runner_fakes(monkeypatch, tmp_path, *, result=None, failure=None):
             calls["preflight"] = True
 
     class FakeWorkspace:
-        def __init__(self, *, run_dir, repo_path, baseline_ref, editable):
+        def __init__(self, *, run_dir, repo_path, baseline_ref, copy_entries):
             self.run_dir = Path(run_dir)
             self.repo = self.run_dir / "repo"
             calls["workspace"] = {
                 "run_dir": self.run_dir,
                 "repo_path": repo_path,
                 "baseline_ref": baseline_ref,
-                "editable": editable,
+                "copy_entries": copy_entries,
             }
 
         def setup(self):

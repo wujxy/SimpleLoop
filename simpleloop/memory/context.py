@@ -5,37 +5,34 @@ bounded factual index exposed only after portfolio commitment.
 """
 from __future__ import annotations
 
-import json
 
 
 
 def build_fresh_inquiry_context(
     *,
     goal: str,
-    editable: list[str],
-    frozen: list[str],
-    base_sha: str,
+    editable: list[str] | None = None,
+    frozen: list[str] | None = None,
+    base_sha: str | None = None,
     gate_block: str,
     hints: list[str] | None = None,
 ) -> str:
-    """Current-world evidence for a history-blind Scientist context."""
-    hints_block = ""
-    if hints:
-        bullets = "\n".join(f"  - {hint}" for hint in hints)
-        hints_block = (
-            "\nGuidance (observations, not required directions):\n"
-            f"{bullets}\n"
-        )
+    """Return only task outcomes and the generic workspace capability."""
     return f"""Research objective:
 {goal}
 
-{hints_block}
 Harness Gates:
 {gate_block or "(declared in factual records)"}
 
-Current accepted revision: {base_sha}
-Editable paths: {json.dumps(editable, ensure_ascii=False)}
-Frozen paths: {json.dumps(frozen, ensure_ascii=False)}
+Workspace:
+The provided workspace contains the complete mutable production artifact.
+Its current structure is only the starting implementation, not part of the specification.
+All task-specific prior knowledge available to you has been placed in this workspace.
+You may inspect any file under /work.
+
+Evaluation:
+Success is determined only by the stated goal and gates. Evaluation is external
+to the workspace; do not infer structural requirements beyond those criteria.
 """
 
 

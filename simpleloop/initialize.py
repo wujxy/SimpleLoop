@@ -127,7 +127,15 @@ def initialize(
 ) -> InitResult:
     """Prepare Git and Apptainer prerequisites for one task config."""
     cfg = config_mod.load(config_path, require_ready=False)
-    repo_status = prepare_git(cfg["repo_path"], cfg["baseline_ref"])
+    if cfg.get("workspace_seed_path"):
+        seed = Path(cfg["workspace_seed_path"])
+        if not _is_repo_root(seed) or not _has_head(seed):
+            raise InitError(
+                f"workspace.seed.path is not a ready Git repository: {seed}")
+        _verify_ref(seed, cfg["workspace_seed_ref"])
+        repo_status = "ready"
+    else:
+        repo_status = prepare_git(cfg["repo_path"], cfg["baseline_ref"])
     image = Path(cfg["runtime_image"])
     definition = Path(cfg["runtime_definition"])
     image_existed = image.exists()
@@ -163,6 +171,6 @@ def initialize(
     return InitResult(
         repo_status=repo_status,
         image_status=image_status,
-        repo_path=Path(cfg["repo_path"]),
+        repo_path=Path(cfg.get("workspace_seed_path") or cfg["repo_path"]),
         image_path=image,
     )

@@ -23,7 +23,7 @@ def _proposal(*, instruction, research_target):
         model_claim_refs=("M1",),
         explanation_refs=("E1",),
         hypothesis_id="H1",
-        evidence_refs=("source:src/a.cc",),
+        evidence_refs=("workspace:src/a.cc",),
         mechanism="test mechanism",
         prediction="test prediction",
         affected_scope="src/a.cc",
@@ -157,7 +157,9 @@ def test_memory_service_builds_fresh_context_without_history(tmp_path: Path):
         base_sha="abc", gate_block="- physics: pass", hints=["keep order"],
     )
 
-    assert "keep order" in text
+    assert "keep order" not in text
+    assert "complete mutable production artifact" in text
+    assert "editable paths" not in text.lower()
     assert "dashboard" not in text.lower()
     assert "frontier" not in text.lower()
 

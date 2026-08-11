@@ -46,9 +46,18 @@ def test_generator_is_not_an_active_prompt_role():
 
 def test_proposer_identity_is_scientific_not_a_phase_checklist():
     text = load_semantic("proposer")
-    lowered = text.lower()
+    lowered = " ".join(text.lower().split())
     for concept in ("working model", "explanation", "prediction", "counterfactual"):
         assert concept in lowered
+    for concept in (
+        "next experiment",
+        "meaningful opportunity remains",
+        "sampled terrain",
+        "not an implementation design",
+        "second executor",
+    ):
+        assert concept in lowered
+    assert "precise research-backed direction" not in lowered
     assert text.rstrip().endswith("prose outside that JSON object.")
     for legacy in (
         "cognitive element", "sieve", "enrich", "generator partner",
@@ -70,11 +79,13 @@ def test_executor_assembles_active_semantics_and_safety(tmp_path: Path):
 
     result = executor.execute(
         agent, proposal="replace lookup", goal="faster",
-        editable=["src/**"], frozen=["bench/**"], workspace=EmptyWorkspace(),
-        worktree=tmp_path, round_id=0, prompt_dir=prompt_dir,
+        workspace=EmptyWorkspace(), worktree=tmp_path, round_id=0,
+        prompt_dir=prompt_dir,
     )
 
     assert result.reason == "executor made no changes"
     assert agent.prompt.startswith("ACTIVE EXECUTOR")
     assert "Direction to implement:\nreplace lookup" in agent.prompt
-    assert "bench/**" in agent.prompt
+    assert "create, delete, move, replace, or reorganize" in agent.prompt
+    assert "Editable paths" not in agent.prompt
+    assert "Frozen paths" not in agent.prompt

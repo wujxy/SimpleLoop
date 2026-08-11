@@ -238,7 +238,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         enable_researcher=static_proposals is None,
     )
 
-    print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
+    print(f"[{stamp()}] materializing mutable production workspace", flush=True)
     ctx.workspace.setup()
     print(f"[{stamp()}] baseline sha: {ctx.workspace.baseline_sha()}", flush=True)
 
@@ -503,9 +503,9 @@ def _build_context(
                            usage_observer=telemetry.record_usage)
     workspace = Workspace(
         run_dir=run_dir_path,
-        repo_path=cfg["repo_path"],
-        baseline_ref=cfg["baseline_ref"],
-        editable=cfg["editable_paths"],
+        repo_path=cfg.get("workspace_seed_path") or cfg["repo_path"],
+        baseline_ref=cfg.get("workspace_seed_ref") or cfg["baseline_ref"],
+        copy_entries=cfg.get("workspace_copy") or cfg["editable_paths"],
     )
     store = Store(run_dir_path, metrics_schema=cfg["metrics"],
                   history_eval_cap=cfg.get("eval_history_cap_chars", 6000))
@@ -654,8 +654,8 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
     source_path = ctx.workspace.add_worktree(worktree_id, parent_sha)
     try:
         proposal_obj = ctx.proposer_agent.run(
-            goal=cfg["goal"], editable=cfg["editable_paths"],
-            frozen=cfg["frozen_paths"],
+            goal=cfg["goal"], editable=cfg.get("workspace_copy") or [],
+            frozen=[],
             memory_service=ctx.memory_service,
             base_sha=parent_sha,
             source_path=source_path,
@@ -667,6 +667,7 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
             prompt_dir=ctx.prompt_dir,
             hints=cfg.get("hints") or None,
             scientist_steps=cfg.get("scientist_steps", 364),
+            context_policy=cfg.get("context"),
         )
     except (model_mod.ModelError, proposer_mod.ProposerError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.

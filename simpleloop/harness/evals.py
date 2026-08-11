@@ -68,6 +68,70 @@ def run_eval(
     metrics = _parse_metrics(combined, metrics_schema) if metrics_schema else {}
     return EvalResult(text, metrics, tuple(returncodes))
 
+def run_external_eval(
+    runner: str | Path,
+    args: list[str],
+    workspace: Path,
+    runtime: ApptainerRuntime,
+    evaluator_binds: list[str] | tuple[str, ...] = (),
+    metrics_schema: dict | None = None,
+    timeout_seconds: int = 600,
+    output_cap: int = 16000,
+) -> EvalResult:
+    """Run the harness-owned evaluator as eval.sh /work plus arguments."""
+    runner_path = Path(runner).expanduser().resolve()
+    payload = ["bash", f"/evaluator/{runner_path.name}", "/work", *args]
+    argv = runtime.evaluator_exec_argv(
+        payload,
+        workspace=workspace,
+        runner=runner_path,
+        evaluator_binds=evaluator_binds,
+    )
+    completed = subprocess.run(
+        argv,
+        shell=False,
+        cwd=str(workspace),
+        env=runtime.subprocess_env(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    out = completed.stdout.strip()
+    err = completed.stderr.strip()
+    combined = "\n".join(part for part in (out, err) if part)
+    status = "OK" if completed.returncode == 0 else f"EXIT {completed.returncode}"
+    text = f"$ {' '.join(payload)}  [{status}]\n{combined[:output_cap]}"
+    metrics = _parse_metrics(combined, metrics_schema) if metrics_schema else {}
+    return EvalResult(text, metrics, (completed.returncode,))
+
+def run_configured_eval(
+    cfg: dict, *, workspace: Path, runtime: ApptainerRuntime,
+) -> EvalResult:
+    """Use the external evaluator when configured; retain legacy run replay."""
+    if cfg.get("evaluator_runner"):
+        return run_external_eval(
+            cfg["evaluator_runner"],
+            list(cfg.get("evaluator_args") or []),
+            workspace,
+            runtime,
+            list(cfg.get("evaluator_binds") or []),
+            cfg.get("metrics"),
+            cfg.get("eval_timeout_seconds", 600),
+            cfg.get("eval_output_cap_chars", 16000),
+        )
+    return run_eval(
+        cfg["eval_commands"],
+        workspace,
+        runtime,
+        cfg.get("metrics"),
+        cfg.get("eval_timeout_seconds", 600),
+        cfg.get("eval_output_cap_chars", 16000),
+    )
+
+
+
 
 def _parse_metrics(text: str, schema: dict | None) -> dict:
     """Parse declared `^KEY=value` lines out of eval output. Objectives become

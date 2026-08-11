@@ -166,15 +166,15 @@ def test_research_command_uses_process_group_and_returns_observation(
         "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
     )
 
-    result = runner.run("git show HEAD", cwd="source")
+    result = runner.run("git show HEAD", cwd="workspace")
 
     payload, paths = runtime.argv_call
     assert payload == [
         "env", "GIT_DIR=/repo/.git/worktrees/research",
-        "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/source",
+        "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/work",
         "bash", "-lc", "git show HEAD",
     ]
-    assert paths["cwd"] == "source"
+    assert paths["cwd"] == "workspace"
     assert popen_calls[0][1]["start_new_session"] is True
     assert popen_calls[0][1]["shell"] is False
     assert result == {
@@ -193,7 +193,7 @@ def test_fresh_research_command_has_no_git_metadata_view(tmp_path, monkeypatch):
         "simpleloop.roles.research_tools.subprocess.Popen",
         lambda argv, **kwargs: _Process(returncode=0),
     )
-    runner.run("git log --all", cwd="source")
+    runner.run("git log --all", cwd="workspace")
     payload, paths = runtime.argv_call
     assert payload == ["bash", "-lc", "git log --all"]
     assert paths["history"] is None
@@ -231,7 +231,7 @@ def test_research_command_uses_the_snapshot_worktree_head(tmp_path):
         def research_exec_argv(self, payload, **paths):
             replacements = {
                 "/repo": str(paths["repo"]),
-                "/source": str(paths["source"]),
+                "/work": str(paths["source"]),
             }
             return [
                 next((item.replace(old, new) for old, new in replacements.items()
@@ -289,7 +289,7 @@ def test_research_command_caps_combined_output(tmp_path, monkeypatch):
         "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
     )
 
-    result = runner.run("true", cwd="source")
+    result = runner.run("true", cwd="workspace")
 
     assert result["truncated"] is True
     assert result["output"] == "x" * 12
@@ -424,7 +424,7 @@ def test_research_tool_itself_reads_declared_source_evidence(tmp_path, monkeypat
     tools.command_runner.run = lambda *args, **kwargs: {"ok": True}
     result = tools.execute({
         "action": "run_research_command", "command": "true",
-        "cwd": "source", "evidence_paths": ["a.cc"],
+        "cwd": "workspace", "evidence_paths": ["a.cc"],
     }, deadline=time.monotonic() + 10)
     assert result["source_evidence"] == [{
         "path": "a.cc", "preview": "observed source", "truncated": False,
@@ -444,8 +444,8 @@ def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
     result = tools.execute({
         "action": "run_research_command", "command": "rg cache",
         "evidence_paths": [],
-        "cwd": "source",
+        "cwd": "workspace",
     }, deadline=100)
 
     assert result["ok"] is True
-    assert calls == [("rg cache", {"cwd": "source", "timeout_seconds": 10})]
+    assert calls == [("rg cache", {"cwd": "workspace", "timeout_seconds": 10})]

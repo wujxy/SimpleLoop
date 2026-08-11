@@ -54,7 +54,7 @@ def test_working_model_versions_are_explicit():
         version=2,
         representation="total cost is repeated work plus outside work",
         explanatory_structure="frequency multiplied by per-call cost",
-        claims=(ModelClaim("M1", "the target is end-to-end cost", ("source:a",)),),
+        claims=(ModelClaim("M1", "the target is end-to-end cost", ("workspace:a",)),),
         important_unknowns=("which term dominates",),
     )
 
@@ -101,11 +101,11 @@ def test_fresh_reframe_preserves_only_cumulative_telemetry():
     session.cumulative_usage.append({"total_tokens": 20})
     session.cumulative_action_log.append({"action": "commit_understanding"})
     session.runtime.counts["tool"] = 7
-    session.runtime.session_evidence.add("source:a")
-    session.runtime.new_evidence.add("source:a")
+    session.runtime.session_evidence.add("workspace:a")
+    session.runtime.new_evidence.add("workspace:a")
     session.runtime.action_log.append({"action": "run_research_command"})
     session.runtime.protocol_repairs = 1
-    session.runtime.last_tool_fingerprint = "run_research_command:source:rg"
+    session.runtime.last_tool_fingerprint = "run_research_command:workspace:rg"
 
     session.start_fresh_context()
 
@@ -158,7 +158,7 @@ def test_scientist_parser_separates_model_revision_from_commit():
             "explanatory_structure": "counterfactual cost model",
             "claims": [{
                 "id": "M1", "claim": "calls repeat",
-                "evidence_refs": ["source:src/a.cc"],
+                "evidence_refs": ["workspace:src/a.cc"],
             }],
             "important_unknowns": ["which factor dominates"],
         },
@@ -210,7 +210,7 @@ def _session_with_model() -> ScientistSessionState:
         version=2,
         representation="cost model",
         explanatory_structure="frequency times unit cost",
-        claims=(ModelClaim("M1", "calls repeat", ("source:src/a.cc",)),),
+        claims=(ModelClaim("M1", "calls repeat", ("workspace:src/a.cc",)),),
         important_unknowns=("which factor dominates",),
     )
     return session
@@ -275,7 +275,7 @@ def _hypothesis_action(index):
 def test_fresh_cycle_preserves_one_session_and_artifact_lineage():
     session = ScientistSessionState.fresh()
     identity = id(session)
-    session.runtime.session_evidence.add("source:src/a.cc")
+    session.runtime.session_evidence.add("workspace:src/a.cc")
     actions = [
         _parse_scientist_action(json.dumps({
             "action": "commit_understanding", "problem": "slow",
@@ -288,7 +288,7 @@ def test_fresh_cycle_preserves_one_session_and_artifact_lineage():
                 "representation": "cost = frequency * unit cost",
                 "explanatory_structure": "counterfactual cost model",
                 "claims": [{"id": "M1", "claim": "calls repeat",
-                            "evidence_refs": ["source:src/a.cc"]}],
+                            "evidence_refs": ["workspace:src/a.cc"]}],
                 "important_unknowns": ["dominant term"],
             },
         })),
@@ -390,7 +390,7 @@ class _LaneMemory:
 
 def _fresh_lane_actions():
     actions = [
-        {"action": "run_research_command", "command": "sed -n 1p src/a.cc", "cwd": "source", "evidence_paths": ["src/a.cc"]},
+        {"action": "run_research_command", "command": "sed -n 1p src/a.cc", "cwd": "workspace", "evidence_paths": ["src/a.cc"]},
         {"action": "commit_understanding", "problem": "slow",
          "target_outcome": "lower cost", "boundary": "whole flow",
          "current_account_of_the_whole": "inputs trigger repeated work",
@@ -399,7 +399,7 @@ def _fresh_lane_actions():
             "representation": "cost = frequency * unit cost",
             "explanatory_structure": "counterfactual cost model",
             "claims": [{"id": "M1", "claim": "calls repeat",
-                        "evidence_refs": ["source:src/a.cc"]}],
+                        "evidence_refs": ["workspace:src/a.cc"]}],
             "important_unknowns": ["dominant term"]}},
         {"action": "commit_working_model", "model_version": 1,
          "model_check": {
@@ -516,7 +516,7 @@ def test_run_lane_switches_prompt_tools_and_history_together(tmp_path, monkeypat
     assert result.trace["wall_time_by_phase"]["understand"] > 0
     tool_action = result.trace["actions"][0]
     assert tool_action["observation_summary"] == "result=ok exit_code=0 output_chars=12"
-    assert tool_action["evidence_refs"] == ["source:src/a.cc"]
+    assert tool_action["evidence_refs"] == ["workspace:src/a.cc"]
     json.dumps(result.trace)
 
 
@@ -591,7 +591,7 @@ def test_source_evidence_must_be_declared_read_and_observed(tmp_path: Path):
     session = ScientistSessionState.fresh()
     action = _parse_scientist_action(json.dumps({
         "action": "run_research_command", "command": "true",
-        "cwd": "source", "evidence_paths": ["src/a.cc"],
+        "cwd": "workspace", "evidence_paths": ["src/a.cc"],
     }))
     assert _validate_scientist_guard(
         session, action, tmp_path, select_quota=2,
@@ -599,7 +599,7 @@ def test_source_evidence_must_be_declared_read_and_observed(tmp_path: Path):
 
     escaped = _parse_scientist_action(json.dumps({
         "action": "run_research_command", "command": "true",
-        "cwd": "source", "evidence_paths": ["../outside"],
+        "cwd": "workspace", "evidence_paths": ["../outside"],
     }))
     assert _validate_scientist_guard(
         session, escaped, tmp_path, select_quota=2,
@@ -611,7 +611,7 @@ def test_source_evidence_must_be_declared_read_and_observed(tmp_path: Path):
             "representation": "cost model",
             "explanatory_structure": "frequency times unit cost",
             "claims": [{"id": "M1", "claim": "calls repeat",
-                        "evidence_refs": ["source:src/a.cc"]}],
+                        "evidence_refs": ["workspace:src/a.cc"]}],
             "important_unknowns": [],
         },
     }))
@@ -643,6 +643,26 @@ def test_phase_prompt_exposes_only_current_actions():
     assert '"action":"commit_understanding"' not in narrow
 
 
+def test_generative_basis_is_only_injected_during_explore():
+    explore = _build_phase_system_prompt(
+        None, InquiryPhase.EXPLORE, False, assigned_ops=("G1",),
+    )
+    narrow = _build_phase_system_prompt(
+        None, InquiryPhase.NARROW, True, assigned_ops=("G1",),
+    )
+    deepen = _build_phase_system_prompt(
+        None, InquiryPhase.DEEPEN, True, assigned_ops=("G1",),
+    )
+
+    assert "Assigned Generative Basis" in explore
+    assert "G1 —" in explore
+    assert "Assigned Generative Basis" not in narrow
+    assert "Assigned Generative Basis" not in deepen
+    assert "consequential opportunity" in narrow.lower()
+    assert "history is richest" in narrow.lower()
+    assert "deserves a real experiment" in deepen.lower()
+
+
 def test_research_proposal_requires_scientist_lineage_metadata():
     with pytest.raises(TypeError):
         ResearchProposal(
@@ -654,7 +674,7 @@ def test_research_proposal_requires_scientist_lineage_metadata():
         instruction="change X",
         research_target=NewFindingTarget(question="why X"),
         model_claim_refs=("M1",), explanation_refs=("E1",),
-        hypothesis_id="H1", evidence_refs=("source:src/x.cc",),
+        hypothesis_id="H1", evidence_refs=("workspace:src/x.cc",),
         mechanism="remove repeated work",
         prediction="call count falls while gates remain satisfied",
         affected_scope="src/x.cc:X",
@@ -699,7 +719,7 @@ def test_select_for_deepen_transitions_and_proposal_requires_deep_lineage(tmp_pa
             "instruction": "Lift invariant state to the event lifetime.",
             "research_target": {"mode": "new", "question": "is state shared?"},
             "model_claim_refs": ["M1"], "explanation_refs": ["E1"],
-            "hypothesis_id": "H1", "evidence_refs": ["source:src/a.cc"],
+            "hypothesis_id": "H1", "evidence_refs": ["workspace:src/a.cc"],
             "mechanism": "avoid repeated construction",
             "prediction": "construction count falls without gate changes",
             "affected_scope": "src/a.cc:Builder",
@@ -708,18 +728,18 @@ def test_select_for_deepen_transitions_and_proposal_requires_deep_lineage(tmp_pa
     proposal_action = _parse_scientist_action(json.dumps(raw))
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.cc").write_text("// source")
-    session.runtime.session_evidence.add("source:src/a.cc")
+    session.runtime.session_evidence.add("workspace:src/a.cc")
     assert _validate_scientist_guard(
         session, proposal_action, tmp_path, select_quota=2,
     ) == "proposal_requires_deep_evidence"
-    session.inquiry.deep_evidence_refs.add("source:src/a.cc")
+    session.inquiry.deep_evidence_refs.add("workspace:src/a.cc")
     assert _validate_scientist_guard(
         session, proposal_action, tmp_path, select_quota=2,
     ) is None
     mixed = dict(raw)
     mixed["proposals"] = [dict(raw["proposals"][0])]
     mixed["proposals"][0]["evidence_refs"] = [
-        "source:src/a.cc", "experiment:fabricated",
+        "workspace:src/a.cc", "experiment:fabricated",
     ]
     assert _validate_scientist_guard(
         session, _parse_scientist_action(json.dumps(mixed)), tmp_path,

@@ -12,7 +12,6 @@ import yaml
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop.harness import export as export_mod
-from simpleloop.harness import gate
 from simpleloop.harness.store import Store
 from simpleloop.harness.workspace import Workspace
 
@@ -156,14 +155,14 @@ def _make_source(tmp_path: Path) -> Path:
     return src
 
 
-def test_rename_from_frozen_to_editable_exposes_both_paths(tmp_path: Path):
+def test_rename_reports_both_source_and_destination_paths(tmp_path: Path):
     src = _make_source(tmp_path)
     (src / "frozen.txt").write_text("protected\n")
     _git(src, "add", "frozen.txt")
     _git(src, "-c", "user.name=t", "-c", "user.email=t@e.invalid",
          "commit", "-qm", "add frozen file")
     run_dir = tmp_path / "run"
-    ws = Workspace(run_dir, str(src), "HEAD", ["editable/**"])
+    ws = Workspace(run_dir, str(src), "HEAD", ["frozen.txt"])
     ws.setup()
     wt = ws.add_worktree("rename", ws.baseline_sha())
     (wt / "editable").mkdir()
@@ -172,9 +171,6 @@ def test_rename_from_frozen_to_editable_exposes_both_paths(tmp_path: Path):
     changed = ws.changed_paths(wt)
 
     assert changed == ["editable/moved.txt", "frozen.txt"]
-    assert gate.check_diff(
-        changed, ["editable/**"], ["frozen.txt"],
-    ) == (False, ["frozen.txt: touches a frozen path"])
 
 
 def _seed_run(tmp_path: Path):
@@ -184,7 +180,7 @@ def _seed_run(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     ws = Workspace(run_dir=run_dir, repo_path=str(src), baseline_ref="HEAD",
-                   editable=["*"])
+                   copy_entries=["*"])
     ws.setup()
     baseline = ws.baseline_sha()
     wt = ws.add_worktree("0-c0", baseline)
@@ -268,7 +264,7 @@ def test_export_head_and_best_reject_empty_runs(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     ws = Workspace(run_dir=run_dir, repo_path=str(src), baseline_ref="HEAD",
-                   editable=["*"])
+                   copy_entries=["*"])
     ws.setup()
     baseline = ws.baseline_sha()
     store = Store(run_dir, metrics_schema=SCHEMA)

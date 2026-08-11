@@ -76,7 +76,10 @@ def test_fresh_inquiry_context_has_current_world_evidence_only():
     )
 
     assert "speed" in text and "FCN=true" in text
-    assert "preserve order" in text
+    assert "complete mutable production artifact" in text
+    assert "preserve order" not in text
+    assert "Editable paths" not in text and "Frozen paths" not in text
+    assert "abc" not in text
     for historical in (
         "dashboard", "frontier", "abstention", "search_experiments",
     ):

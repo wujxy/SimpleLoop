@@ -1,6 +1,4 @@
-"""Executor: turns the proposal into a code change and delivers a commit SHA
-(or None when gate-rejected / no change). The agent only edits the worktree;
-the harness gates the changed paths and commits them itself."""
+"""Executor: turn a proposal into an unrestricted workspace change and commit."""
 from __future__ import annotations
 
 import json
@@ -10,17 +8,14 @@ from pathlib import Path
 
 from .agent import Agent
 from ..prompts import load_semantic
-from ..harness import gate
 from ..harness.workspace import Workspace
 
 
 @dataclass
 class ExecResult:
-    sha: str | None          # None when gate-rejected or no change
+    sha: str | None          # None when the executor produced no change
     reason: str | None       # None on success; otherwise why there's no SHA
     changed_paths: list[str]
-    path_gate_passed: bool
-    path_gate_violations: list[str]
     output: str = ""         # the agent's raw text response (for handoff logs)
     # The executor's structured SELF_REPORT (parsed best-effort from output).
     # None when the agent emitted no usable block. Carries the executor's own
@@ -79,11 +74,10 @@ def parse_self_report(text: str) -> dict | None:
     }
 
 
-def execute(agent: Agent, *, proposal: str, goal: str, editable: list[str],
-            frozen: list[str], workspace: Workspace, worktree: Path,
-            round_id: int | str,
+def execute(agent: Agent, *, proposal: str, goal: str,
+            workspace: Workspace, worktree: Path, round_id: int | str,
             gate_block: str = "", prompt_dir: str | Path | None = None) -> ExecResult:
-    """Run the executor agent and produce (or fail to produce) a commit."""
+    """Run the executor agent and commit any change inside its workspace."""
     semantic = load_semantic("executor", prompt_dir)
     prompt = f"""{semantic}
 
@@ -96,13 +90,16 @@ Direction to implement:
 Gates:
 {gate_block}
 
-Fixed execution boundaries:
-- Editable paths: {editable}
-- Frozen paths: {frozen}
-- Edits stay inside the assigned worktree.
-- Git staging and commits belong to the harness.
-- Verification side effects outside the intended source change are restored
-  before delivery.
+Workspace:
+The provided workspace contains the complete mutable production artifact.
+You may inspect, create, delete, move, replace, or reorganize anything inside it.
+Its current structure is only the starting implementation, not part of the specification.
+All task-specific prior knowledge available to you has been placed in this workspace.
+Git staging and commits belong to the harness.
+
+Evaluation:
+Success is determined only by the stated goal and gates. Evaluation is external
+to the workspace; do not infer structural requirements beyond those criteria.
 
 When the implementation and verification are complete, emit your SELF_REPORT
 block (see the protocol in your role brief) and stop. The Harness inspects and
@@ -119,20 +116,6 @@ structured response.
             sha=None,
             reason="executor made no changes",
             changed_paths=[],
-            path_gate_passed=True,
-            path_gate_violations=[],
-            output=agent_output,
-            self_report=self_report,
-        )
-
-    ok, violations = gate.check_diff(changed, editable, frozen)
-    if not ok:
-        return ExecResult(
-            sha=None,
-            reason="gate rejected: " + "; ".join(violations),
-            changed_paths=changed,
-            path_gate_passed=False,
-            path_gate_violations=violations,
             output=agent_output,
             self_report=self_report,
         )
@@ -142,8 +125,6 @@ structured response.
         sha=sha,
         reason=None,
         changed_paths=changed,
-        path_gate_passed=True,
-        path_gate_violations=[],
         output=agent_output,
         self_report=self_report,
     )

@@ -34,11 +34,11 @@ RESEARCH_TOOL_SPECS = (
         action="run_research_command",
         schema=(
             '{"action":"run_research_command","command":"...",'
-            '"cwd":"source|scratch","evidence_paths":["relative/path"]}'
+            '"cwd":"workspace|scratch","evidence_paths":["relative/path"]}'
         ),
         description=(
-            "Inspect the accepted source or, after history injection, Git/run evidence with a "
-            "bounded shell command. Source is read-only; scratch is writable."
+            "Inspect the accepted workspace or, after history injection, Git/run evidence with a "
+            "bounded shell command. Workspace is read-only; scratch is writable."
         ),
     ),
     ResearchToolSpec(
@@ -148,19 +148,19 @@ class ResearchCommandRunner:
         self,
         command: str,
         *,
-        cwd: str = "source",
+        cwd: str = "workspace",
         timeout_seconds: float | None = None,
     ) -> dict:
         if not isinstance(command, str) or not command.strip():
             raise ValueError("research command must be non-empty")
-        if cwd not in {"source", "scratch"}:
-            raise ValueError("research cwd must be 'source' or 'scratch'")
+        if cwd not in {"workspace", "scratch"}:
+            raise ValueError("research cwd must be 'workspace' or 'scratch'")
         payload = ["bash", "-lc", command]
         if self.history_dir is not None:
             git_dir = self._worktree_git_dir()
             payload = [
                 "env", f"GIT_DIR={git_dir}",
-                "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/source",
+                "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/work",
                 *payload,
             ]
         argv = self.runtime.research_exec_argv(

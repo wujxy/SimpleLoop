@@ -313,38 +313,38 @@ def test_research_argv_is_contained_read_only_and_offline(tmp_path: Path):
         repo=repo,
         history=runtime.run_dir,
         scratch=scratch,
-        cwd="source",
+        cwd="workspace",
     )
 
     assert "--containall" in argv
     assert argv[argv.index("--network") + 1] == "none"
-    assert f"{source.resolve()}:/source:ro" in argv
+    assert f"{source.resolve()}:/work:ro" in argv
     assert f"{repo.resolve()}:/repo:ro" in argv
     assert f"{history.resolve()}:/history.jsonl:ro" in argv
     assert f"{rounds.resolve()}:/rounds:ro" in argv
     assert f"{scratch.resolve()}:/scratch:rw" in argv
     assert f"{tmp_path.resolve()}:{tmp_path.resolve()}:ro" not in argv
     assert not any(str(secret) in arg for arg in argv)
-    assert argv[argv.index("--cwd") + 1] == "/source"
+    assert argv[argv.index("--cwd") + 1] == "/work"
 
 def test_research_argv_without_history_has_no_history_bind(tmp_path: Path):
     runtime = _make_runtime(tmp_path)
 
     argv = runtime.research_exec_argv(
         ["true"], source=tmp_path, repo=tmp_path,
-        history=None, scratch=tmp_path, cwd="source",
+        history=None, scratch=tmp_path, cwd="workspace",
     )
 
     assert not any("/history.jsonl" in arg for arg in argv)
     assert not any("/rounds" in arg for arg in argv)
     assert not any(":/repo:ro" in arg for arg in argv)
-    assert any(arg.endswith(":/source/.git:ro") for arg in argv)
+    assert any(arg.endswith(":/work/.git:ro") for arg in argv)
 
 
 
-def test_research_argv_accepts_only_source_or_scratch_cwd(tmp_path: Path):
+def test_research_argv_accepts_only_workspace_or_scratch_cwd(tmp_path: Path):
     runtime = _make_runtime(tmp_path)
-    with pytest.raises(ValueError, match="source.*scratch"):
+    with pytest.raises(ValueError, match="workspace.*scratch"):
         runtime.research_exec_argv(
             ["true"], source=tmp_path, repo=tmp_path,
             history=tmp_path, scratch=tmp_path, cwd="history",
@@ -1068,3 +1068,42 @@ def test_run_cli_reports_runtime_failures_without_traceback(
 
     assert exc.value.code == 1
     assert prefix in capsys.readouterr().err
+
+
+def test_executor_argv_exposes_only_mutable_workspace(tmp_path: Path):
+    base = _make_runtime(tmp_path)
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    runtime = ApptainerRuntime(
+        base.image, [secret], base.run_dir, executable=base.executable)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    argv = runtime.executor_exec_argv(["claude", "-p"], workspace=work)
+
+    assert f"{work.resolve()}:/work:rw" in argv
+    assert not any(str(secret) in item for item in argv)
+    assert argv[argv.index("--cwd") + 1] == "/work"
+
+
+def test_evaluator_argv_mounts_runner_and_assets_readonly(tmp_path: Path):
+    runtime = _make_runtime(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    evaluator = tmp_path / "evaluator"
+    evaluator.mkdir()
+    runner = evaluator / "eval.sh"
+    runner.write_text("#!/bin/sh\n", encoding="utf-8")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+
+    argv = runtime.evaluator_exec_argv(
+        ["bash", "/evaluator/eval.sh", "/work"],
+        workspace=work,
+        runner=runner,
+        evaluator_binds=[assets],
+    )
+
+    assert f"{work.resolve()}:/work:rw" in argv
+    assert f"{evaluator.resolve()}:/evaluator:ro" in argv
+    assert f"{assets.resolve()}:{assets.resolve()}:ro" in argv

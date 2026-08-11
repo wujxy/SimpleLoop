@@ -1,6 +1,10 @@
 """Read and validate a task config (YAML or JSON).
 
-Minimal schema:
+Preferred schema uses `workspace.seed` + `workspace.copy` for the mutable
+production package and `evaluation.runner` + `evaluation.metrics` for an external,
+immutable evaluator. Legacy tasks remain accepted through the schema below.
+
+Legacy schema:
   kind: task
   task.goal: str                      (required)
   safety.editable_paths: [glob]      (required)
@@ -57,8 +61,10 @@ from typing import Any
 
 import yaml
 
+from .roles.scientist_context import ContextPolicy
+
 TASK_TOP_KEYS = {
-    "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution",
+    "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution", "workspace", "evaluation",
     "self_improvement", "roles",
 }
 
@@ -153,6 +159,9 @@ def _resolve(
     if raw.get("kind") != "task":
         raise ConfigError("config: kind must be 'task'")
 
+    if "workspace" in raw or "evaluation" in raw:
+        return _resolve_workspace_task(raw, path, require_ready=require_ready)
+
     task = _need(raw, "task", dict)
     safety = _need(raw, "safety", dict)
     loop = _need(raw, "loop", dict)
@@ -206,6 +215,14 @@ def _resolve(
     if not isinstance(scientist_steps, int) or scientist_steps < 6:
         raise ConfigError(
             "loop.scientist_steps: must be an integer >= 6")
+
+    # Scientist working-context management (intra-lane only). Optional; absent
+    # => ContextPolicy() which preserves today's behavior (append-only state
+    # snapshots, no compaction) so the change ships as a no-op except telemetry.
+    try:
+        context_policy = ContextPolicy.from_config(loop.get("context"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
 
     src_path = source.get("path")
     if not src_path:
@@ -264,6 +281,7 @@ def _resolve(
         "candidates_per_round": int(candidates_per_round),
         "max_workers": int(max_workers),
         "scientist_steps": int(scientist_steps),
+        "context": context_policy.to_dict(),
         "runtime_image": runtime_image,
         "runtime_definition": runtime_definition,
         "runtime_binds": runtime_binds,
@@ -638,3 +656,90 @@ def _rel(value: str, config_path: Path) -> str:
     if not p.is_absolute():
         p = (config_path.parent / p)
     return str(p)
+
+def _resolve_workspace_task(
+    raw: dict, path: Path, *, require_ready: bool,
+) -> dict:
+    legacy = {"safety", "source", "eval"}.intersection(raw)
+    if legacy:
+        raise ConfigError(
+            f"workspace tasks cannot use legacy blocks: {sorted(legacy)}")
+    workspace = _need(raw, "workspace", dict)
+    unknown_workspace = set(workspace) - {"seed", "copy"}
+    if unknown_workspace:
+        raise ConfigError(
+            f"workspace: unknown key(s): {sorted(unknown_workspace)}")
+    seed = _need(workspace, "seed", dict)
+    unknown_seed = set(seed) - {"path", "ref"}
+    if unknown_seed:
+        raise ConfigError(
+            f"workspace.seed: unknown key(s): {sorted(unknown_seed)}")
+    seed_path = Path(_rel(str(seed.get("path") or ""), path)).resolve()
+    if not seed_path.is_dir() or (
+        require_ready and not (seed_path / ".git").exists()
+    ):
+        raise ConfigError("workspace.seed.path: must be a ready Git directory")
+    copy = workspace.get("copy")
+    if not isinstance(copy, list) or not copy or not all(
+        isinstance(item, str) and item and not Path(item).is_absolute()
+        and ".." not in Path(item).parts and ".git" not in Path(item).parts
+        for item in copy
+    ):
+        raise ConfigError("workspace.copy: required non-empty relative path list")
+
+    evaluation = _need(raw, "evaluation", dict)
+    unknown_evaluation = set(evaluation) - {
+        "runner", "args", "binds", "metrics", "timeout_seconds",
+        "output_cap_chars", "history_cap_chars",
+    }
+    if unknown_evaluation:
+        raise ConfigError(
+            f"evaluation: unknown key(s): {sorted(unknown_evaluation)}")
+    runner = Path(_rel(str(evaluation.get("runner") or ""), path)).resolve()
+    if not runner.is_file():
+        raise ConfigError("evaluation.runner: must be an existing file")
+    args = evaluation.get("args", [])
+    if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        raise ConfigError("evaluation.args: must be a list of strings")
+    raw_binds = evaluation.get("binds", [])
+    if not isinstance(raw_binds, list):
+        raise ConfigError("evaluation.binds: must be a list of absolute directories")
+    evaluator_binds: list[str] = []
+    for index, value in enumerate(raw_binds):
+        if not isinstance(value, str):
+            raise ConfigError(
+                f"evaluation.binds[{index}]: must be an absolute directory")
+        bind = Path(value).expanduser()
+        if not bind.is_absolute():
+            raise ConfigError(
+                f"evaluation.binds[{index}]: must be an absolute directory")
+        bind = bind.resolve()
+        if not bind.is_dir():
+            raise ConfigError(
+                f"evaluation.binds[{index}]: not an existing directory: {bind}")
+        evaluator_binds.append(str(bind))
+
+    translated = dict(raw)
+    translated.pop("workspace")
+    translated.pop("evaluation")
+    translated["safety"] = {"editable_paths": ["**"]}
+    translated["source"] = {
+        "path": str(seed_path), "baseline_ref": str(seed.get("ref") or "HEAD"),
+    }
+    translated["eval"] = {
+        "commands": ["true"],
+        "metrics": evaluation.get("metrics"),
+        "timeout_seconds": evaluation.get("timeout_seconds", 600),
+        "output_cap_chars": evaluation.get("output_cap_chars", 16000),
+        "history_cap_chars": evaluation.get("history_cap_chars", 6000),
+    }
+    resolved = _resolve(translated, path, require_ready=require_ready)
+    resolved.update({
+        "workspace_seed_path": str(seed_path),
+        "workspace_seed_ref": str(seed.get("ref") or "HEAD"),
+        "workspace_copy": list(copy),
+        "evaluator_runner": str(runner),
+        "evaluator_args": list(args),
+        "evaluator_binds": evaluator_binds,
+    })
+    return resolved

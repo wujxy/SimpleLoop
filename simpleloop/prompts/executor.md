@@ -28,7 +28,7 @@ write it down. Before stopping, emit one fenced JSON block:
   - `blocked` — you could not produce a useful change toward this proposal.
 - **blocked_reason_kind** (set only when outcome is `partial` or `blocked`)
   - `objective` — the proposal is factually impossible as written: the target
-    site does not exist, is ambiguous, is under a frozen path, or the change
+    site does not exist, is ambiguous, requires an unavailable dependency, or it
     cannot build for structural reasons. A fact about the code, not your
     capability.
   - `effort` — feasible in principle but too complex/risky to complete this

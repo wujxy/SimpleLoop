@@ -227,7 +227,7 @@ def run_proposer(
         workspace_repo = (
             history_dir / "repo"
             if from_run is not None
-            else Path(cfg["repo_path"])
+            else Path(cfg.get("workspace_seed_path") or cfg["repo_path"])
         )
         if not workspace_repo.is_dir():
             raise ProposerHarnessError(
@@ -236,20 +236,23 @@ def run_proposer(
         workspace = Workspace(
             run_dir=output_dir,
             repo_path=str(workspace_repo),
-            baseline_ref=cfg["baseline_ref"],
-            editable=cfg["editable_paths"],
+            baseline_ref=cfg.get("workspace_seed_ref") or cfg["baseline_ref"],
+            copy_entries=cfg.get("workspace_copy") or cfg.get("editable_paths") or ["."],
         )
-        workspace.setup()
+        if from_run is not None:
+            workspace.repo = workspace_repo
+            workspace.wt_root = output_dir / "worktrees"
+        else:
+            workspace.setup()
         baseline_sha = workspace.baseline_sha()
         base_sha, current_round = _history_state(history_dir, baseline_sha)
         input_record.update({
-            "repo_path": str(workspace_repo),
-            "configured_repo_path": cfg["repo_path"],
+            "workspace_path": str(workspace_repo),
+            "workspace_seed_path": cfg.get("workspace_seed_path"),
+            "workspace_copy": list(cfg.get("workspace_copy") or []),
             "base_sha": base_sha,
             "simpleloop_revision": _simpleloop_revision(),
             "goal": cfg["goal"],
-            "editable_paths": list(cfg["editable_paths"]),
-            "frozen_paths": list(cfg["frozen_paths"]),
             "gate_block": views.gate_block(cfg.get("metrics")),
             "candidates_per_round": cfg["candidates_per_round"],
             "scientist_steps": cfg["scientist_steps"],
@@ -272,8 +275,8 @@ def run_proposer(
         )
         proposal_result = orchestrator.run(
             goal=cfg["goal"],
-            editable=cfg["editable_paths"],
-            frozen=cfg["frozen_paths"],
+            editable=cfg.get("workspace_copy") or [],
+            frozen=[],
             memory_service=memory_service,
             base_sha=base_sha,
             source_path=source_path,
@@ -285,6 +288,7 @@ def run_proposer(
             prompt_dir=None,
             hints=cfg.get("hints") or None,
             scientist_steps=cfg["scientist_steps"],
+            context_policy=cfg.get("context"),
             random_seed=seed,
         )
     except Exception as exc:

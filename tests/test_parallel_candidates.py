@@ -111,9 +111,7 @@ def test_default_omilrec_tasks_define_outcomes_not_research_methods(
         "second likelihood",
     ):
         assert prescribed not in goal
-    assert "OMILRECV2/src/**" in raw["safety"]["editable_paths"]
-    assert "OMILRECV2/CMakeLists.txt" in raw["safety"]["editable_paths"]
-    assert "OMILRECV2/CMakeLists.txt" not in raw["safety"]["frozen_paths"]
+    assert raw.get("safety") or raw.get("workspace")
 
 
 def test_runtime_architecture_has_no_judger_module_or_packaged_prompt():
@@ -374,14 +372,13 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         def diff(self, parent_sha, sha):
             return f"diff {parent_sha}..{sha}"
 
-    def fake_execute(agent, *, proposal, goal, editable, frozen, workspace, worktree, round_id, gate_block="", prompt_dir=None):
+    def fake_execute(agent, *, proposal, goal, workspace, worktree, round_id, gate_block="", prompt_dir=None):
         return ExecResult(
             sha=f"sha-{round_id}", reason=None,
-            changed_paths=[f"{round_id}.cc"], path_gate_passed=True,
-            path_gate_violations=[])
+            changed_paths=[f"{round_id}.cc"])
 
-    def fake_run_eval(commands, cwd, runtime, metrics_schema=None, **kwargs):
-        cid = int(str(cwd).rsplit("c", 1)[-1])
+    def fake_run_eval(cfg, *, workspace, runtime):
+        cid = int(str(workspace).rsplit("c", 1)[-1])
         return EvalResult(
             "eval",
             {"SPEED_MS": 100.0 + cid, "CORRECTNESS": True},
@@ -389,7 +386,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         )
 
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_run_eval)
+    monkeypatch.setattr(worker_mod.evals, "run_configured_eval", fake_run_eval)
 
     workspace = FakeWorkspace()
     proposals = ["p0", "p1", "p2"]
@@ -424,8 +421,7 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
 
     def fake_execute(*_args, **_kwargs):
         return ExecResult(
-            sha="candidate", reason=None, changed_paths=["a.cc"],
-            path_gate_passed=True, path_gate_violations=[])
+            sha="candidate", reason=None, changed_paths=["a.cc"])
 
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(

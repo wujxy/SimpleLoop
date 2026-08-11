@@ -80,11 +80,12 @@ def _observation_evidence_refs(action: dict, observation: dict) -> set[str]:
     name = action["action"]
     result = observation.get("result")
     if name == "run_research_command":
-        return {
-            f"source:{item['path']}"
+        workspace_refs = {
+            f"workspace:{item['path']}"
             for item in observation.get("source_evidence", [])
             if isinstance(item, dict) and item.get("path")
         }
+        return workspace_refs
     if name == "inspect_episode":
         experiment_id = (result or {}).get("experiment_id")
         return {f"experiment:{experiment_id}"} if experiment_id else set()

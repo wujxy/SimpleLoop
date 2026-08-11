@@ -244,8 +244,14 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  max_rounds: {cfg['max_rounds']}")
         print(f"  candidates_per_round: {cfg['candidates_per_round']}")
         print(f"  max_workers: {cfg['max_workers']}")
-        print(f"  eval commands: {len(cfg['eval_commands'])}")
-        print(f"  repo: {cfg['repo_path']} @ {cfg['baseline_ref']}")
+        if cfg.get("evaluator_runner"):
+            print(f"  evaluator: {cfg['evaluator_runner']}")
+            print(f"  workspace seed: {cfg['workspace_seed_path']} @ "
+                  f"{cfg['workspace_seed_ref']}")
+            print(f"  workspace entries: {len(cfg['workspace_copy'])}")
+        else:
+            print(f"  eval commands: {len(cfg['eval_commands'])}")
+            print(f"  repo: {cfg['repo_path']} @ {cfg['baseline_ref']}")
         print(f"  runtime image: {cfg['runtime_image']}")
         binds = ", ".join(cfg["runtime_binds"]) or "(none)"
         print(f"  runtime binds: {binds}")

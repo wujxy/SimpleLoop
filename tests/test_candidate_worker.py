@@ -75,7 +75,6 @@ def test_run_candidate_completed(tmp_path: Path, monkeypatch):
     def fake_execute(*_args, **kwargs):
         return ExecResult(
             sha="def456", reason=None, changed_paths=["a.cc"],
-            path_gate_passed=True, path_gate_violations=[],
         )
 
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
@@ -115,8 +114,7 @@ def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(worker_mod.executor_mod, "execute",
                         lambda *a, **k: ExecResult(
                             sha=None, reason="executor made no changes",
-                            changed_paths=[], path_gate_passed=True,
-                            path_gate_violations=[]))
+                            changed_paths=[]))
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
     assert called is False
     assert result["status"] == "NO_CHANGE"
@@ -127,37 +125,10 @@ def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
     }
 
 
-def test_path_gate_rejection_is_terminal_and_skips_eval(tmp_path: Path,
-                                                         monkeypatch):
-    called = False
-
-    def fake_eval(*_args, **_kwargs):
-        nonlocal called
-        called = True
-
-    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_eval)
-
-    monkeypatch.setattr(worker_mod.executor_mod, "execute",
-                        lambda *a, **k: ExecResult(
-                            sha=None, reason="gate rejected: frozen paths",
-                            changed_paths=["tests/x.py"],
-                            path_gate_passed=False,
-                            path_gate_violations=[
-                                "tests/x.py: touches a frozen path",
-                            ]))
-    result = run_candidate(_deps(tmp_path), _spec(tmp_path))
-    assert called is False
-    assert result["status"] == "PATH_GATE_REJECTED"
-    assert result["sha"] is None
-    assert result["gates"]["PATHS"]["passed"] is False
-    assert result["gates"]["CORRECTNESS"]["passed"] is None
-
-
 def test_nonzero_eval_command_is_a_gate_rejection(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(worker_mod.executor_mod, "execute",
                         lambda *a, **k: ExecResult(
-                            sha="def456", reason=None, changed_paths=["a.cc"],
-                            path_gate_passed=True, path_gate_violations=[]))
+                            sha="def456", reason=None, changed_paths=["a.cc"]))
     monkeypatch.setattr(worker_mod.evals, "run_eval",
                         lambda *a, **k: EvalResult(
                             "failed", {"SPEED_MS": 90.0,
@@ -173,8 +144,7 @@ def test_eval_exception_retains_sha_and_factual_failure(tmp_path: Path,
                                                         monkeypatch):
     monkeypatch.setattr(worker_mod.executor_mod, "execute",
                         lambda *a, **k: ExecResult(
-                            sha="def456", reason=None, changed_paths=["a.cc"],
-                            path_gate_passed=True, path_gate_violations=[]))
+                            sha="def456", reason=None, changed_paths=["a.cc"]))
     monkeypatch.setattr(worker_mod.evals, "run_eval",
                         lambda *a, **k: (_ for _ in ()).throw(
                             RuntimeError("container unavailable")))
@@ -183,7 +153,6 @@ def test_eval_exception_retains_sha_and_factual_failure(tmp_path: Path,
 
     assert result["status"] == "EVAL_FAILED"
     assert result["sha"] == "def456"
-    assert result["gates"]["PATHS"]["passed"] is True
     assert result["gates"]["EVAL_COMMANDS"]["passed"] is False
     assert result["gates"]["CORRECTNESS"]["passed"] is None
 
@@ -341,7 +310,6 @@ def test_self_report_flows_into_candidate_record(tmp_path: Path, monkeypatch):
     def fake_execute(*_a, **_k):
         return ExecResult(
             sha=None, reason="executor made no changes", changed_paths=[],
-            path_gate_passed=True, path_gate_violations=[],
             self_report=report)
 
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
@@ -368,10 +336,8 @@ def test_execute_parses_self_report_from_agent_output(tmp_path: Path,
         def commit(self, _wt, _rid, _paths):
             return "sha1"
 
-    monkeypatch.setattr(exec_mod.gate, "check_diff",
-                        lambda changed, editable, frozen: (True, []))
     result = exec_mod.execute(
-        FakeAgent(), proposal="p", goal="g", editable=["src/**"], frozen=[],
+        FakeAgent(), proposal="p", goal="g",
         workspace=FakeWorkspace(), worktree=tmp_path, round_id="r1")
     assert result.sha == "sha1"
     assert result.self_report == {"outcome": "completed",

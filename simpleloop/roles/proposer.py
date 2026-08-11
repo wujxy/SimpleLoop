@@ -27,6 +27,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .model import ChatModel
+from .scientist_context import ContextPolicy, ScientistConversation
 from .research_tools import (
     MEMORY_TOOL_ACTIONS,
     ResearchTools,
@@ -93,7 +94,7 @@ _RESEARCH_TOOL_ACTIONS = frozenset(
 )
 
 _RUNTIME_BOUNDARIES = """Runtime boundaries:
-- /source is the accepted revision; /repo Git metadata is mounted only after history is visible,
+- /work is the accepted revision; /repo Git metadata is mounted only after history is visible,
   /history.jsonl and /rounds are persisted evidence only when history is visible,
   and /scratch is temporary writable space.
 - You cannot call the Executor or Harness, edit candidates, choose a parent,
@@ -199,9 +200,9 @@ def _parse_research_action(raw: dict) -> dict:
     if name == "run_research_command":
         _require_keys(raw, {"action", "command", "evidence_paths"}, {"cwd"})
         command = _required_str(raw, "command")
-        cwd = raw.get("cwd", "source")
-        if cwd not in {"source", "scratch"}:
-            raise ProposerError("research cwd must be source or scratch")
+        cwd = raw.get("cwd", "workspace")
+        if cwd not in {"workspace", "scratch"}:
+            raise ProposerError("research cwd must be workspace or scratch")
         evidence_paths = tuple(_require_string_list(
             raw["evidence_paths"], name="evidence_paths", allow_empty=True,
         ))
@@ -287,30 +288,30 @@ PHASE_ATTENTION = {
     InquiryPhase.MODEL: "Current mode: MODEL. Construct a working representation that can explain the target outcome and support counterfactual reasoning. A list of components or facts is not sufficient. Do not seek completeness; seek a model sufficient for the next consequential research decision.",
     InquiryPhase.EXPLAIN: "Current mode: EXPLAIN. Form an account of the mechanism, structural limitation, obstruction, or dependency that produces the gap or creates the opportunity. Keep materially different accounts alive where evidence permits. Do not design the intervention yet.",
     InquiryPhase.EXPLORE: "Current mode: EXPLORE. Using the working model and explanations, search broadly across materially different mechanism families before investing deeply in any one direction.",
-    InquiryPhase.NARROW: "Current mode: NARROW. Past experiments are now available as evidence. Use them to support, refute, or revise the independently formed model and hypotheses. Historical vocabulary must not replace your own representation.",
-    InquiryPhase.DEEPEN: "Current mode: DEEPEN. Detailed investigation is now justified. Test each selected hypothesis critical premise, trace its real scope, derive observable consequences, and submit only if the mechanism survives.",
+    InquiryPhase.NARROW: "Current mode: NARROW. Past experiments are now available as evidence about terrain already sampled. Revise the model and hypotheses in light of them, then judge where consequential opportunity still remains. Evidence that a mechanism worked before can strengthen belief in it without making another experiment on that family valuable. Prefer a direction because of its unresolved leverage, not because its history is richest.",
+    InquiryPhase.DEEPEN: "Current mode: DEEPEN. Investigate only as far as needed to decide whether the selected hypothesis deserves a real experiment. Test its critical premise, resolve evidence that could overturn the direction, and derive observable consequences. Stop when the mechanism is sufficiently grounded for the Executor to investigate its implementation.",
 }
 
 _SCIENTIST_ACTION_SCHEMAS = {
     "commit_understanding": '{"action":"commit_understanding","problem":"...","target_outcome":"...","boundary":"...","current_account_of_the_whole":"...","key_unknowns":["..."]}',
     "continue_investigation": '{"action":"continue_investigation","question":"...","decision_impact":"..."}',
-    "propose_working_model": '{"action":"propose_working_model","working_model":{"representation":"...","explanatory_structure":"...","claims":[{"id":"M1","claim":"...","evidence_refs":["source:path"]}],"important_unknowns":["..."]}}',
+    "propose_working_model": '{"action":"propose_working_model","working_model":{"representation":"...","explanatory_structure":"...","claims":[{"id":"M1","claim":"...","evidence_refs":["workspace:path"]}],"important_unknowns":["..."]}}',
     "commit_working_model": '{"action":"commit_working_model","model_version":2,"model_check":{"explains_target":"...","counterfactual":{"change":"...","predicted_effect":"...","model_claim_refs":["M1"]},"important_unknowns":[{"question":"...","why_it_matters":"..."}],"blocking_unknown":null,"why_model_is_sufficient_for_next_stage":"..."}}',
     "submit_explanation": '{"action":"submit_explanation","id":"E1","phenomenon":"...","account":"...","model_basis":["M1"],"expected_if_true":["..."],"evidence_needed":["..."]}',
     "commit_explanation_set": '{"action":"commit_explanation_set","explanation_ids":["E1","E2"],"explanation_sufficiency_justification":null}',
     "emit_lever_map": '{"action":"emit_lever_map","levers":[{"id":"L1","target_mechanism":"...","why_leverage_exists":"...","model_basis":["M1"],"explanation_basis":["E1"]}]}',
     "submit_hypothesis": '{"action":"submit_hypothesis","id":"H1","generative_op":"G2","model_basis":["M1"],"explanation_basis":["E1"],"mechanism":"...","intervention_family":"...","scope":"...","why_plausible":"...","critical_unknown":"..."}',
     "commit_hypothesis_portfolio": '{"action":"commit_hypothesis_portfolio","hypothesis_ids":["H1"],"coverage_rationale":"...","portfolio_sufficiency_justification":null,"unused_generative_ops":[]}',
-    "select_for_deepen": '{"action":"select_for_deepen","selected":[{"hypothesis_id":"H1","evidence_refs":["experiment:r0c0"],"rationale":"..."}]}',
-    "submit_proposals": '{"action":"submit_proposals","proposals":[{"instruction":"...","research_target":{"mode":"new","question":"..."},"model_claim_refs":["M1"],"explanation_refs":["E1"],"hypothesis_id":"H1","evidence_refs":["source:path"],"mechanism":"...","prediction":"...","affected_scope":"..."}]}',
-    "continue_explore": '{"action":"continue_explore","reason":"...","evidence_refs":["experiment:r0c0"]}',
-    "reopen_explain": '{"action":"reopen_explain","reason":"...","evidence_refs":["experiment:r0c0"]}',
-    "reopen_model": '{"action":"reopen_model","reason":"...","evidence_refs":["experiment:r0c0"]}',
-    "return_to_narrow": '{"action":"return_to_narrow","reason":"...","evidence_refs":["source:path"]}',
-    "fresh_reframe": '{"action":"fresh_reframe","reason":"...","evidence_refs":["experiment:r0c0"]}',
-    "abandon_portfolio": '{"action":"abandon_portfolio","reason":"...","evidence_refs":["experiment:r0c0"]}',
-    "abandon_direction": '{"action":"abandon_direction","hypothesis_id":"H1","reason":"...","evidence_refs":["source:path"]}',
-    "block": '{"action":"block","reason_kind":"false_claim|frozen|contradiction","explanation":"...","evidence_refs":["source:path"]}',
+    "select_for_deepen": '{"action":"select_for_deepen","selected":[{"hypothesis_id":"H1","evidence_refs":["workspace:path"],"rationale":"..."}]}',
+    "submit_proposals": '{"action":"submit_proposals","proposals":[{"instruction":"...","research_target":{"mode":"new","question":"..."},"model_claim_refs":["M1"],"explanation_refs":["E1"],"hypothesis_id":"H1","evidence_refs":["workspace:path"],"mechanism":"...","prediction":"...","affected_scope":"..."}]}',
+    "continue_explore": '{"action":"continue_explore","reason":"...","evidence_refs":["workspace:path"]}',
+    "reopen_explain": '{"action":"reopen_explain","reason":"...","evidence_refs":["workspace:path"]}',
+    "reopen_model": '{"action":"reopen_model","reason":"...","evidence_refs":["workspace:path"]}',
+    "return_to_narrow": '{"action":"return_to_narrow","reason":"...","evidence_refs":["workspace:path"]}',
+    "fresh_reframe": '{"action":"fresh_reframe","reason":"...","evidence_refs":["workspace:path"]}',
+    "abandon_portfolio": '{"action":"abandon_portfolio","reason":"...","evidence_refs":["workspace:path"]}',
+    "abandon_direction": '{"action":"abandon_direction","hypothesis_id":"H1","reason":"...","evidence_refs":["workspace:path"]}',
+    "block": '{"action":"block","reason_kind":"false_claim|frozen|contradiction","explanation":"...","evidence_refs":["workspace:path"]}',
 }
 
 def render_scientist_action_protocol(actions) -> str:
@@ -323,9 +324,7 @@ def _build_phase_system_prompt(
 ) -> str:
     actions = phase_allowed_actions(phase, history_visible)
     tools = render_research_tool_prompt(actions & ({"run_research_command"} | MEMORY_TOOL_ACTIONS))
-    basis = render_generative_basis(assigned_ops) if phase in {
-        InquiryPhase.EXPLORE, InquiryPhase.NARROW, InquiryPhase.DEEPEN,
-    } else ""
+    basis = render_generative_basis(assigned_ops) if phase is InquiryPhase.EXPLORE else ""
     return "\n\n".join(filter(None, (
         load_semantic("proposer", prompt_dir).rstrip(),
         PHASE_ATTENTION[phase],
@@ -510,15 +509,16 @@ from .research_agent import _source_path_exists  # noqa: E402
 def _validate_block_evidence(
     refs, state: WorkingState, source_root: Path,
 ) -> bool:
-    """True when the block cites at least one ``source:`` ref to a path the
+    """True when the block cites at least one ``workspace:`` ref to a path the
     agent read this branch (present in ``new_evidence``) that exists under
-    /source. The uniform objective choke point for every block."""
+    /work. The uniform objective choke point for every block."""
     for ref in refs:
         if ":" not in ref:
             continue
         kind, _, rest = ref.partition(":")
-        if kind == "source":
-            if (ref in state.new_evidence
+        if kind in {"workspace", "source"}:
+            normalized = f"workspace:{rest}"
+            if (normalized in state.new_evidence
                     and _source_path_exists(rest, source_root)):
                 return True
     return False
@@ -636,8 +636,11 @@ def _validate_scientist_guard(
 
     if name in _RESEARCH_TOOL_ACTIONS:
         if name == "run_research_command":
-            if action["evidence_paths"] and action["cwd"] != "source":
-                return "source_evidence_requires_source_cwd"
+            # evidence_paths are read from source regardless of cwd (see
+            # ResearchTools.execute -> _read_source_evidence), so the old
+            # source_evidence_requires_source_cwd coupling was not technically
+            # necessary and killed lanes on a recoverable schema mismatch the
+            # model tripped repeatedly. Only the path-existence check remains.
             for path in action["evidence_paths"]:
                 if not _source_path_exists(path, source_root):
                     return "invalid_source_evidence_path"
@@ -737,6 +740,54 @@ def _validate_scientist_guard(
     return None
 
 # --- Scientist-Proposer ------------------------------------------------
+
+_EPISTEMIC_CHECKPOINT_PAIRS = frozenset({
+    (InquiryPhase.EXPLORE, InquiryPhase.NARROW),
+    (InquiryPhase.NARROW, InquiryPhase.DEEPEN),
+})
+
+
+def _usage_tokens(usage) -> tuple[int | None, int | None]:
+    """Extract (prompt_tokens, completion_tokens) from a provider usage object
+    that may be a dict, a pydantic model, or None."""
+    if usage is None:
+        return None, None
+    if isinstance(usage, dict):
+        return usage.get("prompt_tokens"), usage.get("completion_tokens")
+    if hasattr(usage, "model_dump"):
+        dumped = usage.model_dump()
+        return dumped.get("prompt_tokens"), dumped.get("completion_tokens")
+    return (
+        getattr(usage, "prompt_tokens", None),
+        getattr(usage, "completion_tokens", None),
+    )
+
+
+def _record_context_turn(
+    conv: ScientistConversation, context_log: list, step: int, phase,
+    usages: list, policy: ContextPolicy,
+) -> None:
+    """Append one Phase-0 context-composition record for this turn and run the
+    Phase-3 emergency check. Always runs (even with telemetry off) because the
+    emergency trigger is independent of telemetry."""
+    prompt_tokens, completion_tokens = _usage_tokens(
+        usages[-1] if usages else None)
+    account = conv.account()
+    context_log.append({
+        "turn": step,
+        "phase": phase.value,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "composition_chars": account["chars"],
+        "composition_messages": account["messages"],
+        "n_messages": len(conv.messages),
+        "n_state_snapshots": conv.n_state_snapshots(),
+    })
+    if (policy.emergency_threshold_tokens is not None
+            and prompt_tokens is not None
+            and prompt_tokens > policy.emergency_threshold_tokens):
+        context_log[-1]["emergency_compact"] = conv.compact_emergency()
+
 
 class ProposerAgent(ResearchAgent):
     _error_class = ProposerError
@@ -893,12 +944,25 @@ class ProposerAgent(ResearchAgent):
             "steps_to_outcome": max((item["step"] for item in actions), default=0),
         }
 
+    def _provider_meta(self) -> dict:
+        """Best-effort provider identification for Phase-0 telemetry (model id +
+        base_url). Used to characterize the effective context window; never
+        authoritative about truncation."""
+        model = getattr(self.model, "model", None)
+        base_url = None
+        client = getattr(self.model, "client", None)
+        if client is not None:
+            raw_url = getattr(client, "base_url", None)
+            base_url = str(raw_url) if raw_url else None
+        return {"model": model, "base_url": base_url}
+
     def run_lane(
         self,
         *,
         assigned_ops: tuple[str, ...],
         select_quota: int,
         scientist_steps: int,
+        context_policy: dict | None = None,
         goal: str,
         editable: list[str],
         frozen: list[str],
@@ -916,13 +980,27 @@ class ProposerAgent(ResearchAgent):
         if select_quota < 1 or scientist_steps < 1:
             raise ValueError("select_quota and scientist_steps must be positive")
         session = ScientistSessionState.fresh()
-        messages = [{"role": "user", "content": (
+        policy = ContextPolicy.from_config(context_policy)
+        conv = ScientistConversation(policy=policy)
+        conv.seed(
             memory_service.build_fresh_inquiry_context(
                 goal=goal, editable=editable, frozen=frozen,
                 base_sha=base_sha, gate_block=gate_block, hints=hints,
             )
-        )}]
+        )
+        context_log: list[dict] = []
+        provider_meta = self._provider_meta()
         usages: list[object] = []
+
+        def make_telemetry(steps: int) -> dict:
+            return {
+                "steps": steps,
+                "usage_by_phase": session.usage_by_phase,
+                "wall_time_by_phase": dict(session.wall_time_by_phase),
+                "context_log": context_log if policy.telemetry else [],
+                "provider_meta": provider_meta,
+                "context_policy": policy.to_dict(),
+            }
         deadline = time.monotonic() + self.timeout_seconds
         context = self._scientist_context
         context.session = session
@@ -949,11 +1027,14 @@ class ProposerAgent(ResearchAgent):
                         assigned_ops=assigned_ops,
                     )
                     usage_start = len(usages)
+                    conv.mark_step_start()
                     action, reply_text = self._step(
-                        session.runtime, messages, system, deadline, usages, step,
+                        session.runtime, conv.messages, system, deadline, usages, step,
                         source_root=source_path, steps_budget=scientist_steps,
                     )
+                    conv.reconcile_after_step()
                     phase_usage = usages[usage_start:]
+                    _record_context_turn(conv, context_log, step, phase, usages, policy)
                     session.usage_by_phase.setdefault(phase.value, []).extend(phase_usage)
                     session.cumulative_usage.extend(
                         item for item in phase_usage if isinstance(item, dict)
@@ -986,38 +1067,29 @@ class ProposerAgent(ResearchAgent):
                             session.inquiry.deep_evidence_refs.update(observed_refs)
                         session.runtime.last_tool_fingerprint = _fingerprint(action)
                         record_phase_wall()
-                        messages.extend([
-                            {"role": "assistant", "content": reply_text},
-                            {"role": "user", "content": json.dumps(
-                                observation, ensure_ascii=False,
-                            )},
-                        ])
+                        conv.tool_observation(
+                            reply_text,
+                            json.dumps(observation, ensure_ascii=False),
+                        )
                         continue
                     if name == "block":
                         record_phase_wall()
                         return ScientistResult(
                             outcome="block", reason=action["explanation"],
                             usage=tuple(usages),
-                            deliberation_telemetry={
-                                "steps": step,
-                                "usage_by_phase": session.usage_by_phase,
-                                "wall_time_by_phase": dict(session.wall_time_by_phase),
-                            },
+                            deliberation_telemetry=make_telemetry(step),
                             trace=self._scientist_trace(session, outcome="block"),
                         )
                     was_history_visible = session.inquiry.history_visible
                     old_context_id = session.inquiry.context_id
+                    prior_phase = session.inquiry.phase
                     _apply_scientist_action(session, action, step=step)
                     if name == "submit_proposals":
                         record_phase_wall()
                         return ScientistResult(
                             proposals=tuple(session.inquiry.proposals),
                             outcome="proposals", usage=tuple(usages),
-                            deliberation_telemetry={
-                                "steps": step,
-                                "usage_by_phase": session.usage_by_phase,
-                                "wall_time_by_phase": dict(session.wall_time_by_phase),
-                            },
+                            deliberation_telemetry=make_telemetry(step),
                             trace=self._scientist_trace(session, outcome="proposals"),
                         )
                     if name in {"abandon_portfolio", "abandon_direction"}:
@@ -1025,46 +1097,45 @@ class ProposerAgent(ResearchAgent):
                         return ScientistResult(
                             outcome="research_incomplete", reason=action["reason"],
                             usage=tuple(usages),
-                            deliberation_telemetry={
-                                "steps": step,
-                                "usage_by_phase": session.usage_by_phase,
-                                "wall_time_by_phase": dict(session.wall_time_by_phase),
-                            },
+                            deliberation_telemetry=make_telemetry(step),
                             trace=self._scientist_trace(
                                 session, outcome="research_incomplete",
                             ),
                         )
                     if session.inquiry.context_id != old_context_id:
                         record_phase_wall()
-                        messages = [{"role": "user", "content": (
+                        conv.reframe(
                             memory_service.build_fresh_inquiry_context(
                                 goal=goal, editable=editable, frozen=frozen,
                                 base_sha=base_sha, gate_block=gate_block, hints=hints,
                             ) + "\nFresh reframe: construct an independent account without prior inquiry artifacts or history."
-                        )}]
+                        )
                         tools = self._make_tools(
                             source=source_path, repo=repo_path, history_dir=None,
                             scratch=Path(scratch), memory_service=None,
                             current_round=current_round, history_enabled=False,
                         )
                         continue
-                    messages.append({"role": "assistant", "content": reply_text})
+                    conv.assistant(reply_text)
                     if not was_history_visible and session.inquiry.history_visible:
-                        messages.append({"role": "user", "content": (
+                        conv.history_pack(
                             memory_service.build_history_entry_pack(
                                 current_round=current_round,
                             )
-                        )})
+                        )
                         tools = self._make_tools(
                             source=source_path, repo=repo_path,
                             history_dir=run_dir, scratch=Path(scratch),
                             memory_service=memory_service,
                             current_round=current_round, history_enabled=True,
                         )
-                    messages.append({
-                        "role": "user",
-                        "content": self._scientist_state_message(session),
-                    })
+                    conv.state_snapshot(self._scientist_state_message(session))
+                    if policy.epistemic_checkpoint and (
+                            prior_phase, session.inquiry.phase
+                    ) in _EPISTEMIC_CHECKPOINT_PAIRS:
+                        context_log[-1]["checkpoint_compact"] = conv.compact_checkpoint(
+                            keep_pairs=policy.checkpoint_keep_pairs,
+                        )
                     record_phase_wall()
         finally:
             del context.session
@@ -1074,11 +1145,7 @@ class ProposerAgent(ResearchAgent):
             outcome="research_incomplete",
             reason="scientist step budget exhausted before proposal commitment",
             usage=tuple(usages),
-            deliberation_telemetry={
-                "steps": scientist_steps,
-                "usage_by_phase": session.usage_by_phase,
-                "wall_time_by_phase": dict(session.wall_time_by_phase),
-            },
+            deliberation_telemetry=make_telemetry(scientist_steps),
             trace=self._scientist_trace(session, outcome="research_incomplete"),
         )
 

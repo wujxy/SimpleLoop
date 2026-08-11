@@ -78,7 +78,9 @@ def export_run(run_dir: str | Path, what: str = "best",
     repo = run_path / "repo"
     if not (repo / ".git").exists():
         raise ExportError(f"no per-run repo at {repo} — is this a run_dir?")
-    cfg = config_mod.load_resolved(run_path)
+    cfg = dict(config_mod.load_resolved(run_path))
+    cfg["repo_path"] = cfg.get("workspace_seed_path") or cfg["repo_path"]
+    cfg["baseline_ref"] = cfg.get("workspace_seed_ref") or cfg["baseline_ref"]
     history = memory_mod.read_history(run_path / "history.jsonl")
     if not history:
         raise ExportError(
@@ -86,15 +88,20 @@ def export_run(run_dir: str | Path, what: str = "best",
 
     schema = cfg["metrics"]
     obj_key = schema["objective"]["key"]
-    baseline_sha = _git(repo, "rev-parse", "--verify",
-                        f"{cfg['baseline_ref']}^{{commit}}")
+    baseline_sha = _git(
+        repo, "rev-list", "--max-parents=0", "HEAD").splitlines()[0]
     target_sha, target_desc, target_metrics = _resolve_target(
         history, schema, what, baseline_sha)
     _git(repo, "rev-parse", "--verify", f"{target_sha}^{{commit}}")
 
     # Refuse an existing source-repo branch BEFORE producing anything.
     if to_branch:
-        if _git(repo, "ls-remote", "--heads", "origin", to_branch):
+        exists = subprocess.run(
+            ["git", "-C", cfg["repo_path"], "show-ref", "--verify", "--quiet",
+             f"refs/heads/{to_branch}"],
+            check=False,
+        ).returncode == 0
+        if exists:
             raise ExportError(
                 f"branch {to_branch!r} already exists in the source repo; "
                 "choose another name (no force overwrite)")
@@ -110,8 +117,7 @@ def export_run(run_dir: str | Path, what: str = "best",
     ref = f"{_EXPORT_REF_PREFIX}/{what}"
     _git(repo, "update-ref", ref, target_sha)
     bundle_path = export_dir / f"{what}.bundle"
-    _git(repo, "bundle", "create", str(bundle_path),
-         f"{baseline_sha}..{ref}")
+    _git(repo, "bundle", "create", str(bundle_path), ref)
 
     baseline_metrics = (telemetry_mod.load_plot_context(run_path)
                         .get("baseline_metrics") or {})
@@ -127,7 +133,8 @@ def export_run(run_dir: str | Path, what: str = "best",
 
     branch = None
     if to_branch:
-        _git(repo, "push", "origin", f"{target_sha}:refs/heads/{to_branch}")
+        _git(Path(cfg["repo_path"]), "fetch", str(bundle_path),
+             f"{ref}:refs/heads/{to_branch}")
         branch = to_branch
 
     return {

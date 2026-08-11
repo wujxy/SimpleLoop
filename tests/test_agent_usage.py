@@ -13,8 +13,8 @@ class RecordingRuntime:
         self.calls = []
         self.overrides = None
 
-    def exec_argv(self, payload, *, cwd):
-        self.calls.append((list(payload), Path(cwd)))
+    def executor_exec_argv(self, payload, *, workspace):
+        self.calls.append((list(payload), Path(workspace)))
         return ["apptainer", "exec", "image.sif", *payload]
 
     def subprocess_env(self, overrides=None):

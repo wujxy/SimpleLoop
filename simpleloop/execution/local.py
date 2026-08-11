@@ -53,13 +53,8 @@ class LocalBackend(ExecutionBackend):
                 f"cwd: {wt}"
             )
             try:
-                result = evals.run_eval(
-                    cfg["eval_commands"],
-                    cwd=wt,
-                    runtime=runtime,
-                    metrics_schema=cfg.get("metrics"),
-                    timeout_seconds=cfg.get("eval_timeout_seconds", 600),
-                    output_cap=cfg.get("eval_output_cap_chars", 16000),
+                result = evals.run_configured_eval(
+                    cfg, workspace=wt, runtime=runtime,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise BaselineAcceptanceError(

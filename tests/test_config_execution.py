@@ -34,6 +34,37 @@ def _base_task(tmp_path: Path) -> dict:
     }
 
 
+def test_workspace_task_resolves_seed_manifest_and_external_runner(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw.pop("safety")
+    raw.pop("source")
+    raw.pop("eval")
+    raw["workspace"] = {
+        "seed": {"path": str(tmp_path / "repo"), "ref": "HEAD"},
+        "copy": ["src", "CMakeLists.txt"],
+    }
+    runner = tmp_path / "evaluator" / "eval.sh"
+    runner.parent.mkdir()
+    runner.write_text("#!/bin/sh\\n", encoding="utf-8")
+    raw["evaluation"] = {
+        "runner": str(runner),
+        "args": ["--evtmax", "100"],
+        "binds": [],
+        "metrics": {
+            "objective": {"key": "SPEED_MS", "lower_is_better": True},
+            "gates": [{"key": "CORRECTNESS"}],
+        },
+    }
+    path = tmp_path / "workspace-task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    cfg = config_mod.load(path)
+
+    assert cfg["workspace_seed_ref"] == "HEAD"
+    assert cfg["workspace_copy"] == ["src", "CMakeLists.txt"]
+    assert cfg["evaluator_args"] == ["--evtmax", "100"]
+
+
 def _write(tmp_path: Path, execution: dict) -> Path:
     raw = _base_task(tmp_path)
     raw["execution"] = execution

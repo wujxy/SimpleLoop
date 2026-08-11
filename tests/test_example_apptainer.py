@@ -110,3 +110,16 @@ def test_primary_readmes_show_init_command():
     for directory in [ROOT, EXAMPLES, EXAMPLES / "tiny_algo_opt"]:
         text = (directory / "README.md").read_text(encoding="utf-8")
         assert "simpleloop init --config" in text
+
+
+def test_omilrec_open_workspace_keeps_evaluator_external():
+    task = EXAMPLES / "omilrec-v100-opt" / "task_workspace_local.yaml"
+    raw = yaml.safe_load(task.read_text(encoding="utf-8"))
+
+    assert raw["workspace"]["copy"] == ["OMILRECV2", "CMakeLists.txt"]
+    assert "safety" not in raw and "source" not in raw and "eval" not in raw
+    assert raw["evaluation"]["runner"] == "evaluator/eval.sh"
+    runner = task.parent / raw["evaluation"]["runner"]
+    text = runner.read_text(encoding="utf-8")
+    assert 'workspace="${1:?' in text
+    assert '"$project/scripts"' in text

@@ -137,9 +137,9 @@ def build_deps(
                            usage_observer=usage_observer)
     workspace = Workspace(
         run_dir=run_dir,
-        repo_path=cfg["repo_path"],
-        baseline_ref=cfg["baseline_ref"],
-        editable=cfg["editable_paths"],
+        repo_path=cfg.get("workspace_seed_path") or cfg["repo_path"],
+        baseline_ref=cfg.get("workspace_seed_ref") or cfg["baseline_ref"],
+        copy_entries=cfg.get("workspace_copy") or cfg["editable_paths"],
     )
     return CandidateDeps(
         cfg=cfg, run_dir=run_dir, runtime=runtime, workspace=workspace,
@@ -161,7 +161,6 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
               f"proposal: {spec.proposal[:120]}", flush=True)
         result = executor_mod.execute(
             deps.executor_agent, proposal=spec.proposal, goal=cfg["goal"],
-            editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
             workspace=deps.workspace, worktree=worktree, round_id=worktree_id,
             gate_block=deps.gate_lines,
             prompt_dir=deps.prompt_dir,
@@ -190,31 +189,18 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
         "proposal": spec.proposal,
         "parent_sha": spec.parent_sha,
         "sha": result.sha,
-        "status": ("COMMITTED" if result.sha else
-                   "PATH_GATE_REJECTED" if not result.path_gate_passed else
-                   "NO_CHANGE"),
+        "status": "COMMITTED" if result.sha else "NO_CHANGE",
         "changed_paths": result.changed_paths,
         "reason": result.reason,
         "executor_response": result.output,
         "self_report": result.self_report,
     })
 
-    if result.path_gate_passed is False:
-        gate_results = gate.build_results(
-            metrics_schema,
-            paths=False,
-            path_detail="; ".join(result.path_gate_violations),
-        )
-        return _candidate_result(
-            spec, result, status="PATH_GATE_REJECTED", gates=gate_results,
-        )
-
     if result.sha is None:
         detail = "not run because Executor produced no change"
-        gate_results = gate.build_results(metrics_schema, paths=True)
+        gate_results = gate.build_results(metrics_schema)
         for name in gate_results:
-            if name != gate.PATHS:
-                gate_results[name] = {"passed": None, "detail": detail}
+            gate_results[name] = {"passed": None, "detail": detail}
         return _candidate_result(
             spec, result, status="NO_CHANGE", gates=gate_results,
         )
@@ -223,13 +209,8 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
           f"committed: {result.sha} ({len(result.changed_paths)} files)",
           flush=True)
     try:
-        eval_result = evals.run_eval(
-            cfg["eval_commands"],
-            cwd=worktree,
-            runtime=deps.runtime,
-            metrics_schema=metrics_schema,
-            timeout_seconds=cfg.get("eval_timeout_seconds", 600),
-            output_cap=cfg.get("eval_output_cap_chars", 16000),
+        eval_result = evals.run_configured_eval(
+            cfg, workspace=worktree, runtime=deps.runtime,
         )
     except Exception as exc:
         eval_block = f"(eval failed to run: {exc})"
@@ -237,7 +218,6 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
               f"eval error: {exc}", flush=True)
         gate_results = gate.build_results(
             metrics_schema,
-            paths=True,
             eval_commands=False,
             eval_detail=str(exc),
         )
@@ -262,7 +242,6 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
     )
     gate_results = gate.build_results(
         metrics_schema,
-        paths=True,
         eval_commands=eval_result.commands_ok,
         eval_detail=eval_detail,
         metrics=eval_result.metrics,
@@ -346,13 +325,8 @@ def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> d
     print(f"[{stamp()}] running baseline eval on worktree {spec.worktree_path}", flush=True)
 
     # Run the eval commands
-    result = evals.run_eval(
-        cfg["eval_commands"],
-        cwd=Path(spec.worktree_path),
-        runtime=deps.runtime,
-        metrics_schema=cfg.get("metrics"),
-        timeout_seconds=cfg.get("eval_timeout_seconds", 600),
-        output_cap=cfg.get("eval_output_cap_chars", 16000),
+    result = evals.run_configured_eval(
+        cfg, workspace=Path(spec.worktree_path), runtime=deps.runtime,
     )
 
     # Validate the result
@@ -361,7 +335,6 @@ def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> d
 
     gate_results = gate.build_results(
         cfg.get("metrics"),
-        paths=True,
         eval_commands=result.commands_ok,
         metrics=result.metrics,
     )
@@ -406,7 +379,7 @@ def candidate_failure(candidate_id: int, spec: CandidateSpec,
         "metrics": eval_metrics or {},
         "changed_paths": changed_paths or [],
         "gates": gate_results or gate.build_results(
-            metrics_schema, paths=None,
+            metrics_schema,
         ),
         "gate_passed": False,
         "eligible": False,

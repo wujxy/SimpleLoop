@@ -97,6 +97,51 @@ class ApptainerRuntime:
         ])
         argv.extend(str(item) for item in payload)
         return argv
+
+    def executor_exec_argv(
+        self, payload: Sequence[str], *, workspace: str | Path,
+    ) -> list[str]:
+        """Expose exactly one mutable production capability to the Executor."""
+        work = Path(workspace).expanduser().resolve()
+        argv = [
+            self.executable, "exec", "--cleanenv", "--no-eval", "--containall",
+        ]
+        if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
+            argv.append("--userns")
+        argv.extend([
+            "--bind", f"{work}:/work:rw",
+            "--cwd", "/work", str(self.image),
+        ])
+        argv.extend(str(item) for item in payload)
+        return argv
+
+    def evaluator_exec_argv(
+        self,
+        payload: Sequence[str],
+        *,
+        workspace: str | Path,
+        runner: str | Path,
+        evaluator_binds: Sequence[str | Path] = (),
+    ) -> list[str]:
+        """Expose the package and immutable evaluator capabilities."""
+        work = Path(workspace).expanduser().resolve()
+        runner_path = Path(runner).expanduser().resolve()
+        if runner_path == work or work in runner_path.parents:
+            raise ValueError("evaluation.runner must be outside the workspace")
+        argv = [
+            self.executable, "exec", "--cleanenv", "--no-eval", "--containall",
+        ]
+        if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
+            argv.append("--userns")
+        argv.extend(["--bind", f"{work}:/work:rw"])
+        argv.extend(["--bind", f"{runner_path.parent}:/evaluator:ro"])
+        for bind in evaluator_binds:
+            path = Path(bind).expanduser().resolve()
+            argv.extend(["--bind", f"{path}:{path}:ro"])
+        argv.extend(["--cwd", "/work", str(self.image)])
+        argv.extend(str(item) for item in payload)
+        return argv
+
     def subprocess_env(
         self,
         overrides: Mapping[str, str] | None = None,
@@ -128,8 +173,8 @@ class ApptainerRuntime:
         cwd: str,
     ) -> list[str]:
         """Build the offline, read-only Proposer research boundary."""
-        if cwd not in {"source", "scratch"}:
-            raise ValueError("research cwd must be 'source' or 'scratch'")
+        if cwd not in {"workspace", "scratch"}:
+            raise ValueError("research cwd must be 'workspace' or 'scratch'")
         argv = [
             self.executable, "exec", "--cleanenv", "--no-eval",
             "--containall", "--net", "--network", "none",
@@ -144,16 +189,16 @@ class ApptainerRuntime:
                 argv.extend(["--bind", f"{history_file}:/history.jsonl:ro"])
             if rounds.is_dir():
                 argv.extend(["--bind", f"{rounds}:/rounds:ro"])
-        argv.extend(["--bind", f"{Path(source).resolve()}:/source:ro"])
+        argv.extend(["--bind", f"{Path(source).resolve()}:/work:ro"])
         if history is None:
             git_mask = Path(scratch).resolve() / ".simpleloop-git-mask"
             git_mask.write_text("", encoding="utf-8")
-            argv.extend(["--bind", f"{git_mask}:/source/.git:ro"])
+            argv.extend(["--bind", f"{git_mask}:/work/.git:ro"])
         else:
             argv.extend(["--bind", f"{Path(repo).resolve()}:/repo:ro"])
         argv.extend([
             "--bind", f"{Path(scratch).resolve()}:/scratch:rw",
-            "--cwd", f"/{cwd}", str(self.image),
+            "--cwd", "/work" if cwd == "workspace" else "/scratch", str(self.image),
         ])
         argv.extend(str(item) for item in payload)
         return argv

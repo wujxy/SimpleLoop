@@ -134,7 +134,7 @@ class Agent:
                 "--json-schema",
                 json.dumps(json_schema, separators=(",", ":")),
             ]
-        argv = self.runtime.exec_argv(payload, cwd=cwd)
+        argv = self.runtime.executor_exec_argv(payload, workspace=cwd)
 
         prompt_bytes = prompt.encode("utf-8")
         print(f"[{label}] claude call started (timeout={self.timeout_seconds}s, cwd={cwd}, "

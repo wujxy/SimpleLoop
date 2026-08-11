@@ -96,6 +96,7 @@ class ProposerOrchestrator:
         prompt_dir: Path | None,
         hints: list[str] | None = None,
         scientist_steps: int = 364,
+        context_policy: dict | None = None,
         random_seed: int | None = None,
     ) -> ProposerResult:
         started = time.monotonic()
@@ -115,6 +116,7 @@ class ProposerOrchestrator:
             lanes,
             quotas=quotas,
             scientist_steps=scientist_steps,
+            context_policy=context_policy,
             goal=goal,
             editable=editable,
             frozen=frozen,
