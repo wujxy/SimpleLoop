@@ -95,13 +95,19 @@ def _sample_generative_ops() -> tuple[str, ...]:
     return tuple(random.sample(_ALL_GENERATIVE_OPS, _SCHEDULED_OP_COUNT))
 
 
-def _lane_quotas(candidates_per_round: int, select_per_lane: int) -> list[int]:
+def lane_quotas(
+    candidates_per_round: int, select_per_lane: int = _SELECT_PER_LANE,
+) -> list[int]:
     """Derive lane count and per-lane quotas from N and K.
 
     N = candidates_per_round (total evals), K = select_per_lane (per lane).
     n_lanes = ceil(N / K). Quotas are [K, K, ..., K, remainder].
 
     E.g. N=4, K=2 → [2, 2]. N=5, K=2 → [2, 2, 1]. N=4, K=1 → [1, 1, 1, 1].
+
+    Public so the loop can pre-compute ``n_lanes`` (to create one workspace per
+    lane) without duplicating the formula; ``select_per_lane`` defaults to the
+    internal funnel constant.
     """
     if select_per_lane <= 0:
         return []
@@ -153,7 +159,7 @@ class ProposerOrchestrator:
         frozen: list[str],
         memory_service,
         base_sha: str,
-        source_path: Path,
+        workspaces: list[Path],
         repo_path: Path,
         run_dir: Path,
         current_round: int,
@@ -181,8 +187,11 @@ class ProposerOrchestrator:
             explore = None
 
         # --- Derive lanes and quotas from N and K ---
-        quotas = _lane_quotas(candidates_per_round, _SELECT_PER_LANE)
+        quotas = lane_quotas(candidates_per_round)
         n_lanes = len(quotas)
+        assert len(workspaces) == n_lanes, (
+            f"expected {n_lanes} lane workspace(s) (one per lane), "
+            f"got {len(workspaces)}")
         mode = _Mode(n_lanes=n_lanes, max_branch_steps=cognitive_steps,
                      label="funnel")
         print(
@@ -210,7 +219,7 @@ class ProposerOrchestrator:
             gen_context=gen_context,
             goal=goal, editable=editable, frozen=frozen,
             memory_service=memory_service, base_sha=base_sha,
-            source_path=source_path, repo_path=repo_path,
+            workspaces=workspaces, repo_path=repo_path,
             run_dir=run_dir, current_round=current_round,
             gate_block=gate_block, prompt_dir=prompt_dir,
             hints=hints, explore=explore,
@@ -252,17 +261,18 @@ class ProposerOrchestrator:
 
     def _run_lanes(
         self, lanes, *, gen_context, goal, editable, frozen, memory_service,
-        base_sha, source_path, repo_path, run_dir, current_round,
+        base_sha, workspaces, repo_path, run_dir, current_round,
         gate_block, prompt_dir, hints, explore, mode,
         quotas=None,
         gen_steps=216, cognitive_steps=148,
     ) -> list[LaneResult]:
-        """Run one partner lane per lane state, concurrently."""
+        """Run one partner lane per lane state, concurrently. Each lane runs
+        against its own writable workspace (``workspaces[lane.lane_id]``)."""
         shared = dict(
             gen_context=gen_context,
             goal=goal, editable=editable, frozen=frozen,
             memory_service=memory_service, base_sha=base_sha,
-            source_path=source_path, repo_path=repo_path,
+            repo_path=repo_path,
             run_dir=run_dir, current_round=current_round,
             gate_block=gate_block, prompt_dir=prompt_dir,
             hints=hints, explore=explore,
@@ -277,6 +287,7 @@ class ProposerOrchestrator:
                 pool.submit(
                     self._run_one_lane, lane,
                     select_quota=(quotas[lane.lane_id] if quotas else 1),
+                    source_path=workspaces[lane.lane_id],
                     **shared,
                 ): lane.lane_id
                 for lane in lanes
@@ -430,6 +441,47 @@ class ProposerOrchestrator:
                             if branch.outcome == "abstain" else None),
             deliberation_telemetry=branch.deliberation_telemetry,
             trace=branch.trace,
+        )
+
+    def run_lane_episode(
+        self, *, lane_id: int, assigned_ops: tuple[str, ...] | list[str],
+        workspace: Path, base_sha: str,
+        goal: str, editable: list[str], frozen: list[str],
+        memory_service, repo_path: Path, run_dir: Path,
+        current_round: int, gate_block: str, prompt_dir: Path | None,
+        hints: list[str] | None = None,
+        select_quota: int = 1, gen_steps: int = 216, cognitive_steps: int = 148,
+    ) -> LaneResult:
+        """Run exactly ONE lane in ``workspace`` — the single-lane entry a
+        proposer lane worker (HEPJob) calls.
+
+        Builds the history-free generation context + explore report from
+        ``memory_service``, constructs one ``LaneState``, and runs it through
+        ``_run_one_lane``. The local ThreadPoolExecutor path calls
+        ``_run_one_lane`` directly via ``_run_lanes``; this method exists so a
+        remote worker (which owns one lane) can reuse the exact same per-lane
+        logic without re-implementing it. No nesting: one call = one lane."""
+        gen_context = memory_service.build_generation_context(
+            goal=goal, editable=editable, frozen=frozen,
+            base_sha=base_sha, gate_block=gate_block,
+        )
+        try:
+            explore = memory_service.analyze_explore(current_round=current_round)
+        except Exception:
+            explore = None
+        lane = LaneState(lane_id=lane_id, assigned_ops=tuple(assigned_ops))
+        return self._run_one_lane(
+            lane,
+            gen_context=gen_context,
+            goal=goal, editable=editable, frozen=frozen,
+            memory_service=memory_service, base_sha=base_sha,
+            source_path=workspace, repo_path=repo_path,
+            run_dir=run_dir, current_round=current_round,
+            gate_block=gate_block, prompt_dir=prompt_dir,
+            hints=hints, explore=explore,
+            max_steps=cognitive_steps,
+            select_quota=select_quota,
+            gen_steps=gen_steps, cognitive_steps=cognitive_steps,
         )
 
     @staticmethod

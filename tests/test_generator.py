@@ -64,7 +64,7 @@ def _submit_hypothesis(card=None):
 
 def _run_research(cmd="ls OMILRECV2/src/"):
     return json.dumps({"action": "run_research_command", "command": cmd,
-                        "cwd": "source"})
+                        "cwd": "workspace"})
 
 
 def _emit_lever_map():
@@ -123,7 +123,7 @@ class TestParseAction:
         action = _parse_generator_action(_run_research("grep -rn 'FCN' src/"))
         assert action["action"] == "run_research_command"
         assert action["command"] == "grep -rn 'FCN' src/"
-        assert action["cwd"] == "source"
+        assert action["cwd"] == "workspace"
 
     def test_parses_emit_lever_map(self):
         action = _parse_generator_action(_emit_lever_map())

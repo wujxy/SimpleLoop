@@ -67,3 +67,19 @@ class ExecutionBackend:
         backend (local) never persists in-flight state, so a leftover
         inflight file implies a misconfigured resume."""
         raise NotImplementedError
+
+    def run_proposer_lanes(self, *, round_id: int, base_sha: str):
+        """Run one round's proposer lanes — each lane researches in its own
+        writable workspace — and return a ProposerResult. The local backend
+        runs lanes as frontend threads; HEPJobBackend submits one condor job
+        per lane (simpleloop.proposer_lane_worker). The returned
+        ProposerResult.proposals fan out to run_candidates as usual."""
+        raise NotImplementedError
+
+    def cleanup_proposer_orphans(self) -> None:
+        """Kill any proposer-lane jobs a crashed frontend left running and
+        clear the inflight_proposer marker. Called by the loop at round start
+        so an interrupted proposer run is re-proposed cleanly instead of
+        leaking orphan jobs. The default is a no-op (local lanes are frontend
+        threads that die with the process)."""
+        return None

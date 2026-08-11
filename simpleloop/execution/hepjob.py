@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import candidate_worker
+from .. import proposer_lane_worker
 from ..candidate_worker import stamp
 from ..container import runtime as runtime_mod
 from .base import ExecutionBackend, InfraRoundError, RoundJournal
@@ -738,3 +739,344 @@ class HEPJobBackend(ExecutionBackend):
         except (OSError, json.JSONDecodeError):
             return {}
         return meta if isinstance(meta, dict) else {}
+
+    # ==================================================================
+    # Proposer-lane pipeline: each lane = one condor job running
+    # simpleloop.proposer_lane_worker in its own writable lane workspace.
+    # Mirrors the candidate pipeline, but: (a) the workspace is a lane
+    # workspace (add_lane_workspace/remove_lane_workspace); (b) the worker
+    # module is proposer_lane_worker; (c) PARTIAL lane failure is NOT a round
+    # failure — successful lanes' proposals are collected and only an
+    # all-infra-failure raises InfraRoundError; completed-but-empty (all lanes
+    # abstained/blocked) returns an abstain ProposerResult. Crash recovery is
+    # lightweight: inflight_proposer.json records lane job ids so a crashed
+    # frontend can kill orphans and re-propose on --continue (no mid-flight
+    # resume — the proposer is cheap relative to candidates).
+    # ==================================================================
+
+    def run_proposer_lanes(self, *, round_id: int, base_sha: str):
+        """Submit one proposer-lane job per lane, collect proposals, return a
+        ProposerResult. Reuses _Job + the condor wrappers; lane-specific
+        prepare/submit/read/collect own the workspace + manifest shape."""
+        from ..roles.orchestrator import lane_quotas, _sample_generative_ops
+        self._round_id = round_id
+        self._parent_sha = base_sha
+        self._journal = None
+        self._ensure_job_env()
+        quotas = lane_quotas(self.ctx.cfg.get("candidates_per_round", 1))
+        jobs: list[_Job] = []
+        for lane_id, select_quota in enumerate(quotas):
+            assigned_ops = list(_sample_generative_ops())
+            job = self._prepare_lane(lane_id, round_id, base_sha,
+                                     select_quota=select_quota,
+                                     assigned_ops=assigned_ops)
+            self._submit_lane(job)
+            jobs.append(job)
+        self._write_inflight_proposer(round_id, base_sha, jobs)
+        try:
+            return self._supervise_lanes(jobs, round_id)
+        finally:
+            self._clear_inflight_proposer()
+
+    def _prepare_lane(self, lane_id: int, round_id: int, base_sha: str, *,
+                      select_quota: int, assigned_ops: list[str]) -> _Job:
+        result_dir = (self.run_dir / "rounds" / f"r{round_id}"
+                      / "lanes" / f"l{lane_id}")
+        result_dir.mkdir(parents=True, exist_ok=True)
+        workspace = self.ctx.workspace.add_lane_workspace(lane_id, base_sha)
+        job = _Job(candidate_id=lane_id, worktree_id=str(lane_id),
+                   result_dir=result_dir)
+        self._write_lane_manifest(job, round_id, base_sha, workspace,
+                                  select_quota=select_quota,
+                                  assigned_ops=assigned_ops)
+        return job
+
+    def _write_lane_manifest(self, job: _Job, round_id: int, base_sha: str,
+                             workspace: Path, *, select_quota: int,
+                             assigned_ops: list[str]) -> None:
+        spec = proposer_lane_worker.ProposerLaneSpec(
+            lane_id=job.candidate_id, round_id=round_id, base_sha=base_sha,
+            run_dir=str(self.run_dir), workspace_path=str(workspace),
+            result_dir=str(job.result_dir),
+            prompt_dir=str(getattr(self.ctx, "prompt_dir", None) or ""),
+            assigned_ops=assigned_ops, select_quota=select_quota,
+            gen_steps=self.ctx.cfg.get("gen_steps", 216),
+            cognitive_steps=self.ctx.cfg.get("cognitive_steps", 148),
+            attempt=job.attempt,
+        )
+        (job.result_dir / "manifest.json").write_text(
+            json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+
+    def _submit_lane(self, job: _Job) -> None:
+        job_sh = job.result_dir / "job.sh"
+        job_sh.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -uo pipefail\n"
+            f"source {shlex.quote(str(self._job_env_path()))}\n"
+            f"exec {shlex.quote(self.cfg['python_executable'])}"
+            " -m simpleloop.proposer_lane_worker"
+            f" --manifest {shlex.quote(str(job.result_dir / 'manifest.json'))}"
+            " --job-id \"${1:-}\"\n",
+            encoding="utf-8")
+        job_sh.chmod(0o755)
+        lines = [
+            "universe = vanilla",
+            f"executable = {job_sh}",
+            'arguments = "$(ClusterId).$(ProcId)"',
+            f"output = {job.result_dir / 'job.out'}",
+            f"error = {job.result_dir / 'job.err'}",
+            f"log = {job.result_dir / 'job.log'}",
+            "should_transfer_files = NO",
+            f"request_memory = {self.cfg['memory_mb']}",
+            f"request_cpus = {self.cfg['cpus']}",
+            f"accounting_group = {self.cfg['accounting_group']}",
+            f"accounting_group_user = {self.cfg['accounting_group_user']}",
+            f'+HepJob_RequestOS = "{self.cfg["request_os"]}"',
+        ]
+        _req = _requirements_expr(self.cfg)
+        if _req:
+            lines.append(f"Requirements = {_req}")
+        if self.cfg.get("ihep_group"):
+            lines.append(f'+IHEP_RealGroup = "{self.cfg["ihep_group"]}"')
+        else:
+            parts = self.cfg["accounting_group"].split(".")
+            if len(parts) >= 2 and parts[0] and parts[1]:
+                lines.append(f'+IHEP_RealGroup = "{parts[1]}"')
+        lines.append("queue")
+        submit_file = job.result_dir / "job.sub"
+        submit_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        argv = [self.cfg["submit_cmd"]] + self._target_args()
+        argv.append(str(submit_file))
+        completed = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, check=False)
+        if completed.returncode != 0:
+            raise InfraRoundError(
+                f"condor submit failed for proposer lane "
+                f"r{self._round_id}-l{job.candidate_id}: "
+                f"{completed.stderr.strip() or completed.stdout.strip()}")
+        match = re.search(r"submitted to cluster (\d+)", completed.stdout)
+        if not match:
+            raise InfraRoundError(
+                f"could not parse cluster id from submit output: "
+                f"{completed.stdout.strip()[:400]}")
+        job.job_id = f"{match.group(1)}.0"
+        job.state = "SUBMITTED"
+        job.submitted_at = time.monotonic()
+        job.running_since = None
+        job.gone_since = None
+        job.idle_warned = False
+        print(f"[{stamp()}] proposer lane r{self._round_id}"
+              f"-l{job.candidate_id} submitted as job {job.job_id} "
+              f"(attempt {job.attempt})", flush=True)
+        self._write_job_json(job)
+
+    def _supervise_lanes(self, jobs: list[_Job], round_id: int):
+        poll = self.cfg["poll_seconds"]
+        while True:
+            active = [j for j in jobs if not j.terminal]
+            if not active:
+                break
+            statuses = self._query_statuses(
+                [j.job_id for j in active if j.job_id])
+            now = time.monotonic()
+            if statuses is not None:
+                for job in active:
+                    self._reconcile_lane(job, statuses.get(job.job_id), now)
+            else:
+                print(f"[{stamp()}] warning: condor_q failed; "
+                      "retrying next poll", flush=True)
+            if all(j.terminal for j in jobs):
+                break
+            time.sleep(poll)
+        return self._collect_lanes(jobs, round_id)
+
+    def _reconcile_lane(self, job: _Job, status: int | None, now: float) -> None:
+        label = f"r{self._round_id}-l{job.candidate_id}"
+        if status == _JOB_HELD:
+            reason = self._hold_reason(job.job_id)
+            print(f"[{stamp()}] proposer lane {label} job {job.job_id} "
+                  f"HELD: {reason}", flush=True)
+            self._remove(job)
+            self._retry_or_fail_lane(job, f"HELD: {reason}")
+        elif status == _JOB_RUNNING:
+            job.gone_since = None
+            if job.running_since is None:
+                job.running_since = now
+            elif now - job.running_since > self.cfg["run_timeout_seconds"]:
+                print(f"[{stamp()}] proposer lane {label} job {job.job_id} "
+                      f"exceeded run_timeout; removing", flush=True)
+                self._remove(job)
+                job.state = "TIMEOUT"
+                job.note = "running timeout"
+                self._write_job_json(job)
+        elif status == _JOB_IDLE:
+            job.gone_since = None
+            if (not job.idle_warned
+                    and now - job.submitted_at > self.cfg["idle_warn_seconds"]):
+                job.idle_warned = True
+                print(f"[{stamp()}] warning: proposer lane {label} idle > "
+                      f"{self.cfg['idle_warn_seconds']}s", flush=True)
+        elif status is None:
+            if (job.result_dir / "_FINISHED").exists():
+                try:
+                    job.result = self._read_lane_result(job)
+                    job.state = "COMPLETED"
+                    job.note = ""
+                except ValueError as exc:
+                    job.state = "INFRA_FAILED"
+                    job.note = f"malformed result: {exc}"
+                print(f"[{stamp()}] proposer lane {label} job {job.job_id} "
+                      f"finished -> {job.state}", flush=True)
+                self._write_job_json(job)
+            else:
+                if job.gone_since is None:
+                    job.gone_since = now
+                elif (now - job.gone_since
+                        > self.cfg["disappearance_grace_seconds"]):
+                    self._retry_or_fail_lane(
+                        job, "LOST: left the queue without a result")
+        else:
+            job.gone_since = None
+
+    def _retry_or_fail_lane(self, job: _Job, note: str) -> None:
+        label = f"r{self._round_id}-l{job.candidate_id}"
+        if job.attempt < self.cfg["max_attempts"]:
+            job.attempt += 1
+            job.note = note
+            print(f"[{stamp()}] proposer lane {label}: {note}; retrying as "
+                  f"attempt {job.attempt}", flush=True)
+            self.ctx.workspace.remove_lane_workspace(job.candidate_id)
+            workspace = self.ctx.workspace.add_lane_workspace(
+                job.candidate_id, self._parent_sha)
+            spec = proposer_lane_worker.ProposerLaneSpec.from_dict(
+                json.loads((job.result_dir / "manifest.json").read_text(
+                    encoding="utf-8")))
+            spec.attempt = job.attempt
+            spec.workspace_path = str(workspace)
+            (job.result_dir / "manifest.json").write_text(
+                json.dumps(spec.to_dict(), ensure_ascii=False, indent=2)
+                + "\n", encoding="utf-8")
+            self._submit_lane(job)
+        else:
+            job.state = "INFRA_FAILED"
+            job.note = note
+            print(f"[{stamp()}] proposer lane {label}: {note}; attempts "
+                  f"exhausted -> INFRA_FAILED", flush=True)
+            self._write_job_json(job)
+
+    @staticmethod
+    def _read_lane_result(job: _Job) -> dict:
+        try:
+            result = json.loads(
+                (job.result_dir / "result.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{exc}") from exc
+        if not isinstance(result, dict):
+            raise ValueError("result.json is not a proposer-lane result object")
+        # lane results carry proposals (not gates/gate_passed/eligible).
+        if (not isinstance(result.get("status"), str)
+                or not isinstance(result.get("proposals"), list)):
+            raise ValueError("result.json is not a proposer-lane result object")
+        return result
+
+    def _collect_lanes(self, jobs: list[_Job], round_id: int):
+        from ..roles import proposer as proposer_mod
+        proposals = []
+        lane_traces: list[dict] = []
+        lane_telemetries: list[dict] = []
+        any_completed = False
+        telemetry = getattr(self.ctx, "telemetry", None)
+        for job in jobs:
+            try:
+                self.ctx.workspace.remove_lane_workspace(job.candidate_id)
+            except Exception as exc:
+                print(f"[{stamp()}] warning: could not remove lane workspace "
+                      f"l{job.candidate_id}: {exc}", flush=True)
+            if job.state == "COMPLETED" and job.result is not None:
+                any_completed = True
+                res = job.result
+                meta = self._read_worker_meta(job)
+                res_usage = meta.get("usage") or []
+                if telemetry is not None:
+                    for record in res_usage:
+                        telemetry.record_usage(record)
+                lane_proposals = [
+                    proposer_lane_worker.proposal_from_dict(pd)
+                    for pd in (res.get("proposals") or [])
+                ]
+                proposals.extend(lane_proposals)
+                lane_traces.append({
+                    "lane_id": job.candidate_id,
+                    "outcome": res.get("outcome"),
+                    "n_proposals": len(lane_proposals),
+                    "reason_kind": res.get("reason_kind"),
+                })
+                lane_telemetries.append({
+                    "lane_id": job.candidate_id,
+                    "telemetry": res.get("telemetry") or {},
+                })
+                print(f"[{stamp()}] proposer lane r{round_id}"
+                      f"-l{job.candidate_id} collected "
+                      f"(outcome={res.get('outcome')}, "
+                      f"{len(lane_proposals)} proposal(s))", flush=True)
+            else:
+                print(f"[{stamp()}] proposer lane r{round_id}"
+                      f"-l{job.candidate_id} excluded ({job.state}"
+                      f"{': ' + job.note if job.note else ''})", flush=True)
+        if not any_completed:
+            raise InfraRoundError(
+                f"round {round_id}: all {len(jobs)} proposer lane job(s) "
+                "failed on infrastructure; the round was not recorded.")
+        return proposer_mod.ProposerResult(
+            proposals=proposals,
+            abstained=(len(proposals) == 0),
+            abstain_reason=("all lanes abstained/blocked/errored"
+                            if not proposals else None),
+            deliberation_telemetry={"lanes": lane_telemetries},
+            trace={"lanes": lane_traces},
+        )
+
+    # ---- proposer-lane inflight orphan marker (lightweight) ----
+
+    def _inflight_proposer_path(self) -> Path:
+        return self.run_dir / "inflight_proposer.json"
+
+    def _write_inflight_proposer(self, round_id: int, base_sha: str,
+                                 jobs: list[_Job]) -> None:
+        path = self._inflight_proposer_path()
+        payload = {
+            "round_id": round_id,
+            "base_sha": base_sha,
+            "lane_job_ids": [j.job_id for j in jobs if j.job_id],
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2)
+                       + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _clear_inflight_proposer(self) -> None:
+        self._inflight_proposer_path().unlink(missing_ok=True)
+
+    def cleanup_proposer_orphans(self) -> None:
+        """On --continue after a crash during the proposer stage: kill any lane
+        jobs still in the queue, then clear the marker. The interrupted round
+        is then re-proposed from scratch (the proposer is cheap relative to
+        candidates, so re-running beats mid-flight resume)."""
+        path = self._inflight_proposer_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        job_ids = [j for j in (data.get("lane_job_ids") or [])
+                   if isinstance(j, str) and j]
+        for jid in job_ids:
+            argv = [self.cfg["remove_cmd"]] + self._target_args()
+            argv.append(jid)
+            subprocess.run(argv, text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, check=False)
+            print(f"[{stamp()}] --continue: removed orphan proposer job {jid}",
+                  flush=True)
+        path.unlink(missing_ok=True)

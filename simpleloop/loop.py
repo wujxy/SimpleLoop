@@ -265,6 +265,10 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 flush=True,
             )
 
+        # If the frontend crashed during a previous proposer stage, kill any
+        # orphan proposer-lane jobs and clear the marker before re-proposing.
+        ctx.execution_backend.cleanup_proposer_orphans()
+
         inflight = _load_inflight(ctx.run_dir)
         abstention = None
         deliberation_telemetry = None
@@ -615,9 +619,10 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
                     ) -> proposer_mod.ProposerResult:
     """Return one round's structured research proposals.
 
-    Normal mode calls the Proposer Agent against a parent snapshot (read-only)
-    with the MemoryService as its persistent context source; static mode
-    wraps each supplied instruction in a proposal with no research target."""
+    Normal mode creates one writable lane workspace per lane (each a fresh git
+    worktree at ``parent_sha``) and runs the Proposer Orchestrator, which fans
+    the lanes out — every lane researches in its own isolated workspace.
+    Static mode wraps each supplied instruction in a proposal with no target."""
     if static_proposals is not None:
         proposal_text = static_proposals[round_id]
         print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
@@ -632,32 +637,14 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
             ],
         )
 
-    cfg = ctx.cfg
-    worktree_id = f"proposer-{round_id}"
-    source_path = ctx.workspace.add_worktree(worktree_id, parent_sha)
     try:
-        proposal_obj = ctx.proposer_agent.run(
-            goal=cfg["goal"], editable=cfg["editable_paths"],
-            frozen=cfg["frozen_paths"],
-            memory_service=ctx.memory_service,
-            base_sha=parent_sha,
-            source_path=source_path,
-            repo_path=ctx.workspace.repo,
-            run_dir=ctx.run_dir,
-            current_round=round_id,
-            candidates_per_round=cfg.get("candidates_per_round", 1),
-            gate_block=ctx.gate_lines,
-            prompt_dir=ctx.prompt_dir,
-            hints=cfg.get("hints") or None,
-            gen_steps=cfg.get("gen_steps", 216),
-            cognitive_steps=cfg.get("cognitive_steps", 148),
+        proposal_obj = ctx.execution_backend.run_proposer_lanes(
+            round_id=round_id, base_sha=parent_sha,
         )
     except (model_mod.ModelError, proposer_mod.ProposerError, ValueError) as exc:
         # A proposer contract failure cannot produce a candidate generation.
         print(f"[{stamp()}] proposer failed; aborting run: {exc}", flush=True)
         raise
-    finally:
-        ctx.workspace.remove_worktree(worktree_id)
     print(f"[{stamp()}] proposals: {len(proposal_obj.proposals)} candidate(s)",
           flush=True)
     return proposal_obj

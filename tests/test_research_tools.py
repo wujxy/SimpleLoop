@@ -112,19 +112,19 @@ def test_research_tool_prompt_is_composed_from_tool_specs():
 def _runner(tmp_path, *, cap=100, timeout=12):
     paths = {
         name: tmp_path / name
-        for name in ("source", "repo", "history", "scratch")
+        for name in ("workspace", "repo", "history", "scratch")
     }
     for path in paths.values():
         path.mkdir()
     git_dir = paths["repo"] / ".git" / "worktrees" / "research"
     git_dir.mkdir(parents=True)
-    (paths["source"] / ".git").write_text(
+    (paths["workspace"] / ".git").write_text(
         f"gitdir: {git_dir}\n", encoding="utf-8",
     )
     runtime = _Runtime(paths["history"])
     runner = ResearchCommandRunner(
         runtime=runtime,
-        source=paths["source"],
+        workspace=paths["workspace"],
         repo=paths["repo"],
         history_dir=paths["history"],
         scratch=paths["scratch"],
@@ -151,15 +151,15 @@ def test_research_command_uses_process_group_and_returns_observation(
         "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
     )
 
-    result = runner.run("git show HEAD", cwd="source")
+    result = runner.run("git show HEAD", cwd="workspace")
 
     payload, paths = runtime.argv_call
     assert payload == [
         "env", "GIT_DIR=/repo/.git/worktrees/research",
-        "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/source",
+        "GIT_COMMON_DIR=/repo/.git", "GIT_WORK_TREE=/workspace",
         "bash", "-lc", "git show HEAD",
     ]
-    assert paths["cwd"] == "source"
+    assert paths["cwd"] == "workspace"
     assert popen_calls[0][1]["start_new_session"] is True
     assert popen_calls[0][1]["shell"] is False
     assert result == {
@@ -173,7 +173,7 @@ def test_research_command_uses_process_group_and_returns_observation(
 
 def test_research_command_uses_the_snapshot_worktree_head(tmp_path):
     repo = tmp_path / "repo"
-    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
     history = tmp_path / "history"
     scratch = tmp_path / "scratch"
     repo.mkdir()
@@ -195,7 +195,7 @@ def test_research_command_uses_the_snapshot_worktree_head(tmp_path):
     parent_sha = git("-C", str(repo), "rev-parse", "HEAD")
     (repo / "value.txt").write_text("new head\n", encoding="utf-8")
     git("-C", str(repo), "commit", "-am", "new head")
-    git("-C", str(repo), "worktree", "add", "--detach", str(source), parent_sha)
+    git("-C", str(repo), "worktree", "add", "--detach", str(workspace), parent_sha)
 
     class HostRuntime:
         run_dir = tmp_path
@@ -203,7 +203,7 @@ def test_research_command_uses_the_snapshot_worktree_head(tmp_path):
         def research_exec_argv(self, payload, **paths):
             replacements = {
                 "/repo": str(paths["repo"]),
-                "/source": str(paths["source"]),
+                "/workspace": str(paths["workspace"]),
             }
             return [
                 next((item.replace(old, new) for old, new in replacements.items()
@@ -215,7 +215,7 @@ def test_research_command_uses_the_snapshot_worktree_head(tmp_path):
             return {"PATH": os.environ["PATH"]}
 
     runner = ResearchCommandRunner(
-        runtime=HostRuntime(), source=source, repo=repo,
+        runtime=HostRuntime(), workspace=workspace, repo=repo,
         history_dir=history, scratch=scratch,
         timeout_seconds=10, output_cap_chars=1000,
     )
@@ -261,7 +261,7 @@ def test_research_command_caps_combined_output(tmp_path, monkeypatch):
         "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
     )
 
-    result = runner.run("true", cwd="source")
+    result = runner.run("true", cwd="workspace")
 
     assert result["truncated"] is True
     assert result["output"] == "x" * 12
@@ -269,7 +269,7 @@ def test_research_command_caps_combined_output(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("command", "cwd"), [("", "source"), ("true", "history")],
+    ("command", "cwd"), [("", "workspace"), ("true", "history")],
 )
 def test_research_command_rejects_invalid_input(tmp_path, command, cwd):
     runner, _runtime = _runner(tmp_path)
@@ -282,7 +282,7 @@ def test_research_command_rejects_invalid_input(tmp_path, command, cwd):
 def _tools(tmp_path, *, memory=None, current_round=0):
     runner, runtime = _runner(tmp_path)
     return ResearchTools(
-        runtime=runtime, source=runner.source, repo=runner.repo,
+        runtime=runtime, workspace=runner.workspace, repo=runner.repo,
         history_dir=runner.history_dir, scratch=runner.scratch,
         memory_service=memory or _FakeMemoryService(),
         command_timeout_seconds=12,
@@ -372,8 +372,8 @@ def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
 
     result = tools.execute({
         "action": "run_research_command", "command": "rg cache",
-        "cwd": "source",
+        "cwd": "workspace",
     }, deadline=100)
 
     assert result["ok"] is True
-    assert calls == [("rg cache", {"cwd": "source", "timeout_seconds": 10})]
+    assert calls == [("rg cache", {"cwd": "workspace", "timeout_seconds": 10})]

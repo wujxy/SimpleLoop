@@ -171,9 +171,19 @@ _PROTOCOL_BLOCK = """Control actions (you are done only when you submit or block
 """
 
 _RUNTIME_BOUNDARIES = """Runtime boundaries:
-- /source is the accepted revision, /repo is its read-only Git repository,
-  /history.jsonl and /rounds are persisted run evidence when present, and
+- /workspace is your writable lab: the accepted source tree, materialized
+  read-write. Read it, write scratch code, compile, run toy experiments to
+  understand the code and the task. It is disposable — nothing you write here
+  becomes an artifact.
+- /repo is the read-only Git repository. Use `git show <sha>`, `git diff`,
+  `git log` to inspect any prior experiment's source (the history is shared).
+  You CANNOT commit, branch, or reset — creating artifacts is the candidate's
+  job, and the read-only /repo structurally prevents it.
+- /history.jsonl and /rounds are persisted run evidence when present;
   /scratch is temporary writable space.
+- Anything you measure in your lab (a toy build, a probe) is for YOUR
+  understanding only. It is never a merit fact: whether a change is faster or
+  correct is the Harness's verdict, not yours.
 - You cannot call the Executor or Harness, edit candidates, choose a parent,
   or declare evaluation and Gate facts. Only Harness records are authoritative.
 """.strip()
@@ -341,11 +351,11 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
     if name == "run_research_command":
         _require_keys(action, {"action", "command"}, {"cwd"})
         command = action["command"]
-        cwd = action.get("cwd", "source")
+        cwd = action.get("cwd", "workspace")
         if not isinstance(command, str) or not command.strip():
             raise ProposerError("research command must be non-empty")
-        if cwd not in {"source", "scratch"}:
-            raise ProposerError("research cwd must be source or scratch")
+        if cwd not in {"workspace", "scratch"}:
+            raise ProposerError("research cwd must be workspace or scratch")
         return {"action": name, "command": command, "cwd": cwd}
     if name == "inspect_episode":
         _require_keys(action, {"action", "ref"})
@@ -526,7 +536,7 @@ def _validate_block_evidence(
 ) -> bool:
     """True when the block cites at least one ``source:`` ref to a path the
     agent read this branch (present in ``new_evidence``) that exists under
-    /source. The uniform objective choke point for every block."""
+    the workspace. The uniform objective choke point for every block."""
     for ref in refs:
         if ":" not in ref:
             continue
@@ -727,7 +737,7 @@ class ProposerAgent(ResearchAgent):
         with TemporaryDirectory(prefix="simpleloop-batch-") as scratch:
             tools = ResearchTools(
                 runtime=self.runtime,
-                source=source_path,
+                workspace=source_path,
                 repo=repo_path,
                 history_dir=run_dir,
                 scratch=Path(scratch),

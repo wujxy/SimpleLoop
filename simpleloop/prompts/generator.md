@@ -114,7 +114,8 @@ history — no dashboard, no frontier, no exhausted-region list, no prior
 outcomes.
 
 You survey the subject matter via `run_research_command` (e.g. `ls`, `grep`,
-`head`, `wc` on `/source`). Source is read-only; scratch is writable. Use these
+`head`, `wc` on `/workspace`). `/workspace` is your writable lab — the accepted
+source tree, read-write — and `/scratch` is temporary writable space. Use these
 to access real files and structure — don't guess from memory.
 
 ## facts_read — your factual basis

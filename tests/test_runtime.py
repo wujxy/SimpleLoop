@@ -289,16 +289,18 @@ def test_exec_argv_does_not_duplicate_run_directory_bind(tmp_path: Path):
     assert f"{runtime.run_dir}:{runtime.run_dir}:rw" in argv
 
 
-def test_research_argv_is_contained_read_only_and_offline(tmp_path: Path):
+def test_research_argv_is_contained_offline_with_writable_workspace(
+    tmp_path: Path,
+):
     base = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
     runtime = ApptainerRuntime(
         base.image, [tmp_path], base.run_dir,
         executable=base.executable,
     )
-    source = tmp_path / "source"
+    workspace = tmp_path / "workspace"
     repo = tmp_path / "repo-view"
     scratch = tmp_path / "scratch"
-    for path in (source, repo, scratch):
+    for path in (workspace, repo, scratch):
         path.mkdir()
     history = runtime.run_dir / "history.jsonl"
     history.write_text("{}\n", encoding="utf-8")
@@ -309,30 +311,32 @@ def test_research_argv_is_contained_read_only_and_offline(tmp_path: Path):
 
     argv = runtime.research_exec_argv(
         ["bash", "-lc", "git show --stat HEAD"],
-        source=source,
+        workspace=workspace,
         repo=repo,
         history=runtime.run_dir,
         scratch=scratch,
-        cwd="source",
+        cwd="workspace",
     )
 
     assert "--containall" in argv
     assert argv[argv.index("--network") + 1] == "none"
-    assert f"{source.resolve()}:/source:ro" in argv
+    # /workspace is the writable lab (read-write); /repo stays read-only so the
+    # proposer can read history but cannot commit.
+    assert f"{workspace.resolve()}:/workspace:rw" in argv
     assert f"{repo.resolve()}:/repo:ro" in argv
     assert f"{history.resolve()}:/history.jsonl:ro" in argv
     assert f"{rounds.resolve()}:/rounds:ro" in argv
     assert f"{scratch.resolve()}:/scratch:rw" in argv
     assert f"{tmp_path.resolve()}:{tmp_path.resolve()}:ro" not in argv
     assert not any(str(secret) in arg for arg in argv)
-    assert argv[argv.index("--cwd") + 1] == "/source"
+    assert argv[argv.index("--cwd") + 1] == "/workspace"
 
 
-def test_research_argv_accepts_only_source_or_scratch_cwd(tmp_path: Path):
+def test_research_argv_accepts_only_workspace_or_scratch_cwd(tmp_path: Path):
     runtime = _make_runtime(tmp_path)
-    with pytest.raises(ValueError, match="source.*scratch"):
+    with pytest.raises(ValueError, match="workspace.*scratch"):
         runtime.research_exec_argv(
-            ["true"], source=tmp_path, repo=tmp_path,
+            ["true"], workspace=tmp_path, repo=tmp_path,
             history=tmp_path, scratch=tmp_path, cwd="history",
         )
 

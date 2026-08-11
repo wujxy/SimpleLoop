@@ -1,8 +1,9 @@
-"""Read-only factual lookup for the Proposer's research phase.
+"""Factual lookup for the Proposer's research phase.
 
 Two families of tools:
   - ``ResearchCommandRunner`` runs a bounded shell command in a sandboxed
-    Apptainer boundary (source read-only, scratch writable, no network).
+    Apptainer boundary (workspace read-write, repo read-only for git history,
+    scratch writable, no network).
   - ``ScientificMemoryTools`` dispatches the Proposer's memory operations to
     ``MemoryService``.
 
@@ -33,11 +34,14 @@ RESEARCH_TOOL_SPECS = (
         action="run_research_command",
         schema=(
             '{"action":"run_research_command","command":"...",'
-            '"cwd":"source|scratch"}'
+            '"cwd":"workspace|scratch"}'
         ),
         description=(
-            "Inspect the accepted source, Git state, or run evidence with a "
-            "bounded shell command. Source is read-only; scratch is writable."
+            "Run a bounded shell command in your writable lab (/workspace) or "
+            "scratch (/scratch). /workspace is the accepted source tree "
+            "materialized read-write: read it, write scratch code, compile, "
+            "run toys to understand the code. Git history (any prior "
+            "experiment SHA) is readable via /repo; you cannot commit."
         ),
     ),
     ResearchToolSpec(
@@ -121,7 +125,7 @@ class ResearchCommandRunner:
         self,
         *,
         runtime,
-        source: Path,
+        workspace: Path,
         repo: Path,
         history_dir: Path,
         scratch: Path,
@@ -129,7 +133,7 @@ class ResearchCommandRunner:
         output_cap_chars: int,
     ):
         self.runtime = runtime
-        self.source = Path(source)
+        self.workspace = Path(workspace)
         self.repo = Path(repo)
         self.history_dir = Path(history_dir)
         self.scratch = Path(scratch)
@@ -140,26 +144,26 @@ class ResearchCommandRunner:
         self,
         command: str,
         *,
-        cwd: str = "source",
+        cwd: str = "workspace",
         timeout_seconds: float | None = None,
     ) -> dict:
         if not isinstance(command, str) or not command.strip():
             raise ValueError("research command must be non-empty")
-        if cwd not in {"source", "scratch"}:
-            raise ValueError("research cwd must be 'source' or 'scratch'")
+        if cwd not in {"workspace", "scratch"}:
+            raise ValueError("research cwd must be 'workspace' or 'scratch'")
         git_dir = self._worktree_git_dir()
         payload = [
             "env",
             f"GIT_DIR={git_dir}",
             "GIT_COMMON_DIR=/repo/.git",
-            "GIT_WORK_TREE=/source",
+            "GIT_WORK_TREE=/workspace",
             "bash",
             "-lc",
             command,
         ]
         argv = self.runtime.research_exec_argv(
             payload,
-            source=self.source,
+            workspace=self.workspace,
             repo=self.repo,
             history=self.history_dir,
             scratch=self.scratch,
@@ -228,12 +232,12 @@ class ResearchCommandRunner:
         }
 
     def _worktree_git_dir(self) -> str:
-        git_file = self.source / ".git"
+        git_file = self.workspace / ".git"
         try:
             line = git_file.read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise ValueError(
-                f"research source has no worktree metadata: {git_file}"
+                f"research workspace has no worktree metadata: {git_file}"
             ) from exc
         if not line.startswith("gitdir: "):
             raise ValueError(f"invalid worktree metadata: {git_file}")
@@ -288,7 +292,7 @@ class ResearchTools:
         self,
         *,
         runtime,
-        source: Path,
+        workspace: Path,
         repo: Path,
         history_dir: Path,
         scratch: Path,
@@ -302,7 +306,7 @@ class ResearchTools:
         self.command_timeout_seconds = command_timeout_seconds
         self.command_runner = ResearchCommandRunner(
             runtime=runtime,
-            source=source,
+            workspace=workspace,
             repo=repo,
             history_dir=history_dir,
             scratch=scratch,

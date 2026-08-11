@@ -194,11 +194,11 @@ def _parse_generator_action(text: str) -> dict:
 
     if name == "run_research_command":
         command = action.get("command")
-        cwd = action.get("cwd", "source")
+        cwd = action.get("cwd", "workspace")
         if not isinstance(command, str) or not command.strip():
             raise GeneratorError("research command must be non-empty")
-        if cwd not in {"source", "scratch"}:
-            raise GeneratorError("research cwd must be source or scratch")
+        if cwd not in {"workspace", "scratch"}:
+            raise GeneratorError("research cwd must be workspace or scratch")
         return {"action": name, "command": command, "cwd": cwd}
 
     if name == "emit_lever_map":
@@ -224,9 +224,12 @@ _GEN_PROTOCOL = """Runtime contract (immutable):
 Return exactly one JSON object per response, with no prose outside it.
 
 Research tools (use freely to survey the subject matter):
-- {"action":"run_research_command","command":"...","cwd":"source|scratch"}
-  Inspect the accepted source with a bounded shell command (ls, grep, head, wc,
-  git log, etc.). Source is read-only; scratch is writable.
+- {"action":"run_research_command","command":"...","cwd":"workspace|scratch"}
+  Run a bounded shell command (ls, grep, head, wc, git log, etc.) in your
+  writable lab (/workspace) or scratch (/scratch). /workspace is the accepted
+  source tree, materialized read-write: survey it, and write scratch code or
+  build small probes when that helps you understand the structure. Git history
+  (any prior experiment SHA) is readable via /repo; you cannot commit.
 
 Lever map synthesis:
 - {"action":"emit_lever_map",
@@ -245,8 +248,10 @@ Hypothesis emit (you are done when you submit):
   You are responsible for whether the hypothesis is grounded in your map.
 
 Runtime boundaries:
-- /source is the accepted revision (read-only), /scratch is temporary writable.
-- You cannot see history, experiments, findings, or prior outcomes.
+- /workspace is your writable lab (accepted source, read-write); /repo is the
+  read-only Git repository; /scratch is temporary writable.
+- You cannot commit (artifacts are the candidate's job). You cannot see
+  history, experiments, findings, or prior outcomes.
 """.strip()
 
 
@@ -459,7 +464,7 @@ class GeneratorAgent(ResearchAgent):
         with TemporaryDirectory(prefix="simpleloop-gen-") as scratch:
             tools = ResearchTools(
                 runtime=self.runtime,
-                source=source_path,
+                workspace=source_path,
                 repo=repo_path,
                 history_dir=run_dir,
                 scratch=Path(scratch),

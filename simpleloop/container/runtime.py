@@ -127,15 +127,23 @@ class ApptainerRuntime:
         self,
         payload: Sequence[str],
         *,
-        source: str | Path,
+        workspace: str | Path,
         repo: str | Path,
         history: str | Path,
         scratch: str | Path,
         cwd: str,
     ) -> list[str]:
-        """Build the offline, read-only Proposer research boundary."""
-        if cwd not in {"source", "scratch"}:
-            raise ValueError("research cwd must be 'source' or 'scratch'")
+        """Build the offline Proposer research boundary.
+
+        ``workspace`` is the lane's writable git worktree (base_sha tree
+        materialized, history reachable read-only through the worktree's shared
+        object store). It is bind-mounted read-write at ``/workspace`` so the
+        proposer can write scratch code, compile, and run toy experiments.
+        ``/repo`` stays read-only, which structurally prevents the proposer
+        from committing (creating artifacts is the candidate's job, not the
+        proposer's)."""
+        if cwd not in {"workspace", "scratch"}:
+            raise ValueError("research cwd must be 'workspace' or 'scratch'")
         argv = [
             self.executable,
             "exec",
@@ -158,7 +166,7 @@ class ApptainerRuntime:
         if rounds.is_dir():
             argv.extend(["--bind", f"{rounds}:/rounds:ro"])
         argv.extend([
-            "--bind", f"{Path(source).resolve()}:/source:ro",
+            "--bind", f"{Path(workspace).resolve()}:/workspace:rw",
             "--bind", f"{Path(repo).resolve()}:/repo:ro",
             "--bind", f"{Path(scratch).resolve()}:/scratch:rw",
             "--cwd", f"/{cwd}", str(self.image),

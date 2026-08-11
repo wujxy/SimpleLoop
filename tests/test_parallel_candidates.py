@@ -14,6 +14,7 @@ from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.roles.executor import ExecResult
 from simpleloop.harness.evals import EvalResult
 from simpleloop.loop import RunContext, _run_candidates, _select_winner
+from simpleloop.execution.local import LocalBackend
 from simpleloop.roles.proposer import ProposerResult
 from simpleloop.harness.store import Store, best_candidate
 
@@ -511,20 +512,20 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
         )
 
 
-def test_next_proposals_uses_readonly_parent_snapshot_and_memory_service(tmp_path):
+def test_next_proposals_creates_lane_workspaces_and_passes_them(tmp_path):
 
     class FakeWorkspace:
         repo = tmp_path / "repo"
         calls = []
 
-        def add_worktree(self, worktree_id, parent_sha):
-            self.calls.append(("add", worktree_id, parent_sha))
-            path = tmp_path / "snapshot"
+        def add_lane_workspace(self, lane_id, base_sha):
+            self.calls.append(("add", lane_id, base_sha))
+            path = tmp_path / f"lane-{lane_id}"
             path.mkdir(exist_ok=True)
             return path
 
-        def remove_worktree(self, worktree_id):
-            self.calls.append(("remove", worktree_id))
+        def remove_lane_workspace(self, lane_id):
+            self.calls.append(("remove", lane_id))
 
     class FakeProposer:
         kwargs = None
@@ -550,38 +551,41 @@ def test_next_proposals_uses_readonly_parent_snapshot_and_memory_service(tmp_pat
         memory_service=MemoryService(tmp_path, metrics_schema=_SCHEMA),
     )
 
-    result = loop_mod._next_proposals(ctx, None, 1, "parent-sha")
+    result = LocalBackend(ctx).run_proposer_lanes(
+        round_id=1, base_sha="parent-sha")
 
     assert result.proposals[0].instruction == "try cache"
     assert proposer.kwargs["memory_service"] is ctx.memory_service
-    assert proposer.kwargs["source_path"] == tmp_path / "snapshot"
+    # candidates_per_round=1 -> 1 lane -> one workspace passed through
+    assert proposer.kwargs["workspaces"] == [tmp_path / "lane-0"]
     assert proposer.kwargs["current_round"] == 1
     assert ctx.workspace.calls == [
-        ("add", "proposer-1", "parent-sha"),
-        ("remove", "proposer-1"),
+        ("add", 0, "parent-sha"),
+        ("remove", 0),
     ]
 
 
-def test_next_proposals_removes_snapshot_when_proposer_fails(tmp_path):
+def test_next_proposals_removes_lane_workspaces_when_proposer_fails(tmp_path):
     removed = []
 
     class FakeWorkspace:
         repo = tmp_path / "repo"
 
-        def add_worktree(self, worktree_id, _parent_sha):
-            path = tmp_path / "snapshot"
+        def add_lane_workspace(self, lane_id, _base_sha):
+            path = tmp_path / f"lane-{lane_id}"
             path.mkdir(exist_ok=True)
             return path
 
-        def remove_worktree(self, worktree_id):
-            removed.append(worktree_id)
+        def remove_lane_workspace(self, lane_id):
+            removed.append(lane_id)
 
     class FailingProposer:
         def run(self, **_kwargs):
             raise ValueError("bad proposal")
 
     ctx = RunContext(
-        cfg={"goal": "faster", "editable_paths": [], "frozen_paths": []},
+        cfg={"goal": "faster", "editable_paths": [], "frozen_paths": [],
+             "candidates_per_round": 1},
         run_dir=tmp_path, workspace=FakeWorkspace(),
         store=type("Store", (), {"history": lambda self: []})(),
         proposer_agent=FailingProposer(),
@@ -589,9 +593,9 @@ def test_next_proposals_removes_snapshot_when_proposer_fails(tmp_path):
     )
 
     with pytest.raises(ValueError, match="bad proposal"):
-        loop_mod._next_proposals(ctx, None, 2, "parent")
+        LocalBackend(ctx).run_proposer_lanes(round_id=2, base_sha="parent")
 
-    assert removed == ["proposer-2"]
+    assert removed == [0]
 
 
 def test_next_proposals_static_mode_wraps_instruction_as_new_target(tmp_path):
@@ -708,12 +712,31 @@ def _run_loop_integration(
         def remove_worktree(self, _worktree_id):
             pass
 
+        def add_lane_workspace(self, lane_id, _base_sha):
+            ws = self.run_dir / "lanes" / f"lane-{lane_id}" / "workspace"
+            ws.mkdir(parents=True, exist_ok=True)
+            return ws
+
+        def remove_lane_workspace(self, _lane_id):
+            pass
+
     class FakeBackend:
         def __init__(self, ctx):
-            pass
+            self.ctx = ctx
 
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "", {}
+
+        def run_proposer_lanes(self, *, round_id, base_sha):
+            # The loop drives the proposer through the backend now. Delegate to
+            # the REAL LocalBackend so the orchestrator is called with the full
+            # kwarg set against the (faked) workspace + faked orchestrator —
+            # i.e. exactly the in-process path production code uses.
+            return LocalBackend(self.ctx).run_proposer_lanes(
+                round_id=round_id, base_sha=base_sha)
+
+        def cleanup_proposer_orphans(self):
+            pass
 
         def run_candidates(self, *, proposals: list[str], round_id: int,
                            parent_sha: str, journal=None,
@@ -888,6 +911,14 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         def remove_worktree(self, _worktree_id):
             pass
 
+        def add_lane_workspace(self, lane_id, _base_sha):
+            ws = self.run_dir / "lanes" / f"lane-{lane_id}" / "workspace"
+            ws.mkdir(parents=True, exist_ok=True)
+            return ws
+
+        def remove_lane_workspace(self, _lane_id):
+            pass
+
     class FakeStore:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -907,10 +938,21 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
 
     class FakeBackend:
         def __init__(self, ctx):
-            pass
+            self.ctx = ctx
 
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "", {}
+
+        def run_proposer_lanes(self, *, round_id, base_sha):
+            # The loop drives the proposer through the backend now. Delegate to
+            # the REAL LocalBackend so the orchestrator is called with the full
+            # kwarg set against the (faked) workspace + faked orchestrator —
+            # i.e. exactly the in-process path production code uses.
+            return LocalBackend(self.ctx).run_proposer_lanes(
+                round_id=round_id, base_sha=base_sha)
+
+        def cleanup_proposer_orphans(self):
+            pass
 
         def run_candidates(self, *, proposals: list[str], round_id: int,
                            parent_sha: str, journal=None,

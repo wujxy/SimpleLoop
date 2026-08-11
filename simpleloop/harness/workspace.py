@@ -4,6 +4,7 @@ run-to-run isolation); each round edits in a worktree and the harness commits.""
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,7 @@ class Workspace:
         self.editable = editable
         self.repo = self.run_dir / "repo"        # the per-run working repo
         self.wt_root = self.run_dir / "worktrees"
+        self.lanes_root = self.run_dir / "lanes"  # proposer lane workspaces
         self._baseline_sha: str | None = None
 
     # ---- run setup ----
@@ -86,6 +88,51 @@ class Workspace:
         subprocess.run(["git", "-C", str(self.repo), "worktree", "remove", "--force", str(wt)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         # prune the worktree admin metadata
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    # ---- proposer lane workspace ----
+
+    def add_lane_workspace(self, lane_id: int | str, base_sha: str) -> Path:
+        """Create an independent writable git worktree for one proposer lane at
+        ``base_sha``, under ``run_dir/lanes/lane-{lane_id}/workspace``.
+
+        Detached HEAD (no branch): the lane's git activity never creates refs in
+        the canonical ``run/repo``. The base_sha tree is materialized as real
+        writable files; history is reachable read-only through the worktree's
+        shared object store (``.git`` -> ``run/repo/.git``). Returns the
+        workspace path (the proposer's cwd)."""
+        ws = self.lanes_root / f"lane-{lane_id}" / "workspace"
+        if ws.exists():
+            # stale from a crashed run: drop and recreate
+            subprocess.run(
+                ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(ws)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+            # if the admin entry is gone but the dir lingers, clear it so the
+            # add below doesn't collide on "already exists"
+            if ws.exists():
+                shutil.rmtree(ws, ignore_errors=True)
+        ws.parent.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}
+        completed = subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "--detach", str(ws), base_sha],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False,
+        )
+        if completed.returncode != 0:
+            raise WorkspaceError(
+                f"git worktree add (lane {lane_id}) failed: {completed.stderr.strip()}"
+            )
+        return ws
+
+    def remove_lane_workspace(self, lane_id: int | str) -> None:
+        ws = self.lanes_root / f"lane-{lane_id}" / "workspace"
+        if not ws.exists():
+            return
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(ws)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
         subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 

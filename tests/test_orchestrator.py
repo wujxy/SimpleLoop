@@ -21,7 +21,7 @@ import pytest
 
 from simpleloop.memory import MemoryService
 from simpleloop.roles.orchestrator import (
-    ProposerOrchestrator, _lane_quotas, _Mode,
+    ProposerOrchestrator, lane_quotas, _Mode,
     _sample_generative_ops, _SCHEDULED_OP_COUNT,
     _MAX_REGENERATIONS, LaneState, LaneResult,
 )
@@ -92,17 +92,22 @@ def _feedback_action():
 
 
 def _run_args(tmp_path, candidates_per_round=2):
-    source = tmp_path / "source"
+    from simpleloop.roles.orchestrator import lane_quotas
+    n_lanes = len(lane_quotas(candidates_per_round))
     repo = tmp_path / "repo"
     run_dir = tmp_path / "run"
-    for p in (source, repo, run_dir):
-        p.mkdir(exist_ok=True)
-    (source / "src").mkdir(exist_ok=True)
-    (source / "src" / "foo.cc").write_text("// target\n", encoding="utf-8")
+    repo.mkdir(exist_ok=True)
+    run_dir.mkdir(exist_ok=True)
+    workspaces = []
+    for i in range(n_lanes):
+        ws = tmp_path / f"workspace-{i}"
+        (ws / "src").mkdir(parents=True, exist_ok=True)
+        (ws / "src" / "foo.cc").write_text("// target\n", encoding="utf-8")
+        workspaces.append(ws)
     return {"goal": "make it faster", "editable": ["src/**"],
             "frozen": ["tests/**"], "memory_service": MemoryService(
                 run_dir=run_dir, metrics_schema=_METRICS_SCHEMA),
-            "base_sha": "abc", "source_path": source, "repo_path": repo,
+            "base_sha": "abc", "workspaces": workspaces, "repo_path": repo,
             "run_dir": run_dir, "current_round": 0,
             "candidates_per_round": candidates_per_round,
             "gate_block": "- gate: pass", "prompt_dir": None}
@@ -133,27 +138,27 @@ class TestGenerativeOpScheduler:
 
 class TestLaneQuotas:
     def test_n4_k2_two_lanes(self):
-        assert _lane_quotas(4, 2) == [2, 2]
+        assert lane_quotas(4, 2) == [2, 2]
 
     def test_n5_k2_three_lanes(self):
-        assert _lane_quotas(5, 2) == [2, 2, 1]
+        assert lane_quotas(5, 2) == [2, 2, 1]
 
     def test_n4_k1_four_lanes(self):
-        assert _lane_quotas(4, 1) == [1, 1, 1, 1]
+        assert lane_quotas(4, 1) == [1, 1, 1, 1]
 
     def test_n7_k2_four_lanes(self):
-        assert _lane_quotas(7, 2) == [2, 2, 2, 1]
+        assert lane_quotas(7, 2) == [2, 2, 2, 1]
 
     def test_n1_k1_one_lane(self):
-        assert _lane_quotas(1, 1) == [1]
+        assert lane_quotas(1, 1) == [1]
 
     def test_n3_k2_two_lanes(self):
-        assert _lane_quotas(3, 2) == [2, 1]
+        assert lane_quotas(3, 2) == [2, 1]
 
     def test_total_equals_n(self):
         for n in range(1, 20):
             for k in range(1, 6):
-                assert sum(_lane_quotas(n, k)) == n
+                assert sum(lane_quotas(n, k)) == n
 
 
 # --- 1:1 lane architecture -------------------------------------------------
@@ -534,7 +539,7 @@ class TestGeneratorRegenerate:
                     captured["system"] = system
                     return ModelReply(json.dumps({
                         "action": "run_research_command",
-                        "command": "ls src/", "cwd": "source",
+                        "command": "ls src/", "cwd": "workspace",
                     }))
                 if self._n == 2:
                     return ModelReply(json.dumps({
