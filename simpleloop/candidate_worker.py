@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config as config_mod
-from .container.runtime import ApptainerRuntime, MountMap
+from .container.runtime import ApptainerRuntime, executor_mount_map
 from .harness import evals, gate, views
 from .harness.handoff import write_handoff
 from .harness.workspace import Workspace
@@ -135,10 +135,7 @@ def build_deps(
                            model=executor.get("model"),
                            base_url=executor.get("base_url"),
                            usage_observer=usage_observer,
-                           mounts=MountMap(
-                               rw=tuple(cfg["editable_paths"]),
-                               ro=tuple(cfg.get("read_only_paths") or ()),
-                           ))
+                           mounts=executor_mount_map(cfg))
     workspace = Workspace(
         run_dir=run_dir,
         repo_path=cfg["repo_path"],

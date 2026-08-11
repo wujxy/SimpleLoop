@@ -22,6 +22,7 @@ Minimal schema:
   runtime.image: path                (required; readable SIF image)
   runtime.definition: path           (optional; defaults beside image with .def suffix)
   runtime.binds: [absolute dir]      (optional, default [])
+  runtime.executor_read_only_binds: [absolute dir] (optional, default []; Executor-only, always read-only)
   eval.commands: [str]                (required non-empty; harness-run after each commit)
   eval.metrics: {objective, gates}    (required; the key=value lines the harness parses)
   eval.timeout_seconds: int           (optional, default 600; per eval command budget)
@@ -163,7 +164,8 @@ def _resolve(
     safety = _need(raw, "safety", dict)
     loop = _need(raw, "loop", dict)
     source = _need(raw, "source", dict)
-    runtime_image, runtime_definition, runtime_binds = _resolve_runtime(
+    (runtime_image, runtime_definition, runtime_binds,
+     executor_read_only_binds) = _resolve_runtime(
         raw.get("runtime"),
         path,
         require_ready=require_ready,
@@ -279,6 +281,7 @@ def _resolve(
         "runtime_image": runtime_image,
         "runtime_definition": runtime_definition,
         "runtime_binds": runtime_binds,
+        "executor_read_only_binds": executor_read_only_binds,
         "eval_commands": eval_commands,
         "eval_timeout_seconds": int(eval_timeout),
         "eval_output_cap_chars": int(eval_output_cap),
@@ -394,11 +397,13 @@ def _resolve_runtime(
     config_path: Path,
     *,
     require_ready: bool,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], list[str]]:
     """Validate and resolve the mandatory Apptainer runtime block."""
     if not isinstance(raw, dict):
         raise ConfigError("runtime: required and must be an object")
-    unknown = set(raw) - {"image", "definition", "binds"}
+    unknown = set(raw) - {
+        "image", "definition", "binds", "executor_read_only_binds",
+    }
     if unknown:
         raise ConfigError(f"runtime: unknown key(s): {sorted(unknown)}")
 
@@ -423,34 +428,34 @@ def _resolve_runtime(
         if not os.access(image, os.R_OK):
             raise ConfigError(f"runtime.image: not readable: {image}")
 
-    raw_binds = raw.get("binds", [])
+    binds = _resolve_bind_dirs(raw.get("binds", []), "runtime.binds")
+    executor_binds = _resolve_bind_dirs(
+        raw.get("executor_read_only_binds", []),
+        "runtime.executor_read_only_binds",
+    )
+    return str(image), str(definition), binds, executor_binds
+
+
+def _resolve_bind_dirs(raw_binds: object, field: str) -> list[str]:
     if not isinstance(raw_binds, list):
-        raise ConfigError(
-            "runtime.binds: must be a list of absolute directories"
-        )
+        raise ConfigError(f"{field}: must be a list of absolute directories")
     binds: list[str] = []
     for index, value in enumerate(raw_binds):
         if not isinstance(value, str) or not value.strip():
-            raise ConfigError(
-                f"runtime.binds[{index}]: must be a non-empty path"
-            )
+            raise ConfigError(f"{field}[{index}]: must be a non-empty path")
         bind = Path(value).expanduser()
         if not bind.is_absolute():
-            raise ConfigError(
-                f"runtime.binds[{index}]: must be absolute: {value}"
-            )
+            raise ConfigError(f"{field}[{index}]: must be absolute: {value}")
         bind = bind.resolve()
         if not bind.is_dir():
-            raise ConfigError(
-                f"runtime.binds[{index}]: not an existing directory: {bind}"
-            )
+            raise ConfigError(f"{field}[{index}]: not an existing directory: {bind}")
         if ":" in str(bind) or "," in str(bind):
             raise ConfigError(
-                f"runtime.binds[{index}]: contains an unsupported bind "
+                f"{field}[{index}]: contains an unsupported bind "
                 f"separator (':' or ','): {bind}"
             )
         binds.append(str(bind))
-    return str(image), str(definition), binds
+    return binds
 
 
 def _resolve_metrics(raw: object) -> dict:

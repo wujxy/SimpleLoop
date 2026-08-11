@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -194,6 +195,37 @@ def test_candidate_manifest_carries_active_prompt_directory(tmp_path):
     assert manifest["proposal"] == "p"
     assert not ({"family", "decision", "prior_metrics", "baseline_metrics"}
                 & manifest.keys())
+
+
+def test_proposer_backend_submits_one_lane_with_full_round_quota(
+    tmp_path, monkeypatch,
+):
+    ctx = _Ctx(tmp_path)
+    ctx.cfg["candidates_per_round"] = 4
+    backend = HEPJobBackend(ctx, _hep_cfg(tmp_path))
+    prepared = []
+    submitted = []
+
+    def fake_prepare(lane_id, round_id, base_sha, *, select_quota,
+                     assigned_ops):
+        prepared.append((lane_id, round_id, base_sha, select_quota,
+                         assigned_ops))
+        return SimpleNamespace(candidate_id=lane_id)
+
+    monkeypatch.setattr(backend, "_ensure_job_env", lambda: None)
+    monkeypatch.setattr(backend, "_prepare_lane", fake_prepare)
+    monkeypatch.setattr(backend, "_submit_lane", submitted.append)
+    monkeypatch.setattr(backend, "_write_inflight_proposer",
+                        lambda *_args: None)
+    monkeypatch.setattr(backend, "_clear_inflight_proposer", lambda: None)
+    monkeypatch.setattr(backend, "_supervise_lanes",
+                        lambda jobs, _round_id: jobs)
+
+    jobs = backend.run_proposer_lanes(round_id=3, base_sha="parent")
+
+    assert len(prepared) == len(submitted) == len(jobs) == 1
+    assert prepared[0][:4] == (0, 3, "parent", 4)
+    assert len(prepared[0][4]) == 5
 
 
 def test_completed_after_gone_with_finished(tmp_path, monkeypatch):

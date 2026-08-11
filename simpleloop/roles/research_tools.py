@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
 
+from ..processes import CHILD_PROCESSES
+
 
 @dataclass(frozen=True)
 class ResearchToolSpec:
@@ -179,6 +181,7 @@ class ResearchCommandRunner:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        CHILD_PROCESSES.register(process.pid)
         timed_out = False
         timeout = (
             self.timeout_seconds
@@ -212,6 +215,7 @@ class ResearchCommandRunner:
                 _kill_process_group(process.pid)
             for reader in readers:
                 reader.join()
+            CHILD_PROCESSES.unregister(process.pid)
         stdout = stdout_result.get("text", "")
         stderr = stderr_result.get("text", "")
         output = stdout

@@ -886,6 +886,9 @@ def test_run_preflights_before_agent_or_workspace(
         def preflight(self):
             events.append("preflight")
 
+        def executor_preflight(self, *, worktree, mounts):
+            events.append("executor.preflight")
+
     class FakeAgent:
         def __init__(self, *, runtime, **kwargs):
             events.append("agent")
@@ -910,6 +913,14 @@ def test_run_preflights_before_agent_or_workspace(
 
         def baseline_sha(self):
             return "baseline-sha"
+
+        def add_worktree(self, worktree_id, _parent_sha):
+            path = self.repo.parent / "worktrees" / worktree_id
+            path.mkdir(parents=True)
+            return path
+
+        def remove_worktree(self, _worktree_id):
+            events.append("executor.preflight.cleanup")
 
     class FakeBackend:
         def __init__(self, ctx):
@@ -966,6 +977,10 @@ def test_run_preflights_before_agent_or_workspace(
     assert events.count("preflight") == 1
     assert events.index("preflight") < events.index("agent")
     assert events.index("preflight") < events.index("workspace.setup")
+    assert events.index("workspace.setup") < events.index("executor.preflight")
+    assert events.index("executor.preflight") < events.index(
+        "executor.preflight.cleanup",
+    )
 
 
 def test_assert_executor_ready_requires_executor_base_url():

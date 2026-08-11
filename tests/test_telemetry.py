@@ -209,6 +209,9 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         def preflight(self):
             pass
 
+        def executor_preflight(self, **_kwargs):
+            pass
+
     class FakeAgent:
         def __init__(self, **kwargs):
             observers.append(kwargs.get("usage_observer"))
@@ -231,6 +234,14 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
 
         def baseline_sha(self):
             return "baseline"
+
+        def add_worktree(self, worktree_id, _parent_sha):
+            path = self.repo.parent / "worktrees" / worktree_id
+            path.mkdir(parents=True)
+            return path
+
+        def remove_worktree(self, _worktree_id):
+            pass
 
     class FakeBackend:
         def __init__(self, ctx):

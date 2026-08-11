@@ -63,6 +63,24 @@ def test_spec_serialization_round_trip(tmp_path: Path):
     assert again == spec
 
 
+def test_build_deps_passes_external_read_only_binds_to_executor(tmp_path: Path):
+    cfg = {
+        "runtime_image": tmp_path / "runtime.sif",
+        "runtime_binds": [tmp_path / "evaluation-data"],
+        "executor_read_only_binds": [tmp_path / "executor-data"],
+        "editable_paths": ["src"],
+        "read_only_paths": ["CMakeLists.txt"],
+        "repo_path": tmp_path / "repo",
+        "baseline_ref": "HEAD",
+    }
+
+    deps = worker_mod.build_deps(cfg, tmp_path / "run")
+
+    assert deps.executor_agent.mounts.external_ro == (
+        tmp_path / "executor-data",
+    )
+
+
 def test_spec_rejects_unknown_manifest_fields(tmp_path: Path):
     data = _spec(tmp_path).to_dict()
     data["decision"] = "old semantic field"

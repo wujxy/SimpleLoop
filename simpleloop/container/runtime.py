@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import os
+import pwd
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -35,7 +37,7 @@ _FORWARDED_ENV = {
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
 }
-_OVERRIDE_ENV = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS"}
+_OVERRIDE_ENV = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS", "HOME"}
 _BLOCKED_PREFIXES = (
     "APPTAINER_",
     "APPTAINERENV_",
@@ -60,6 +62,52 @@ test -w "$1" || {
 printf 'preflight: PASS\\n'
 """.strip()
 
+_EXECUTOR_PREFLIGHT_SCRIPT = r"""
+set -eu
+expected_home=$1
+shift
+[ "$PWD" = /work ] || { echo "executor cwd is not /work" >&2; exit 126; }
+[ "$HOME" = "$expected_home" ] || { echo "executor HOME mismatch" >&2; exit 126; }
+for tool in bash git node claude; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        printf 'missing executor tool: %s\n' "$tool" >&2
+        exit 127
+    }
+done
+mkdir -p "$HOME/.claude" || { echo "executor home is not writable" >&2; exit 126; }
+: > "$HOME/.claude/simpleloop-preflight" || {
+    echo "executor home is not writable" >&2
+    exit 126
+}
+rm "$HOME/.claude/simpleloop-preflight"
+test ! -e /work/.simpleloop-preflight-hidden || {
+    echo "unlisted worktree path leaked into executor" >&2
+    exit 126
+}
+for spec in "$@"; do
+    mode=${spec%%:*}
+    path=${spec#*:}
+    case "$mode" in
+        rw)
+            test -e "/work/$path" || { echo "missing rw path: $path" >&2; exit 126; }
+            if test -d "/work/$path"; then
+                : > "/work/$path/.simpleloop-preflight"
+                rm "/work/$path/.simpleloop-preflight"
+            else
+                test -w "/work/$path" || { echo "rw path is not writable: $path" >&2; exit 126; }
+            fi
+            ;;
+        ro)
+            test -e "/work/$path" || { echo "missing ro path: $path" >&2; exit 126; }
+            ;;
+        external)
+            test -e "$path" || { echo "missing external path: $path" >&2; exit 126; }
+            ;;
+    esac
+done
+printf 'executor preflight: PASS\n'
+""".strip()
+
 
 @dataclass(frozen=True)
 class MountMap:
@@ -71,6 +119,23 @@ class MountMap:
 
     rw: tuple[str, ...] = ()
     ro: tuple[str, ...] = ()
+    external_ro: tuple[str, ...] = ()
+
+
+def executor_mount_map(cfg: dict) -> MountMap:
+    """Build the executor's complete, role-scoped filesystem contract."""
+    return MountMap(
+        rw=tuple(cfg["editable_paths"]),
+        ro=tuple(cfg.get("read_only_paths") or ()),
+        external_ro=tuple(cfg.get("executor_read_only_binds") or ()),
+    )
+
+
+def _account_home() -> Path:
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if not home.is_absolute():
+        raise RuntimePreflightError(f"account home is not absolute: {home}")
+    return home
 
 
 def _prepare_bind_source(
@@ -110,6 +175,7 @@ class ApptainerRuntime:
             Path(path).expanduser().resolve() for path in binds
         )
         self.run_dir = Path(run_dir).expanduser().resolve()
+        self.executor_home = _account_home()
         self.executable = executable
 
     def exec_argv(
@@ -119,6 +185,7 @@ class ApptainerRuntime:
         cwd: str | Path,
         mounts: "MountMap | None" = None,
         scaffold: str | Path | None = None,
+        home: str | Path | None = None,
     ) -> list[str]:
         """Return one shell-free Apptainer argv for a payload command.
 
@@ -134,19 +201,30 @@ class ApptainerRuntime:
         # SIMPLELOOP_APPTAINER_USERNS=0 to fall back to setuid.
         if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
             argv.append("--userns")
-        for bind in self.binds:
-            if bind != self.run_dir:
-                argv.extend(["--bind", f"{bind}:{bind}"])
         if mounts is None:
+            for bind in self.binds:
+                if bind != self.run_dir:
+                    argv.extend(["--bind", f"{bind}:{bind}"])
             argv.extend(["--bind", f"{self.run_dir}:{self.run_dir}:rw"])
             cwd_arg = str(Path(cwd).expanduser().resolve())
         else:
+            if scaffold is None:
+                raise ValueError("executor scaffold is required")
+            if home is None:
+                raise ValueError("executor home is required")
             worktree = Path(cwd).expanduser().resolve()
             scaffold_dir = Path(scaffold).expanduser().resolve()
+            home_dir = Path(home).expanduser().resolve()
             argv += ["--containall", "--no-mount", "cwd,home,hostfs"]
+            argv.extend([
+                "--bind", f"{home_dir}:{self.executor_home}:rw",
+            ])
             # Empty scaffold -> /work: the container root of the executor's
             # world. Only the bound subpaths appear under it.
             argv.extend(["--bind", f"{scaffold_dir}:/work:rw"])
+            for path in mounts.external_ro:
+                external = Path(path).expanduser().resolve()
+                argv.extend(["--bind", f"{external}:{external}:ro"])
             for rel in mounts.rw:
                 src = _prepare_bind_source(worktree, rel, writable=True)
                 if src is not None:
@@ -281,6 +359,64 @@ class ApptainerRuntime:
                 "Apptainer preflight failed with exit "
                 f"{completed.returncode}: {detail}"
             )
+
+    def executor_preflight(
+        self, *, worktree: str | Path, mounts: MountMap,
+    ) -> None:
+        """Exercise the exact Executor mount world before model work."""
+        worktree_path = Path(worktree).expanduser().resolve()
+        with tempfile.TemporaryDirectory(prefix="simpleloop-exec-preflight-") as root:
+            root_path = Path(root)
+            scaffold = root_path / "work"
+            home = root_path / "home"
+            scaffold.mkdir()
+            home.mkdir(mode=0o700)
+            specs = [
+                *(f"rw:{path}" for path in mounts.rw),
+                *(f"ro:{path}" for path in mounts.ro),
+                *(f"external:{path}" for path in mounts.external_ro),
+            ]
+            argv = self.exec_argv(
+                [
+                    "bash", "-c", _EXECUTOR_PREFLIGHT_SCRIPT,
+                    "simpleloop-executor-preflight",
+                    str(self.executor_home), *specs,
+                ],
+                cwd=worktree_path,
+                mounts=mounts,
+                scaffold=scaffold,
+                home=home,
+            )
+            sentinel = worktree_path / ".simpleloop-preflight-hidden"
+            if sentinel.exists():
+                raise RuntimePreflightError(
+                    f"reserved preflight path already exists: {sentinel}"
+                )
+            sentinel.write_text("must stay hidden\n", encoding="utf-8")
+            try:
+                completed = subprocess.run(
+                    argv,
+                    cwd=str(worktree_path),
+                    env=self.subprocess_env({"HOME": str(self.executor_home)}),
+                    shell=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=60,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimePreflightError(
+                    "Executor preflight timed out after 60s"
+                ) from exc
+            finally:
+                sentinel.unlink(missing_ok=True)
+            if completed.returncode:
+                detail = (completed.stderr or completed.stdout).strip()[:4000]
+                raise RuntimePreflightError(
+                    "Executor preflight failed with exit "
+                    f"{completed.returncode}: {detail}"
+                )
 
     def summary_lines(self) -> tuple[str, str, str]:
         """Return a concise, secret-free startup summary."""

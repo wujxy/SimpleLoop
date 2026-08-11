@@ -320,6 +320,9 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
         def preflight(self):
             pass
 
+        def executor_preflight(self, **_kwargs):
+            pass
+
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
             self.repo = run_dir / "repo"
@@ -329,6 +332,14 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
 
         def baseline_sha(self):
             return "baseline"
+
+        def add_worktree(self, worktree_id, _parent_sha):
+            path = self.repo.parent / "worktrees" / worktree_id
+            path.mkdir(parents=True)
+            return path
+
+        def remove_worktree(self, _worktree_id):
+            pass
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
@@ -757,6 +768,9 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
         def preflight(self):
             pass
 
+        def executor_preflight(self, **_kwargs):
+            pass
+
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
             self.repo = run_dir / "repo"
@@ -766,6 +780,14 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
 
         def baseline_sha(self):
             return "baseline"
+
+        def add_worktree(self, worktree_id, _parent_sha):
+            path = self.repo.parent / "worktrees" / worktree_id
+            path.mkdir(parents=True)
+            return path
+
+        def remove_worktree(self, _worktree_id):
+            pass
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)

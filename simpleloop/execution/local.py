@@ -24,27 +24,19 @@ class LocalBackend(ExecutionBackend):
         )
 
     def run_proposer_lanes(self, *, round_id: int, base_sha: str):
-        """Run proposer lanes locally: create one writable lane workspace per
-        lane, run the frontend ProposerOrchestrator (lanes fan out as threads,
-        each in its own workspace), then clean up. This is the in-process
-        mirror of HEPJobBackend.run_proposer_lanes (one job per lane)."""
+        """Run the single proposer lane in one disposable workspace."""
         ctx = self.ctx
         cfg = ctx.cfg
         from ..loop import stamp
-        from ..roles.orchestrator import lane_quotas
-        n_lanes = len(lane_quotas(cfg.get("candidates_per_round", 1)))
-        workspaces = [
-            ctx.workspace.add_lane_workspace(i, base_sha)
-            for i in range(n_lanes)
-        ]
-        print(f"[{stamp()}] proposer round {round_id + 1}: {n_lanes} lane "
-              f"workspace(s) @ {base_sha[:10]} (local)", flush=True)
+        workspace = ctx.workspace.add_lane_workspace(0, base_sha)
+        print(f"[{stamp()}] proposer round {round_id + 1}: 1 lane "
+              f"workspace @ {base_sha[:10]} (local)", flush=True)
         try:
             return ctx.proposer_agent.run(
                 goal=cfg["goal"], editable=cfg["editable_paths"],
                 frozen=[],
                 memory_service=ctx.memory_service, base_sha=base_sha,
-                workspaces=workspaces, repo_path=ctx.workspace.repo,
+                workspaces=[workspace], repo_path=ctx.workspace.repo,
                 run_dir=ctx.run_dir, current_round=round_id,
                 candidates_per_round=cfg.get("candidates_per_round", 1),
                 gate_block=ctx.gate_lines, prompt_dir=ctx.prompt_dir,
@@ -53,8 +45,7 @@ class LocalBackend(ExecutionBackend):
                 cognitive_steps=cfg.get("cognitive_steps", 148),
             )
         finally:
-            for i in range(n_lanes):
-                ctx.workspace.remove_lane_workspace(i)
+            ctx.workspace.remove_lane_workspace(0)
 
     def cleanup_proposer_orphans(self) -> None:
         # Local lanes are frontend threads; they die with the process, so there

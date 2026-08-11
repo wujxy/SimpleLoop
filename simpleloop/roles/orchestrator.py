@@ -1,16 +1,16 @@
 """ProposerOrchestrator: the partner-lane entry point for the Loop.
 
-Runs ``candidates_per_round`` independent 1:1 generator-cognitive lanes. Each
-lane binds one Generator to one Cognitive element for its full lifetime:
+Runs one generator-cognitive lane. The lane is retained as the future tree
+evolution boundary, while all proposals for the current round come from it:
 
   (1) Generator → one hypothesis card (history-free, free explorer)
   (2) Cognitive element → sieve + history audit + enrich → submit | block
       ↕ feedback_generator (≤3 regenerations): cognitive feeds history back
         to the Generator, which regenerates; cognitive re-audits
 
-The orchestrator is intentionally ignorant of idea content: it creates lanes,
-samples 5 ops per lane, runs them concurrently, and collects results in stable
-lane order. No dedup, no frozen prefilter, no cap, no ranking.
+The orchestrator is intentionally ignorant of idea content: it samples 5 ops,
+generates 10 seeds, and lets the cognitive element select up to the requested
+round size. No lane quota or thread-pool scheduling remains.
 
 The ProposerResult interface is unchanged so loop.py needs no modification.
 """
@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,37 +82,11 @@ _MAX_REGENERATIONS = 3
 # (_SCHEDULED_OP_COUNT lenses × _IDEAS_PER_LENS ideas each).
 _IDEAS_PER_LENS = 2
 _HYPOTHESES_PER_LANE = _SCHEDULED_OP_COUNT * _IDEAS_PER_LENS  # 5 × 2 = 10
-# Each lane's cognitive element selects _SELECT_PER_LANE for enrichment.
-# K=2: one hotspot (recent improvement) + one new_direction (low coverage).
-_SELECT_PER_LANE = 2
-# Max concurrent lane workers.
-_MAX_LANE_WORKERS = 8
 
 
 def _sample_generative_ops() -> tuple[str, ...]:
     """Pick a random 5-of-9 subset of G1-G9 for one generator call."""
     return tuple(random.sample(_ALL_GENERATIVE_OPS, _SCHEDULED_OP_COUNT))
-
-
-def lane_quotas(
-    candidates_per_round: int, select_per_lane: int = _SELECT_PER_LANE,
-) -> list[int]:
-    """Derive lane count and per-lane quotas from N and K.
-
-    N = candidates_per_round (total evals), K = select_per_lane (per lane).
-    n_lanes = ceil(N / K). Quotas are [K, K, ..., K, remainder].
-
-    E.g. N=4, K=2 → [2, 2]. N=5, K=2 → [2, 2, 1]. N=4, K=1 → [1, 1, 1, 1].
-
-    Public so the loop can pre-compute ``n_lanes`` (to create one workspace per
-    lane) without duplicating the formula; ``select_per_lane`` defaults to the
-    internal funnel constant.
-    """
-    if select_per_lane <= 0:
-        return []
-    n_lanes = -(-candidates_per_round // select_per_lane)  # ceil
-    base, extra = divmod(candidates_per_round, n_lanes)
-    return [base + (1 if i < extra else 0) for i in range(n_lanes)]
 
 
 class ProposerOrchestrator:
@@ -170,12 +143,10 @@ class ProposerOrchestrator:
         gen_steps: int = 216,
         cognitive_steps: int = 148,
     ) -> ProposerResult:
-        """Run N independent generator-cognitive partner lanes (funnel mode).
+        """Run one generator-cognitive lane for the round.
 
-        Each lane's generator produces _HYPOTHESES_PER_LANE seed hypotheses;
-        the cognitive element audits them in batch and selects
-        _SELECT_PER_LANE for enrichment. Lane count is derived:
-        n_lanes = ceil(candidates_per_round / _SELECT_PER_LANE).
+        The generator produces ten seed hypotheses; the cognitive element
+        audits them together and selects up to ``candidates_per_round``.
         """
         started = time.monotonic()
 
@@ -186,16 +157,13 @@ class ProposerOrchestrator:
         except Exception:
             explore = None
 
-        # --- Derive lanes and quotas from N and K ---
-        quotas = lane_quotas(candidates_per_round)
-        n_lanes = len(quotas)
-        assert len(workspaces) == n_lanes, (
-            f"expected {n_lanes} lane workspace(s) (one per lane), "
+        assert len(workspaces) == 1, (
+            "expected exactly one lane workspace, "
             f"got {len(workspaces)}")
-        mode = _Mode(n_lanes=n_lanes, max_branch_steps=cognitive_steps,
+        mode = _Mode(n_lanes=1, max_branch_steps=cognitive_steps,
                      label="funnel")
         print(
-            f"[orchestrator] lanes={n_lanes} quotas={quotas} "
+            f"[orchestrator] lanes=1 select_up_to={candidates_per_round} "
             f"hypotheses_per_lane={_HYPOTHESES_PER_LANE} "
             f"ideas_per_lens={_IDEAS_PER_LENS}",
             flush=True,
@@ -207,27 +175,31 @@ class ProposerOrchestrator:
             base_sha=base_sha, gate_block=gate_block,
         )
 
-        # --- Build lane states ---
-        lanes = [
-            LaneState(lane_id=i, assigned_ops=_sample_generative_ops())
-            for i in range(n_lanes)
-        ]
-
-        # --- Run all lanes concurrently ---
-        lane_results = self._run_lanes(
-            lanes,
-            gen_context=gen_context,
-            goal=goal, editable=editable, frozen=frozen,
-            memory_service=memory_service, base_sha=base_sha,
-            workspaces=workspaces, repo_path=repo_path,
-            run_dir=run_dir, current_round=current_round,
-            gate_block=gate_block, prompt_dir=prompt_dir,
-            hints=hints, explore=explore,
-            mode=mode,
-            quotas=quotas,
-            gen_steps=gen_steps,
-            cognitive_steps=cognitive_steps,
-        )
+        lane = LaneState(lane_id=0, assigned_ops=_sample_generative_ops())
+        try:
+            lane_result = self._run_one_lane(
+                lane,
+                gen_context=gen_context,
+                goal=goal, editable=editable, frozen=frozen,
+                memory_service=memory_service, base_sha=base_sha,
+                source_path=workspaces[0], repo_path=repo_path,
+                run_dir=run_dir, current_round=current_round,
+                gate_block=gate_block, prompt_dir=prompt_dir,
+                hints=hints, explore=explore,
+                max_steps=mode.max_branch_steps,
+                select_quota=candidates_per_round,
+                gen_steps=gen_steps,
+                cognitive_steps=cognitive_steps,
+            )
+        except Exception as exc:
+            print(f"[orchestrator] lane 0 failed: {exc}", flush=True)
+            lane_result = LaneResult(
+                lane_id=0, assigned_ops=lane.assigned_ops, outcome="error",
+                abstain_reason=str(exc),
+                deliberation_telemetry={"tool_calls": 0},
+            )
+        self._log_lane_result(lane_result)
+        lane_results = [lane_result]
 
         # --- Collect proposals in stable lane order (no selection) ---
         proposals = []
@@ -258,57 +230,6 @@ class ProposerOrchestrator:
                 lane_results, mode, elapsed),
             trace=self._lane_trace(lane_results),
         )
-
-    def _run_lanes(
-        self, lanes, *, gen_context, goal, editable, frozen, memory_service,
-        base_sha, workspaces, repo_path, run_dir, current_round,
-        gate_block, prompt_dir, hints, explore, mode,
-        quotas=None,
-        gen_steps=216, cognitive_steps=148,
-    ) -> list[LaneResult]:
-        """Run one partner lane per lane state, concurrently. Each lane runs
-        against its own writable workspace (``workspaces[lane.lane_id]``)."""
-        shared = dict(
-            gen_context=gen_context,
-            goal=goal, editable=editable, frozen=frozen,
-            memory_service=memory_service, base_sha=base_sha,
-            repo_path=repo_path,
-            run_dir=run_dir, current_round=current_round,
-            gate_block=gate_block, prompt_dir=prompt_dir,
-            hints=hints, explore=explore,
-            max_steps=mode.max_branch_steps,
-            gen_steps=gen_steps,
-            cognitive_steps=cognitive_steps,
-        )
-        results: list[LaneResult | None] = [None] * len(lanes)
-        workers = min(_MAX_LANE_WORKERS, len(lanes)) if lanes else 1
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(
-                    self._run_one_lane, lane,
-                    select_quota=(quotas[lane.lane_id] if quotas else 1),
-                    source_path=workspaces[lane.lane_id],
-                    **shared,
-                ): lane.lane_id
-                for lane in lanes
-            }
-            for future in as_completed(futures):
-                i = futures[future]
-                try:
-                    results[i] = future.result()
-                except Exception as exc:
-                    print(
-                        f"[orchestrator] lane {i} failed: {exc}", flush=True,
-                    )
-                    results[i] = LaneResult(
-                        lane_id=i, outcome="error",
-                        abstain_reason=str(exc),
-                        deliberation_telemetry={"tool_calls": 0},
-                    )
-        for lr in results:
-            if lr is not None:
-                self._log_lane_result(lr)
-        return [r for r in results if r is not None]
 
     def _run_one_lane(
         self, lane: LaneState, *, gen_context, goal, editable, frozen,
@@ -457,10 +378,8 @@ class ProposerOrchestrator:
 
         Builds the history-free generation context + explore report from
         ``memory_service``, constructs one ``LaneState``, and runs it through
-        ``_run_one_lane``. The local ThreadPoolExecutor path calls
-        ``_run_one_lane`` directly via ``_run_lanes``; this method exists so a
-        remote worker (which owns one lane) can reuse the exact same per-lane
-        logic without re-implementing it. No nesting: one call = one lane."""
+        ``_run_one_lane``. The remote worker reuses the same per-lane logic as
+        the local orchestrator. No nesting: one call = one lane."""
         gen_context = memory_service.build_generation_context(
             goal=goal, editable=editable, frozen=frozen,
             base_sha=base_sha, gate_block=gate_block,
@@ -546,8 +465,9 @@ class ProposerOrchestrator:
             "mode": mode.label,
             "n_lanes": len(lanes),
             "n_proposals": sum(
-                1 for lr in lanes
-                if lr.proposal and not lr.enrichment_partial),
+                len(lr.proposals) if lr.proposals else (1 if lr.proposal else 0)
+                for lr in lanes if not lr.enrichment_partial
+            ),
             "n_partial": sum(1 for lr in lanes if lr.enrichment_partial),
             "n_blocked": sum(1 for lr in lanes if lr.outcome == "block"),
             "n_error": sum(1 for lr in lanes if lr.outcome == "error"),

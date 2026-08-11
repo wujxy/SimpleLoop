@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..container.runtime import ApptainerRuntime, MountMap
+from ..processes import CHILD_PROCESSES
 
 
 class AgentError(RuntimeError):
@@ -142,25 +143,35 @@ class Agent:
                 "--json-schema",
                 json.dumps(json_schema, separators=(",", ":")),
             ]
-        scaffold: str | None = None
+        sandbox: str | None = None
+        proc: subprocess.Popen | None = None
         try:
             if self.mounts is not None:
-                # Empty host dir mounted at /work: the container root of the
-                # constructed file world. Lives for the subprocess duration.
-                scaffold = tempfile.mkdtemp(prefix="simpleloop-exec-")
+                sandbox = tempfile.mkdtemp(prefix="simpleloop-exec-")
+                scaffold = Path(sandbox) / "work"
+                home = Path(sandbox) / "home"
+                scaffold.mkdir()
+                home.mkdir(mode=0o700)
+            else:
+                scaffold = None
+                home = None
             argv = self.runtime.exec_argv(
-                payload, cwd=cwd, mounts=self.mounts, scaffold=scaffold)
+                payload, cwd=cwd, mounts=self.mounts,
+                scaffold=scaffold, home=home)
 
             prompt_bytes = prompt.encode("utf-8")
             print(f"[{label}] claude call started (timeout={self.timeout_seconds}s, cwd={cwd}, "
                   f"prompt={len(prompt_bytes)}B via stdin)", flush=True)
-            env = self.runtime.subprocess_env({
+            overrides = {
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
                 # Config-authoritative endpoint: overrides any ambient value so the
                 # executor never silently falls back to the unreachable default
                 # Anthropic URL on isolated worker nodes.
                 **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
-            })
+            }
+            if self.mounts is not None:
+                overrides["HOME"] = str(self.runtime.executor_home)
+            env = self.runtime.subprocess_env(overrides)
             proc = subprocess.Popen(
                 argv,
                 cwd=str(cwd),
@@ -171,6 +182,7 @@ class Agent:
                 start_new_session=True,
                 env=env,
             )
+            CHILD_PROCESSES.register(proc.pid)
             out_buf: list[str] = []
             err_buf: list[str] = []
             t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf), daemon=True)
@@ -235,8 +247,12 @@ class Agent:
 
             return result
         finally:
-            if scaffold:
-                shutil.rmtree(scaffold, ignore_errors=True)
+            if proc is not None:
+                if proc.poll() is None:
+                    _kill_group(proc)
+                CHILD_PROCESSES.unregister(proc.pid)
+            if sandbox:
+                shutil.rmtree(sandbox, ignore_errors=True)
 
 def _drain(stream, buf: list[str], label: str | None = None) -> None:
     if stream is None:

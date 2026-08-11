@@ -55,6 +55,9 @@ runtime:
     - /cvmfs
     - /data/juno
     - /datafs/users/wujxy/agent-sci/omilrec_opt
+  executor_read_only_binds:
+    - /cvmfs
+    - /data/juno
 
 eval:
   commands:

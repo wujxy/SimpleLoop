@@ -648,6 +648,7 @@ def _run_loop_integration(
         "eval_commands": [],
         "runtime_image": tmp_path / "runtime.sif",
         "runtime_binds": [],
+        "executor_read_only_binds": [tmp_path / "external-data"],
         "roles": {
             "researcher": {
                 "model": "gpt-5.5", "base_url": "https://example.invalid",
@@ -661,6 +662,8 @@ def _run_loop_integration(
     }
 
     class FakeRuntime:
+        preflight_calls = []
+
         def __init__(self, **_kwargs):
             pass
 
@@ -669,6 +672,10 @@ def _run_loop_integration(
 
         def preflight(self):
             pass
+
+        def executor_preflight(self, *, worktree, mounts):
+            assert Path(worktree).is_dir()
+            self.preflight_calls.append((Path(worktree), mounts))
 
     class FakeAgent:
         def __init__(self, **_kwargs):
@@ -798,6 +805,10 @@ def _run_loop_integration(
         "config.yaml", run_dir, continue_run=True, prompt_dir=prompt_dir,
         target_rounds=target_rounds,
     )
+    assert len(FakeRuntime.preflight_calls) == 1
+    assert FakeRuntime.preflight_calls[0][1].external_ro == (
+        tmp_path / "external-data",
+    )
     return run_dir, executed
 
 
@@ -876,6 +887,9 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
             return ()
 
         def preflight(self):
+            pass
+
+        def executor_preflight(self, *, worktree, mounts):
             pass
 
     class FakeAgent:

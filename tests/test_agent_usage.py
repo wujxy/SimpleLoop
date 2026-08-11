@@ -12,8 +12,14 @@ class RecordingRuntime:
     def __init__(self):
         self.calls = []
         self.overrides = None
+        self.executor_home = Path("/home/tester")
+        self.sandbox = None
 
-    def exec_argv(self, payload, *, cwd, mounts=None, scaffold=None):
+    def exec_argv(
+        self, payload, *, cwd, mounts=None, scaffold=None, home=None,
+    ):
+        if mounts is not None:
+            self.sandbox = (Path(scaffold), Path(home))
         self.calls.append((list(payload), Path(cwd)))
         return ["apptainer", "exec", "image.sif", *payload]
 
@@ -96,6 +102,7 @@ def test_agent_wraps_literal_claude_and_keeps_prompt_on_stdin(
     runtime = RecordingRuntime()
     process = FinishedProcess()
     popen_call = {}
+    lifecycle = []
 
     def fake_popen(argv, **kwargs):
         popen_call["argv"] = argv
@@ -103,6 +110,14 @@ def test_agent_wraps_literal_claude_and_keeps_prompt_on_stdin(
         return process
 
     monkeypatch.setattr(agent_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        agent_mod.CHILD_PROCESSES, "register",
+        lambda pid: lifecycle.append(("register", pid)),
+    )
+    monkeypatch.setattr(
+        agent_mod.CHILD_PROCESSES, "unregister",
+        lambda pid: lifecycle.append(("unregister", pid)),
+    )
     agent = Agent(runtime=runtime, timeout_seconds=60)
 
     assert agent.run_text(
@@ -131,3 +146,24 @@ def test_agent_wraps_literal_claude_and_keeps_prompt_on_stdin(
     assert runtime.overrides == {
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
     }
+    assert lifecycle == [("register", 1234), ("unregister", 1234)]
+
+
+def test_executor_agent_owns_private_work_and_home(monkeypatch, tmp_path: Path):
+    runtime = RecordingRuntime()
+    monkeypatch.setattr(
+        agent_mod.subprocess, "Popen", lambda *args, **kwargs: FinishedProcess(),
+    )
+    agent = Agent(
+        runtime=runtime,
+        timeout_seconds=60,
+        mounts=agent_mod.MountMap(rw=("src",)),
+    )
+
+    assert agent.run_text("edit", cwd=tmp_path, label="executor") == "ok"
+
+    work, home = runtime.sandbox
+    assert work.name == "work"
+    assert home.name == "home"
+    assert not work.parent.exists()
+    assert runtime.overrides["HOME"] == str(runtime.executor_home)

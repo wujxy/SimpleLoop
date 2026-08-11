@@ -622,10 +622,10 @@ class ProposerAgent(ResearchAgent):
         max_steps: int | None = None,
         generator_regenerate=None,
     ) -> BranchResult:
-        """Batch audit: sieve + dedup + select K + enrich K hypotheses.
+        """Batch audit: sieve + dedup + select up to K + enrich selections.
 
         All seed hypotheses from the generator are audited in one context.
-        The cognitive element selects ``select_quota`` for enrichment with
+        The cognitive element selects up to ``select_quota`` for enrichment with
         evidence-based rationale, enriches each, and submits all K as
         proposals. This is NOT merit judgment — selection is based on
         historical coverage facts (ledger) and source facts, not predictions.
@@ -689,11 +689,11 @@ class ProposerAgent(ResearchAgent):
             f"You may read source to verify. This filters out leads that are "
             f"factually wrong before you invest in enrichment.\n"
             f"2. **Select:** your partner gave you leads, not plans. Choose "
-            f"{select_quota} worth pursuing via `select_for_enrich`, each "
+            f"up to {select_quota} worth pursuing via `select_for_enrich`, each "
             f"with `evidence_refs` and a `rationale` grounded in facts. "
-            f"Diversity helps the loop explore — one hotspot and one new "
-            f"direction covers more ground than two similar picks — but "
-            f"this is your judgment, not a rule.\n"
+            f"Prefer materially different mechanisms or code regions when "
+            f"useful, but this is a semantic preference, not a uniqueness "
+            f"gate. Do not regenerate merely to fill the limit.\n"
             f"3. **Enrich:** for each selected lead, read the actual "
             f"implementation until you understand the function and class "
             f"structure, the code facts, and the correctness constraints. "
@@ -778,9 +778,8 @@ class ProposerAgent(ResearchAgent):
                             {"role": "user", "content": (
                                 f"You have selected {len(selected_indices)} "
                                 f"hypothesis(es) and are adding {len(new_sel)}, "
-                                f"but the quota is {select_quota}. The quota "
-                                f"is the number of proposals you will enrich "
-                                f"and submit, so select {select_quota} total. "
+                                f"but the limit is {select_quota}. Select at "
+                                f"most {select_quota} total. "
                                 f"Return exactly one JSON action object."
                             )},
                         ])
@@ -1037,4 +1036,3 @@ class ProposerAgent(ResearchAgent):
                     state, round_id=current_round, outcome="block",
                     reason_kind="contradiction", explore=explore),
             )
-

@@ -755,23 +755,21 @@ class HEPJobBackend(ExecutionBackend):
     # ==================================================================
 
     def run_proposer_lanes(self, *, round_id: int, base_sha: str):
-        """Submit one proposer-lane job per lane, collect proposals, return a
+        """Submit the single proposer-lane job, collect proposals, return a
         ProposerResult. Reuses _Job + the condor wrappers; lane-specific
         prepare/submit/read/collect own the workspace + manifest shape."""
-        from ..roles.orchestrator import lane_quotas, _sample_generative_ops
+        from ..roles.orchestrator import _sample_generative_ops
         self._round_id = round_id
         self._parent_sha = base_sha
         self._journal = None
         self._ensure_job_env()
-        quotas = lane_quotas(self.ctx.cfg.get("candidates_per_round", 1))
-        jobs: list[_Job] = []
-        for lane_id, select_quota in enumerate(quotas):
-            assigned_ops = list(_sample_generative_ops())
-            job = self._prepare_lane(lane_id, round_id, base_sha,
-                                     select_quota=select_quota,
-                                     assigned_ops=assigned_ops)
-            self._submit_lane(job)
-            jobs.append(job)
+        job = self._prepare_lane(
+            0, round_id, base_sha,
+            select_quota=self.ctx.cfg.get("candidates_per_round", 1),
+            assigned_ops=list(_sample_generative_ops()),
+        )
+        self._submit_lane(job)
+        jobs = [job]
         self._write_inflight_proposer(round_id, base_sha, jobs)
         try:
             return self._supervise_lanes(jobs, round_id)

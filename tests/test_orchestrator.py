@@ -1,10 +1,10 @@
-"""Tests for the 1:1 generator-cognitive partner-lane orchestrator.
+"""Tests for the single generator-cognitive partner-lane orchestrator.
 
 The old pool-filter architecture (dedup → frozen prefilter → cap → list-wise
 selection) is gone. Each lane binds one Generator to one Cognitive element for
 its full lifetime. These tests verify:
   - the scheduler (5-of-9 ops, mode selection)
-  - N independent lanes each get one card, no intermediate filtering
+  - one lane generates the full hypothesis batch and selects the round batch
   - all submitted proposals are collected (no cap, no dedup)
   - the feedback_generator → regenerate loop (≤3 budget)
   - the history-free context is what the generator receives
@@ -13,7 +13,6 @@ its full lifetime. These tests verify:
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +20,7 @@ import pytest
 
 from simpleloop.memory import MemoryService
 from simpleloop.roles.orchestrator import (
-    ProposerOrchestrator, lane_quotas, _Mode,
+    ProposerOrchestrator, _Mode,
     _sample_generative_ops, _SCHEDULED_OP_COUNT,
     _MAX_REGENERATIONS, LaneState, LaneResult,
 )
@@ -92,22 +91,17 @@ def _feedback_action():
 
 
 def _run_args(tmp_path, candidates_per_round=2):
-    from simpleloop.roles.orchestrator import lane_quotas
-    n_lanes = len(lane_quotas(candidates_per_round))
     repo = tmp_path / "repo"
     run_dir = tmp_path / "run"
     repo.mkdir(exist_ok=True)
     run_dir.mkdir(exist_ok=True)
-    workspaces = []
-    for i in range(n_lanes):
-        ws = tmp_path / f"workspace-{i}"
-        (ws / "src").mkdir(parents=True, exist_ok=True)
-        (ws / "src" / "foo.cc").write_text("// target\n", encoding="utf-8")
-        workspaces.append(ws)
+    ws = tmp_path / "workspace-0"
+    (ws / "src").mkdir(parents=True, exist_ok=True)
+    (ws / "src" / "foo.cc").write_text("// target\n", encoding="utf-8")
     return {"goal": "make it faster", "editable": ["src/**"],
             "frozen": ["tests/**"], "memory_service": MemoryService(
                 run_dir=run_dir, metrics_schema=_METRICS_SCHEMA),
-            "base_sha": "abc", "workspaces": workspaces, "repo_path": repo,
+            "base_sha": "abc", "workspaces": [ws], "repo_path": repo,
             "run_dir": run_dir, "current_round": 0,
             "candidates_per_round": candidates_per_round,
             "gate_block": "- gate: pass", "prompt_dir": None}
@@ -136,60 +130,40 @@ class TestGenerativeOpScheduler:
         assert len(draws) > 1
 
 
-class TestLaneQuotas:
-    def test_n4_k2_two_lanes(self):
-        assert lane_quotas(4, 2) == [2, 2]
+def test_lane_quota_scheduler_is_removed():
+    from simpleloop.roles import orchestrator as orchestrator_mod
 
-    def test_n5_k2_three_lanes(self):
-        assert lane_quotas(5, 2) == [2, 2, 1]
-
-    def test_n4_k1_four_lanes(self):
-        assert lane_quotas(4, 1) == [1, 1, 1, 1]
-
-    def test_n7_k2_four_lanes(self):
-        assert lane_quotas(7, 2) == [2, 2, 2, 1]
-
-    def test_n1_k1_one_lane(self):
-        assert lane_quotas(1, 1) == [1]
-
-    def test_n3_k2_two_lanes(self):
-        assert lane_quotas(3, 2) == [2, 1]
-
-    def test_total_equals_n(self):
-        for n in range(1, 20):
-            for k in range(1, 6):
-                assert sum(lane_quotas(n, k)) == n
+    assert not hasattr(orchestrator_mod, "lane_quotas")
 
 
 # --- 1:1 lane architecture -------------------------------------------------
 
 class TestPartnerLanes:
-    def test_each_lane_gets_one_card_no_intermediate_filter(
+    def test_single_lane_generates_ten_and_selects_round_quota(
             self, tmp_path, monkeypatch):
-        """N lanes → N generator calls (one card each) → N branches. No dedup,
-        no frozen prefilter, no cap — every lane runs to completion."""
+        """One lane owns all ten seeds and selects the round's four outputs."""
         gen_calls = []
-        lock = threading.Lock()
 
-        class OneCardGenerator:
+        class BatchGenerator:
             def run(self, **kwargs):
-                with lock:
-                    gen_calls.append(kwargs)
+                gen_calls.append(kwargs)
                 return generator_mod.GenerationResult(
-                    cards=[_card(mech=f"m{len(gen_calls)}")])
+                    cards=[_card(mech=f"m{i}") for i in range(10)])
 
-        # cpr=4, K=2 → ceil(4/2) = 2 lanes.
         args = _run_args(tmp_path, candidates_per_round=4)
         orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = OneCardGenerator()
+        orch.generator = BatchGenerator()
         branch_cards = []
+        quotas = []
 
-        def fake_research_batch(*, hypotheses, **_kwargs):
+        def fake_research_batch(*, hypotheses, select_quota, **_kwargs):
             branch_cards.extend(hypotheses)
+            quotas.append(select_quota)
             return proposer_mod.BranchResult(
                 hypothesis=hypotheses[0],
                 proposals=tuple(
-                    SimpleNamespace(instruction="ok") for _ in hypotheses
+                    SimpleNamespace(instruction="ok")
+                    for _ in range(select_quota)
                 ),
                 proposal=SimpleNamespace(instruction="ok"),
                 deliberation_telemetry={"tool_calls": 1},
@@ -199,29 +173,25 @@ class TestPartnerLanes:
                             fake_research_batch)
         result = orch.run(**args)
 
-        n = len(gen_calls)
-        assert n == 2                            # one call per lane
-        assert len(branch_cards) == n            # no filtering — all run
-        assert len(result.proposals) == n        # all submitted
+        assert len(gen_calls) == 1
+        assert gen_calls[0]["hypotheses_per_lane"] == 10
+        assert len(branch_cards) == 10
+        assert quotas == [4]
+        assert len(result.proposals) == 4
+        assert result.deliberation_telemetry["n_proposals"] == 4
 
     def test_no_dedup_duplicate_signatures_both_run(
             self, tmp_path, monkeypatch):
-        """Two lanes produce identical-signature cards. Both run — the old
-        dedup-by-signature is gone."""
+        """The lane receives its whole batch before the cognitive audit."""
         cards = [_card(mech="same"), _card(mech="same")]
 
-        class ScheduledGenerator:
-            def __init__(self):
-                self.i = 0
+        class BatchGenerator:
             def run(self, **kwargs):
-                c = cards[self.i]
-                self.i += 1
-                return generator_mod.GenerationResult(cards=[c])
+                return generator_mod.GenerationResult(cards=cards)
 
-        # cpr=4, K=2 → 2 lanes.
         args = _run_args(tmp_path, candidates_per_round=4)
         orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = ScheduledGenerator()
+        orch.generator = BatchGenerator()
         seen = []
 
         def fake_research_batch(*, hypotheses, **_kwargs):
@@ -239,7 +209,7 @@ class TestPartnerLanes:
                             fake_research_batch)
         result = orch.run(**args)
 
-        assert len(seen) == 2                    # both, despite same signature
+        assert len(seen) == 2
         assert len(result.proposals) == 2
 
     def test_no_frozen_prefilter_frozen_region_still_runs(
@@ -276,19 +246,14 @@ class TestPartnerLanes:
         assert len(seen) == 1                    # not prefilered
         assert len(result.proposals) == 1
 
-    def test_blocked_lane_not_collected_submitted_lane_is(
+    def test_single_lane_submission_is_collected(
             self, tmp_path, monkeypatch):
-        """Lane outcomes are respected: block → no proposal, submit → proposal.
-        No selection/ranking — both lanes ran."""
+        """The retained lane boundary records one batch submission."""
         cards = [_card(mech="live"), _card(mech="doomed")]
 
         class TwoCardGenerator:
-            def __init__(self):
-                self.i = 0
             def run(self, **kwargs):
-                c = cards[self.i]
-                self.i += 1
-                return generator_mod.GenerationResult(cards=[c])
+                return generator_mod.GenerationResult(cards=cards)
 
         args = _run_args(tmp_path, candidates_per_round=4)
         orch = _orchestrator(_gen_reply([_card()]))
@@ -296,13 +261,6 @@ class TestPartnerLanes:
 
         def fake_research_batch(*, hypotheses, **_kwargs):
             h = hypotheses[0]
-            if h.mechanism == "doomed":
-                return proposer_mod.BranchResult(
-                    hypothesis=h, outcome="block",
-                    reason_kind="false_claim", explanation="no",
-                    block_evidence_refs=("source:src/foo.cc",),
-                    deliberation_telemetry={"tool_calls": 1},
-                )
             return proposer_mod.BranchResult(
                 hypothesis=h,
                 proposals=(SimpleNamespace(instruction="ok"),),
@@ -314,14 +272,11 @@ class TestPartnerLanes:
                             fake_research_batch)
         result = orch.run(**args)
 
-        assert len(result.proposals) == 1        # only the live lane
+        assert len(result.proposals) == 1
         assert not result.abstained
-        # trace records both lane outcomes
         lanes = result.trace["lanes"]
-        assert len(lanes) == 2
-        outcomes = {lr["outcome"] for lr in lanes}
-        assert "submit" in outcomes
-        assert "block" in outcomes
+        assert len(lanes) == 1
+        assert lanes[0]["outcome"] == "submit"
 
     def test_all_lanes_block_abstains(self, tmp_path, monkeypatch):
         class BlockingGenerator:
@@ -403,7 +358,7 @@ class TestPartnerLanes:
         result = orch.run(**args)
 
         assert "lanes" in result.trace
-        assert len(result.trace["lanes"]) == 2
+        assert len(result.trace["lanes"]) == 1
         for lane in result.trace["lanes"]:
             assert "lane_id" in lane
             assert "assigned_ops" in lane

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import yaml
 
+from simpleloop import config as config_mod
+
 
 ROOT = Path(__file__).parents[1]
 EXAMPLES = ROOT / "examples"
@@ -98,6 +100,18 @@ def test_junosw_configs_name_shared_image_and_definition():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert raw["runtime"]["image"] == "../junosw-apptainer.sif"
         assert raw["runtime"]["definition"] == "../junosw-apptainer.def"
+
+
+def test_omilrec_local_executor_binds_are_narrow_and_read_only():
+    cfg = config_mod.load(
+        EXAMPLES / "omilrec-v100-opt" / "task_hints_local.yaml",
+    )
+
+    assert cfg["executor_read_only_binds"] == ["/cvmfs", "/data/juno"]
+    assert not any(
+        "omilrec_opt" in path
+        for path in cfg["executor_read_only_binds"]
+    )
 
 
 def test_generated_sifs_are_ignored():

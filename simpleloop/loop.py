@@ -32,8 +32,9 @@ from .harness import views
 from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
-from .container.runtime import ApptainerRuntime, MountMap
+from .container.runtime import ApptainerRuntime, executor_mount_map
 from .harness.workspace import Workspace
+from .processes import run_signal_handlers
 
 
 class BaselineAcceptanceError(RuntimeError):
@@ -186,10 +187,11 @@ def run(config_path: str | Path, run_dir: str | Path,
     lock_fd = _acquire_run_lock(run_dir_path)
     try:
         _write_config_snapshot(cfg, config_path, run_dir_path)
-        return _run_locked(
-            cfg, run_dir_path, proposals, continue_run, target_rounds,
-            Path(prompt_dir).resolve() if prompt_dir is not None else None,
-        )
+        with run_signal_handlers():
+            return _run_locked(
+                cfg, run_dir_path, proposals, continue_run, target_rounds,
+                Path(prompt_dir).resolve() if prompt_dir is not None else None,
+            )
     finally:
         _release_run_lock(lock_fd)
 
@@ -240,6 +242,18 @@ def _run_locked(cfg: dict, run_dir_path: Path,
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
     ctx.workspace.setup()
+    preflight_id = "executor-preflight"
+    preflight_worktree = ctx.workspace.add_worktree(
+        preflight_id, ctx.workspace.baseline_sha(),
+    )
+    try:
+        ctx.runtime.executor_preflight(
+            worktree=preflight_worktree,
+            mounts=executor_mount_map(cfg),
+        )
+    finally:
+        ctx.workspace.remove_worktree(preflight_id)
+    print("executor preflight: PASS", flush=True)
     print(f"[{stamp()}] baseline sha: {ctx.workspace.baseline_sha()}", flush=True)
 
     start = _starting_state(ctx, continue_run, n_rounds)
@@ -500,10 +514,7 @@ def _build_context(
                            model=executor["model"],
                            base_url=executor["base_url"],
                            usage_observer=telemetry.record_usage,
-                           mounts=MountMap(
-                               rw=tuple(cfg["editable_paths"]),
-                               ro=tuple(cfg.get("read_only_paths") or ()),
-                           ))
+                           mounts=executor_mount_map(cfg))
     workspace = Workspace(
         run_dir=run_dir_path,
         repo_path=cfg["repo_path"],

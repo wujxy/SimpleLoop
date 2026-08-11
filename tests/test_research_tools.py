@@ -140,6 +140,7 @@ def test_research_command_uses_process_group_and_returns_observation(
     runner, runtime = _runner(tmp_path)
     process = _Process(returncode=7)
     popen_calls = []
+    lifecycle = []
 
     def fake_popen(argv, **kwargs):
         popen_calls.append((argv, kwargs))
@@ -149,6 +150,14 @@ def test_research_command_uses_process_group_and_returns_observation(
                         fake_popen)
     monkeypatch.setattr(
         "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.CHILD_PROCESSES.register",
+        lambda pid: lifecycle.append(("register", pid)),
+    )
+    monkeypatch.setattr(
+        "simpleloop.roles.research_tools.CHILD_PROCESSES.unregister",
+        lambda pid: lifecycle.append(("unregister", pid)),
     )
 
     result = runner.run("git show HEAD", cwd="workspace")
@@ -169,6 +178,7 @@ def test_research_command_uses_process_group_and_returns_observation(
         "truncated": False,
         "output": "stdout\n[stderr]\nstderr",
     }
+    assert lifecycle == [("register", 123), ("unregister", 123)]
 
 
 def test_research_command_uses_the_snapshot_worktree_head(tmp_path):

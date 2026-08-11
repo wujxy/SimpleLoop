@@ -54,6 +54,52 @@ def test_default_backend_is_local(tmp_path: Path):
     assert cfg["hepjob"]["max_attempts"] == 2
 
 
+def test_executor_read_only_binds_resolve_absolute_paths(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    dep = tmp_path / "dep"
+    dep.mkdir()
+    raw["runtime"]["executor_read_only_binds"] = [str(dep)]
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    cfg = config_mod.load(path)
+
+    assert cfg["executor_read_only_binds"] == [str(dep.resolve())]
+
+
+def test_executor_read_only_binds_default_empty(tmp_path: Path):
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(_base_task(tmp_path)), encoding="utf-8")
+    assert config_mod.load(path)["executor_read_only_binds"] == []
+
+
+@pytest.mark.parametrize("value", ["relative", "", 7])
+def test_executor_read_only_binds_reject_invalid_entries(
+    tmp_path: Path, value,
+):
+    raw = _base_task(tmp_path)
+    raw["runtime"]["executor_read_only_binds"] = [value]
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(
+        config_mod.ConfigError, match="runtime.executor_read_only_binds",
+    ):
+        config_mod.load(path)
+
+
+def test_executor_read_only_binds_reject_missing_directory(tmp_path: Path):
+    raw = _base_task(tmp_path)
+    raw["runtime"]["executor_read_only_binds"] = [str(tmp_path / "missing")]
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(
+        config_mod.ConfigError, match="runtime.executor_read_only_binds",
+    ):
+        config_mod.load(path)
+
+
 def test_researcher_defaults(tmp_path: Path):
     raw = _base_task(tmp_path)
     raw["roles"] = {"researcher": {}}
