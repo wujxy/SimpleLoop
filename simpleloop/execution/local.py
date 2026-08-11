@@ -42,7 +42,7 @@ class LocalBackend(ExecutionBackend):
         try:
             return ctx.proposer_agent.run(
                 goal=cfg["goal"], editable=cfg["editable_paths"],
-                frozen=cfg["frozen_paths"],
+                frozen=[],
                 memory_service=ctx.memory_service, base_sha=base_sha,
                 workspaces=workspaces, repo_path=ctx.workspace.repo,
                 run_dir=ctx.run_dir, current_round=round_id,

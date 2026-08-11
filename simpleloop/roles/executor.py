@@ -10,7 +10,6 @@ from pathlib import Path
 
 from .agent import Agent
 from ..prompts import load_semantic
-from ..harness import gate
 from ..harness.workspace import Workspace
 
 
@@ -79,11 +78,16 @@ def parse_self_report(text: str) -> dict | None:
     }
 
 
-def execute(agent: Agent, *, proposal: str, goal: str, editable: list[str],
-            frozen: list[str], workspace: Workspace, worktree: Path,
-            round_id: int | str,
+def execute(agent: Agent, *, proposal: str, goal: str,
+            workspace: Workspace, worktree: Path, round_id: int | str,
             gate_block: str = "", prompt_dir: str | Path | None = None) -> ExecResult:
-    """Run the executor agent and produce (or fail to produce) a commit."""
+    """Run the executor agent and produce (or fail to produce) a commit.
+
+    The executor's file world (what it can read/write) is constructed entirely
+    by the harness via the container mount map on the agent — it is not stated
+    in the prompt and not gated after the fact. Anything the executor should
+    not touch is simply absent from its container; edits land in the worktree
+    via the binds, and the harness commits them."""
     semantic = load_semantic("executor", prompt_dir)
     prompt = f"""{semantic}
 
@@ -97,9 +101,7 @@ Gates:
 {gate_block}
 
 Fixed execution boundaries:
-- Editable paths: {editable}
-- Frozen paths: {frozen}
-- Edits stay inside the assigned worktree.
+- Edits stay inside the assigned worktree (your writable world).
 - Git staging and commits belong to the harness.
 - Verification side effects outside the intended source change are restored
   before delivery.
@@ -121,18 +123,6 @@ structured response.
             changed_paths=[],
             path_gate_passed=True,
             path_gate_violations=[],
-            output=agent_output,
-            self_report=self_report,
-        )
-
-    ok, violations = gate.check_diff(changed, editable, frozen)
-    if not ok:
-        return ExecResult(
-            sha=None,
-            reason="gate rejected: " + "; ".join(violations),
-            changed_paths=changed,
-            path_gate_passed=False,
-            path_gate_violations=violations,
             output=agent_output,
             self_report=self_report,
         )

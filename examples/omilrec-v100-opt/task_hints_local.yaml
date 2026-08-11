@@ -1,53 +1,40 @@
 kind: task
 
-# ============================================================================
-#  OMILREC v1.0.0 optimization — local-server edition of task_hints.yaml
-#  ============================================================================
-#  Adapted from task_hints.yaml (ihep-cluster) for direct execution on this
-#  server (no HTCondor/hepjob). Key changes vs the ihep version:
-#    - source.path       → omilrec-v100-gated (local repo, not omilrec-v100-opt-pkg)
-#    - runtime.binds     → /data/juno + project storage (not /lustrefs/juno26/...)
-#    - eval.commands     → RecMap defaults to /data/juno/dingxf/OMILREC_maps
-#                          (the sl_eval_v100.sh default; no env override needed)
-#    - execution         → local backend (no hepjob/HTCondor block)
-#  Prerequisite: build the runtime image before first run:
-#    simpleloop image build examples/junosw-apptainer.def \
-#        --output examples/junosw-apptainer.sif
-#  (or symlink an existing junosw-apptainer.sif from a sibling SimpleLoop)
-# ============================================================================
-
 task:
   goal: >
-    Minimize reconstruction SPEED_MS while satisfying every configured gate.
-    The current implementation is the starting artifact, not a constraint on
-    the form or scale of a valid solution.
+    Understand how a JUNO event is reconstructed end to end and develop an
+    account of what computational structure produces the time required for that
+    reconstruction. Minimize the time per event (SPEED_MS) while satisfying the
+    evaluation contract. Follow the reconstruction logic and evidence wherever
+    they lead. The current implementation is only a starting point, not the
+    boundary of the solution: you may redesign the implementation as warranted,
+    including changes across files, classes, modules, data representations, or
+    algorithmic structure.
 
 safety:
+  # The executor's writable world: these worktree-relative paths are mounted
+  # read-write into the executor container. Source + build config + build-output
+  # dirs (build/InstallArea/TEMP are gitignored). CMakeLists is writable — the
+  # executor may need to adjust build config for an optimization, and the eval
+  # gates catch any correctness regression. Everything NOT listed (tests/,
+  # baseline/, scripts/, docs/) is absent from the executor container: it can
+  # neither see nor edit the eval assets, so no after-the-fact path gate.
   editable_paths:
-    - "OMILRECV2/src/**/*.cc"
-    - "OMILRECV2/src/**/*.h"
-  frozen_paths:
-    - "tests/**"
-    - "scripts/**"
-    - "baseline/**"
-    - "benchmarks/**"
-    - "reference/**"
-    - "CMakeLists.txt"
-    - "OMILRECV2/CMakeLists.txt"
-    - "pyproject.toml"
-    - "docs/**"
-    - "CLAUDE.md"
-    - "README.md"
-    - ".gitignore"
+    - OMILRECV2/src
+    - OMILRECV2/python
+    - CMakeLists.txt
+    - OMILRECV2/CMakeLists.txt
+    - build
+    - build-asan
+    - InstallArea
+    - TEMP
+  read_only_paths: []
 
 loop:
   max_rounds: 100
   candidates_per_round: 4
   max_workers: 4
   agent_timeout_seconds: 7200
-
-# self_improvement:
-#   interval_rounds: 10
 
 roles:
   researcher:
@@ -71,12 +58,6 @@ runtime:
 
 eval:
   commands:
-    # RecMap (4 LFS .root files, ~979MB) lives at /data/juno/dingxf/OMILREC_maps
-    # and is shared read-only across all candidate/baseline worktrees instead of
-    # being smudged (and duplicated) into each worktree. OMILRECV2_BENCH_RECMAP
-    # defaults to OMILRECV2_TEST_RECMAP inside sl_eval_v100.sh, which in turn
-    # defaults to /data/juno/dingxf/OMILREC_maps — so no env override is needed.
-    # The path is visible inside the container because /data/juno is bound.
     - "bash scripts/sl_eval_v100.sh --evtmax 100"
   metrics:
     objective:
@@ -85,21 +66,26 @@ eval:
     gates:
       - key: CONTRACT
         description: >
-          The production FCN remains directly exercised and all frozen evaluator
-          assets, thresholds, and checks remain intact.
+          Checks that the external evaluation contract remains intact: protected
+          evaluator assets, reference data, thresholds, and checks are unchanged,
+          and evaluation continues to reflect the intended production behavior.
       - key: FCN
         description: >
-          Production OMILRECV2::Calculate_EVLikelihood produces exactly 16
-          finite unique results with relative error below 1e-13 against the
-          frozen v1.0.0 values.
+          Checks numerical equivalence on 16 frozen likelihood probe cases.
+          The resulting production reconstruction is expected to return 16 finite,
+          distinct values within 1e-13 relative error of the v1.0.0 references,
+          independent of how the internal implementation is organized.
       - key: CONSISTENCY
         description: >
-          All 18 reconstructed events are finite and remain within 4 mm position,
-          7 keV energy, 10 ps t0, and 0.1 PE peSum of the v1.0.0 references.
+          Checks reconstruction-level consistency on 18 frozen events. Final
+          reconstructed outputs are compared with the v1.0.0 references using
+          tolerances of 4 mm in position, 7 keV in energy, 10 ps in t0,
+          and 0.1 PE in peSum.
       - key: EVAL_RESULT
         description: >
-          The complete evaluator, including both builds, tests, and benchmark,
-          finishes successfully and emits every required metric.
+          Checks that the resulting artifact can be built and exercised by the
+          complete external evaluator and that all expected evaluation metrics
+          are produced successfully.
 
 source:
   path: ../../../omilrec-v100-gated

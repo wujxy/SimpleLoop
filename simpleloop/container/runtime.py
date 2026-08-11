@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 
 class RuntimePreflightError(RuntimeError):
@@ -60,6 +61,39 @@ printf 'preflight: PASS\\n'
 """.strip()
 
 
+@dataclass(frozen=True)
+class MountMap:
+    """The executor's file world: worktree-relative paths to mount read-write
+    (the writable world — source + build-output dirs) and read-only (the build
+    needs to read them but they are not optimization targets). Anything not
+    listed is ABSENT from the executor container. Pure data — the harness fills
+    it from config; no project-specific names live here."""
+
+    rw: tuple[str, ...] = ()
+    ro: tuple[str, ...] = ()
+
+
+def _prepare_bind_source(
+    worktree: Path, rel: str, *, writable: bool,
+) -> Path | None:
+    """Resolve a worktree-relative mount source. Build-output dirs (rw) may not
+    exist yet — create them so the bind source exists. read-only paths that
+    don't exist are warned and skipped (the build can't read what isn't there,
+    but a stale config entry shouldn't abort the run)."""
+    src = worktree / rel
+    if src.exists():
+        return src
+    if writable:
+        src.mkdir(parents=True, exist_ok=True)
+        return src
+    print(
+        f"[runtime] warning: read-only mount '{rel}' not found in worktree; "
+        f"skipping",
+        flush=True,
+    )
+    return None
+
+
 class ApptainerRuntime:
     """Build Apptainer argv/env consistently for every payload process."""
 
@@ -83,8 +117,18 @@ class ApptainerRuntime:
         payload: Sequence[str],
         *,
         cwd: str | Path,
+        mounts: "MountMap | None" = None,
+        scaffold: str | Path | None = None,
     ) -> list[str]:
-        """Return one shell-free Apptainer argv for a payload command."""
+        """Return one shell-free Apptainer argv for a payload command.
+
+        Without ``mounts`` the whole ``run_dir`` is mounted read-write (the
+        baseline-eval / legacy path). With ``mounts`` the executor's file world
+        is constructed instead: an empty ``scaffold`` dir is mounted at
+        ``/work`` and only the declared rw/ro subpaths (relative to ``cwd``,
+        the candidate worktree) appear under it — everything else is absent.
+        ``--containall`` + ``--no-mount cwd,home,hostfs`` prevent the host
+        worktree from leaking into the container."""
         argv = [self.executable, "exec", "--cleanenv", "--no-eval"]
         # --userns (default) avoids needing setuid on shared HPC nodes; set
         # SIMPLELOOP_APPTAINER_USERNS=0 to fall back to setuid.
@@ -93,14 +137,26 @@ class ApptainerRuntime:
         for bind in self.binds:
             if bind != self.run_dir:
                 argv.extend(["--bind", f"{bind}:{bind}"])
-        argv.extend(["--bind", f"{self.run_dir}:{self.run_dir}:rw"])
-        argv.extend(
-            [
-                "--cwd",
-                str(Path(cwd).expanduser().resolve()),
-                str(self.image),
-            ]
-        )
+        if mounts is None:
+            argv.extend(["--bind", f"{self.run_dir}:{self.run_dir}:rw"])
+            cwd_arg = str(Path(cwd).expanduser().resolve())
+        else:
+            worktree = Path(cwd).expanduser().resolve()
+            scaffold_dir = Path(scaffold).expanduser().resolve()
+            argv += ["--containall", "--no-mount", "cwd,home,hostfs"]
+            # Empty scaffold -> /work: the container root of the executor's
+            # world. Only the bound subpaths appear under it.
+            argv.extend(["--bind", f"{scaffold_dir}:/work:rw"])
+            for rel in mounts.rw:
+                src = _prepare_bind_source(worktree, rel, writable=True)
+                if src is not None:
+                    argv.extend(["--bind", f"{src}:/work/{rel}:rw"])
+            for rel in mounts.ro:
+                src = _prepare_bind_source(worktree, rel, writable=False)
+                if src is not None:
+                    argv.extend(["--bind", f"{src}:/work/{rel}:ro"])
+            cwd_arg = "/work"
+        argv.extend(["--cwd", cwd_arg, str(self.image)])
         argv.extend(str(item) for item in payload)
         return argv
 

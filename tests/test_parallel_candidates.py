@@ -98,9 +98,11 @@ def test_default_omilrec_tasks_define_outcomes_not_research_methods(
         "second likelihood",
     ):
         assert prescribed not in goal
-    assert "OMILRECV2/src/**" in raw["safety"]["editable_paths"]
+    assert "OMILRECV2/src" in raw["safety"]["editable_paths"]
     assert "OMILRECV2/CMakeLists.txt" in raw["safety"]["editable_paths"]
-    assert "OMILRECV2/CMakeLists.txt" not in raw["safety"]["frozen_paths"]
+    # frozen_paths is gone — protection is now via the mount map (paths not in
+    # editable/read_only are absent from the executor container).
+    assert "frozen_paths" not in raw["safety"]
 
 
 def test_runtime_architecture_has_no_judger_module_or_packaged_prompt():
@@ -361,7 +363,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         def diff(self, parent_sha, sha):
             return f"diff {parent_sha}..{sha}"
 
-    def fake_execute(agent, *, proposal, goal, editable, frozen, workspace, worktree, round_id, gate_block="", prompt_dir=None):
+    def fake_execute(agent, *, proposal, goal, workspace, worktree, round_id, gate_block="", prompt_dir=None):
         return ExecResult(
             sha=f"sha-{round_id}", reason=None,
             changed_paths=[f"{round_id}.cc"], path_gate_passed=True,

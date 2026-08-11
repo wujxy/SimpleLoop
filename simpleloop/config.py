@@ -3,8 +3,13 @@
 Minimal schema:
   kind: task
   task.goal: str                      (required)
-  safety.editable_paths: [glob]      (required)
-  safety.frozen_paths: [glob]        (optional, default [])
+  safety.editable_paths: [path]      (required; dirs/files relative to the worktree root, mounted read-write
+                                      into the executor container — the executor's writable world. Trailing
+                                      /** is tolerated and stripped. Everything not listed here or in
+                                      read_only_paths is absent from the executor container.)
+  safety.read_only_paths: [path]     (optional, default []; dirs/files mounted read-only into the executor
+                                      container — the build needs to read them but they are not optimization
+                                      targets)
   loop.max_rounds: int                (required)
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
   loop.agent_max_output_tokens: int  (optional, default 64000; per claude call output ceiling)
@@ -176,10 +181,14 @@ def _resolve(
 
     editable = safety.get("editable_paths")
     if not isinstance(editable, list) or not editable:
-        raise ConfigError("safety.editable_paths: required non-empty list of globs")
-    frozen = safety.get("frozen_paths", [])
-    if not isinstance(frozen, list):
-        raise ConfigError("safety.frozen_paths: must be a list")
+        raise ConfigError(
+            "safety.editable_paths: required non-empty list of worktree-relative "
+            "paths (dirs/files mounted read-write into the executor container)")
+    editable = [_normalize_mount_path(str(p)) for p in editable]
+    read_only = safety.get("read_only_paths", [])
+    if not isinstance(read_only, list):
+        raise ConfigError("safety.read_only_paths: must be a list of paths")
+    read_only = [_normalize_mount_path(str(p)) for p in read_only]
 
     max_rounds = loop.get("max_rounds")
     if not isinstance(max_rounds, int) or max_rounds < 1:
@@ -258,8 +267,8 @@ def _resolve(
     return {
         "goal": str(goal),
         "hints": [str(h) for h in hints] if hints else [],
-        "editable_paths": [str(g) for g in editable],
-        "frozen_paths": [str(g) for g in frozen],
+        "editable_paths": [str(p) for p in editable],
+        "read_only_paths": [str(p) for p in read_only],
         "max_rounds": int(max_rounds),
         "agent_timeout_seconds": int(agent_timeout),
         "agent_max_output_tokens": int(agent_max_output_tokens),
@@ -641,3 +650,16 @@ def _rel(value: str, config_path: Path) -> str:
     if not p.is_absolute():
         p = (config_path.parent / p)
     return str(p)
+
+
+def _normalize_mount_path(path: str) -> str:
+    """Normalize a worktree-relative mount path. Mounts bind dirs/files, not
+    content globs, so a trailing ``/**`` (legacy editable-glob form like
+    ``src/**``) is stripped to its directory prefix (``src``). A bare ``*`` or
+    ``**`` segment is left alone — list real paths in config."""
+    p = path.strip().rstrip("/")
+    if p.endswith("/**"):
+        return p[:-3]
+    if p.endswith("/**/"):
+        return p[:-4]
+    return p

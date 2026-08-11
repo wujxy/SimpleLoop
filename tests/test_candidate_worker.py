@@ -127,32 +127,6 @@ def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
     }
 
 
-def test_path_gate_rejection_is_terminal_and_skips_eval(tmp_path: Path,
-                                                         monkeypatch):
-    called = False
-
-    def fake_eval(*_args, **_kwargs):
-        nonlocal called
-        called = True
-
-    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_eval)
-
-    monkeypatch.setattr(worker_mod.executor_mod, "execute",
-                        lambda *a, **k: ExecResult(
-                            sha=None, reason="gate rejected: frozen paths",
-                            changed_paths=["tests/x.py"],
-                            path_gate_passed=False,
-                            path_gate_violations=[
-                                "tests/x.py: touches a frozen path",
-                            ]))
-    result = run_candidate(_deps(tmp_path), _spec(tmp_path))
-    assert called is False
-    assert result["status"] == "PATH_GATE_REJECTED"
-    assert result["sha"] is None
-    assert result["gates"]["PATHS"]["passed"] is False
-    assert result["gates"]["CORRECTNESS"]["passed"] is None
-
-
 def test_nonzero_eval_command_is_a_gate_rejection(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(worker_mod.executor_mod, "execute",
                         lambda *a, **k: ExecResult(
@@ -368,10 +342,8 @@ def test_execute_parses_self_report_from_agent_output(tmp_path: Path,
         def commit(self, _wt, _rid, _paths):
             return "sha1"
 
-    monkeypatch.setattr(exec_mod.gate, "check_diff",
-                        lambda changed, editable, frozen: (True, []))
     result = exec_mod.execute(
-        FakeAgent(), proposal="p", goal="g", editable=["src/**"], frozen=[],
+        FakeAgent(), proposal="p", goal="g",
         workspace=FakeWorkspace(), worktree=tmp_path, round_id="r1")
     assert result.sha == "sha1"
     assert result.self_report == {"outcome": "completed",

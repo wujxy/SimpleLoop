@@ -1,0 +1,97 @@
+"""Executor mount-world construction: ``exec_argv(mounts=...)`` builds a
+container that exposes ONLY the declared rw/ro subpaths under /work and leaves
+everything else absent. No project names are hardcoded in the runtime — the
+mount map is pure data filled from config."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from simpleloop.container.runtime import ApptainerRuntime, MountMap
+
+
+def _runtime(tmp_path: Path, binds=()) -> ApptainerRuntime:
+    image = tmp_path / "image.sif"
+    image.write_text("dummy")
+    return ApptainerRuntime(image=image, binds=binds, run_dir=tmp_path)
+
+
+def test_exec_argv_with_mounts_builds_subset_world(tmp_path: Path):
+    wt = tmp_path / "wt"
+    (wt / "src").mkdir(parents=True)
+    (wt / "src" / "a.cc").write_text("x")
+    (wt / "tests").mkdir(parents=True)
+    (wt / "tests" / "t.cc").write_text("secret")
+    # 'build' does NOT exist yet — the runtime must pre-create it (bind source
+    # must exist).
+    scaffold = tmp_path / "scaffold"
+    scaffold.mkdir()
+    bind_dep = tmp_path / "dep"
+    bind_dep.mkdir()
+    rt = _runtime(tmp_path, binds=[bind_dep])
+
+    argv = rt.exec_argv(
+        ["claude", "-p"], cwd=wt,
+        mounts=MountMap(rw=("src", "build"), ro=("tests",)),
+        scaffold=scaffold,
+    )
+
+    # container is contained + host worktree/cwd/home/hostfs do NOT leak in
+    assert "--containall" in argv
+    assert argv[argv.index("--no-mount") + 1] == "cwd,home,hostfs"
+    # scaffold -> /work (the container root of the constructed world)
+    assert f"{scaffold}:/work:rw" in argv
+    # declared rw subpaths mounted rw, ro subpaths mounted ro — under /work
+    assert f"{wt / 'src'}:/work/src:rw" in argv
+    assert f"{wt / 'build'}:/work/build:rw" in argv
+    assert f"{wt / 'tests'}:/work/tests:ro" in argv
+    # deps (runtime.binds) still mounted
+    assert f"{bind_dep}:{bind_dep}" in argv
+    # cwd is the constructed /work, not the host worktree
+    assert argv[argv.index("--cwd") + 1] == "/work"
+    # the run_dir wholesale mount is NOT present (no leak)
+    assert f"{tmp_path}:{tmp_path}:rw" not in argv
+    # the missing build dir was pre-created so the bind source exists
+    assert (wt / "build").is_dir()
+
+
+def test_exec_argv_without_mounts_is_legacy_whole_run_dir(tmp_path: Path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    rt = _runtime(tmp_path)
+    argv = rt.exec_argv(["claude", "-p"], cwd=wt)
+    # legacy path: run_dir mounted rw, cwd is the host worktree, no containall
+    assert f"{tmp_path}:{tmp_path}:rw" in argv
+    assert "--containall" not in argv
+    assert argv[argv.index("--cwd") + 1] == str(wt.resolve())
+
+
+def test_read_only_mount_missing_is_skipped_not_fatal(tmp_path: Path, capsys):
+    wt = tmp_path / "wt"
+    (wt / "src").mkdir(parents=True)
+    scaffold = tmp_path / "scaffold"
+    scaffold.mkdir()
+    rt = _runtime(tmp_path)
+    # 'stale' ro path does not exist in the worktree → warned + skipped, not raised
+    argv = rt.exec_argv(
+        ["claude", "-p"], cwd=wt,
+        mounts=MountMap(rw=("src",), ro=("stale",)),
+        scaffold=scaffold,
+    )
+    assert "/work/stale" not in argv
+    assert "/work/src:rw" in " ".join(argv)
+    out = capsys.readouterr().out
+    assert "read-only mount 'stale'" in out
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("src/**", "src"),
+    ("src/**/", "src"),
+    ("src", "src"),
+    ("a/b", "a/b"),
+    ("CMakeLists.txt", "CMakeLists.txt"),
+])
+def test_normalize_mount_path_strips_legacy_glob(raw, expected):
+    from simpleloop.config import _normalize_mount_path
+    assert _normalize_mount_path(raw) == expected

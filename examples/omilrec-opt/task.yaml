@@ -23,19 +23,15 @@ task:
 
 safety:
   editable_paths:
-    - "OMILRECV2/src/**"
-    - "OMILRECV2/CMakeLists.txt"
-  frozen_paths:
-    - "tests/**"
-    - "scripts/**"
-    - "benchmarks/**"
-    - "reference/**"          # the bit-identical baseline — must never be touched
-    - "CMakeLists.txt"
-    - "pyproject.toml"
-    - "docs/**"
-    - "CLAUDE.md"
-    - "README.md"
-    - ".gitignore"
+    - OMILRECV2/src
+    - OMILRECV2/python
+    - CMakeLists.txt
+    - OMILRECV2/CMakeLists.txt
+    - build
+    - build-asan
+    - InstallArea
+    - TEMP
+  read_only_paths: []
 
 loop:
   max_rounds: 40

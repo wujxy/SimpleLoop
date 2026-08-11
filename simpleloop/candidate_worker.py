@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config as config_mod
-from .container.runtime import ApptainerRuntime
+from .container.runtime import ApptainerRuntime, MountMap
 from .harness import evals, gate, views
 from .harness.handoff import write_handoff
 from .harness.workspace import Workspace
@@ -134,7 +134,11 @@ def build_deps(
                            max_output_tokens=max_output_tokens,
                            model=executor.get("model"),
                            base_url=executor.get("base_url"),
-                           usage_observer=usage_observer)
+                           usage_observer=usage_observer,
+                           mounts=MountMap(
+                               rw=tuple(cfg["editable_paths"]),
+                               ro=tuple(cfg.get("read_only_paths") or ()),
+                           ))
     workspace = Workspace(
         run_dir=run_dir,
         repo_path=cfg["repo_path"],
@@ -161,7 +165,6 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
               f"proposal: {spec.proposal[:120]}", flush=True)
         result = executor_mod.execute(
             deps.executor_agent, proposal=spec.proposal, goal=cfg["goal"],
-            editable=cfg["editable_paths"], frozen=cfg["frozen_paths"],
             workspace=deps.workspace, worktree=worktree, round_id=worktree_id,
             gate_block=deps.gate_lines,
             prompt_dir=deps.prompt_dir,
@@ -190,24 +193,12 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
         "proposal": spec.proposal,
         "parent_sha": spec.parent_sha,
         "sha": result.sha,
-        "status": ("COMMITTED" if result.sha else
-                   "PATH_GATE_REJECTED" if not result.path_gate_passed else
-                   "NO_CHANGE"),
+        "status": ("COMMITTED" if result.sha else "NO_CHANGE"),
         "changed_paths": result.changed_paths,
         "reason": result.reason,
         "executor_response": result.output,
         "self_report": result.self_report,
     })
-
-    if result.path_gate_passed is False:
-        gate_results = gate.build_results(
-            metrics_schema,
-            paths=False,
-            path_detail="; ".join(result.path_gate_violations),
-        )
-        return _candidate_result(
-            spec, result, status="PATH_GATE_REJECTED", gates=gate_results,
-        )
 
     if result.sha is None:
         detail = "not run because Executor produced no change"

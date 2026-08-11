@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from ..container.runtime import ApptainerRuntime
+from ..container.runtime import ApptainerRuntime, MountMap
 
 
 class AgentError(RuntimeError):
@@ -61,6 +63,7 @@ class Agent:
         max_output_tokens: int = 64000,
         usage_observer: Callable[[object], None] | None = None,
         base_url: str | None = None,
+        mounts: MountMap | None = None,
     ):
         self.runtime = runtime
         self.command = command
@@ -73,6 +76,11 @@ class Agent:
         # final JSON does not abort the turn.
         self.max_output_tokens = max_output_tokens
         self.usage_observer = usage_observer
+        # When set (executor), the container's file world is constructed from
+        # this mount map instead of mounting the whole run_dir; the agent then
+        # works inside the constructed /work world. None = legacy whole-run_dir
+        # mount (baseline eval, etc.).
+        self.mounts = mounts
 
     def _notify_usage(self, usage: object, label: str) -> None:
         if self.usage_observer is None:
@@ -134,91 +142,101 @@ class Agent:
                 "--json-schema",
                 json.dumps(json_schema, separators=(",", ":")),
             ]
-        argv = self.runtime.exec_argv(payload, cwd=cwd)
+        scaffold: str | None = None
+        try:
+            if self.mounts is not None:
+                # Empty host dir mounted at /work: the container root of the
+                # constructed file world. Lives for the subprocess duration.
+                scaffold = tempfile.mkdtemp(prefix="simpleloop-exec-")
+            argv = self.runtime.exec_argv(
+                payload, cwd=cwd, mounts=self.mounts, scaffold=scaffold)
 
-        prompt_bytes = prompt.encode("utf-8")
-        print(f"[{label}] claude call started (timeout={self.timeout_seconds}s, cwd={cwd}, "
-              f"prompt={len(prompt_bytes)}B via stdin)", flush=True)
-        env = self.runtime.subprocess_env({
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
-            # Config-authoritative endpoint: overrides any ambient value so the
-            # executor never silently falls back to the unreachable default
-            # Anthropic URL on isolated worker nodes.
-            **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
-        })
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(cwd),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-            env=env,
-        )
-        out_buf: list[str] = []
-        err_buf: list[str] = []
-        t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf), daemon=True)
-        t_err = threading.Thread(target=_drain, args=(proc.stderr, err_buf, label), daemon=True)
-        t_out.start()
-        t_err.start()
-
-        # Write stdin on its own thread so a stuck pipe write cannot hold the
-        # timeout loop hostage.
-        write_err: list = []
-        def _feed() -> None:
-            try:
-                proc.stdin.write(prompt)
-                proc.stdin.close()
-            except (BrokenPipeError, OSError) as exc:
-                write_err.append(exc)
-        t_feed = threading.Thread(target=_feed, daemon=True)
-        t_feed.start()
-
-        deadline = time.monotonic() + self.timeout_seconds
-        heartbeat = time.monotonic() + 30.0
-        while proc.poll() is None:
-            now = time.monotonic()
-            if now >= deadline:
-                _kill_group(proc)
-                self._notify_usage(None, label)
-                raise AgentError(
-                    f"[{label}] timed out after {self.timeout_seconds}s\n"
-                    f"stderr: {''.join(err_buf).strip()[:2000]}"
-                )
-            if now >= heartbeat:
-                elapsed = deadline - now
-                print(f"[{label}] still running ({self.timeout_seconds - elapsed:.0f}s in, pid={proc.pid})", flush=True)
-                heartbeat = now + 30.0
-            time.sleep(0.2)
-
-        t_out.join(timeout=2)
-        t_err.join(timeout=2)
-        t_feed.join(timeout=2)
-        if write_err:
-            self._notify_usage(None, label)
-            raise AgentError(f"[{label}] stdin write failed: {write_err[0]}\n"
-                             f"stderr: {''.join(err_buf).strip()[:2000]}")
-        if proc.stdout:
-            proc.stdout.close()
-        if proc.stderr:
-            proc.stderr.close()
-        if proc.stdin:
-            proc.stdin.close()
-        stdout = "".join(out_buf)
-        stderr = "".join(err_buf)
-        elapsed = self.timeout_seconds - (deadline - time.monotonic())
-        result = _decode_output(stdout)
-        self._notify_usage(result.usage, label)
-
-        if proc.returncode != 0:
-            raise AgentError(
-                f"[{label}] claude exited {proc.returncode}\n"
-                f"stdout: {stdout.strip()[:2000]}\nstderr: {stderr.strip()[:2000]}"
+            prompt_bytes = prompt.encode("utf-8")
+            print(f"[{label}] claude call started (timeout={self.timeout_seconds}s, cwd={cwd}, "
+                  f"prompt={len(prompt_bytes)}B via stdin)", flush=True)
+            env = self.runtime.subprocess_env({
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
+                # Config-authoritative endpoint: overrides any ambient value so the
+                # executor never silently falls back to the unreachable default
+                # Anthropic URL on isolated worker nodes.
+                **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
+            })
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(cwd),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                env=env,
             )
-        print(f"[{label}] claude call finished ({elapsed:.0f}s)", flush=True)
+            out_buf: list[str] = []
+            err_buf: list[str] = []
+            t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf), daemon=True)
+            t_err = threading.Thread(target=_drain, args=(proc.stderr, err_buf, label), daemon=True)
+            t_out.start()
+            t_err.start()
 
-        return result
+            # Write stdin on its own thread so a stuck pipe write cannot hold the
+            # timeout loop hostage.
+            write_err: list = []
+            def _feed() -> None:
+                try:
+                    proc.stdin.write(prompt)
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError) as exc:
+                    write_err.append(exc)
+            t_feed = threading.Thread(target=_feed, daemon=True)
+            t_feed.start()
+
+            deadline = time.monotonic() + self.timeout_seconds
+            heartbeat = time.monotonic() + 30.0
+            while proc.poll() is None:
+                now = time.monotonic()
+                if now >= deadline:
+                    _kill_group(proc)
+                    self._notify_usage(None, label)
+                    raise AgentError(
+                        f"[{label}] timed out after {self.timeout_seconds}s\n"
+                        f"stderr: {''.join(err_buf).strip()[:2000]}"
+                    )
+                if now >= heartbeat:
+                    elapsed = deadline - now
+                    print(f"[{label}] still running ({self.timeout_seconds - elapsed:.0f}s in, pid={proc.pid})", flush=True)
+                    heartbeat = now + 30.0
+                time.sleep(0.2)
+
+            t_out.join(timeout=2)
+            t_err.join(timeout=2)
+            t_feed.join(timeout=2)
+            if write_err:
+                self._notify_usage(None, label)
+                raise AgentError(f"[{label}] stdin write failed: {write_err[0]}\n"
+                                 f"stderr: {''.join(err_buf).strip()[:2000]}")
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+            if proc.stdin:
+                proc.stdin.close()
+            stdout = "".join(out_buf)
+            stderr = "".join(err_buf)
+            elapsed = self.timeout_seconds - (deadline - time.monotonic())
+            result = _decode_output(stdout)
+            self._notify_usage(result.usage, label)
+
+            if proc.returncode != 0:
+                raise AgentError(
+                    f"[{label}] claude exited {proc.returncode}\n"
+                    f"stdout: {stdout.strip()[:2000]}\nstderr: {stderr.strip()[:2000]}"
+                )
+            print(f"[{label}] claude call finished ({elapsed:.0f}s)", flush=True)
+
+            return result
+        finally:
+            if scaffold:
+                shutil.rmtree(scaffold, ignore_errors=True)
 
 def _drain(stream, buf: list[str], label: str | None = None) -> None:
     if stream is None:

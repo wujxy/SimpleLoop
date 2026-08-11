@@ -235,7 +235,7 @@ def run_lane(deps: ProposerLaneDeps, spec: ProposerLaneSpec) -> dict:
         base_sha=spec.base_sha,
         goal=cfg["goal"],
         editable=cfg["editable_paths"],
-        frozen=cfg["frozen_paths"],
+        frozen=[],
         memory_service=deps.memory_service,
         repo_path=deps.workspace.repo,
         run_dir=deps.run_dir,

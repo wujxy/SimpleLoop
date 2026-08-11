@@ -12,7 +12,6 @@ import yaml
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop.harness import export as export_mod
-from simpleloop.harness import gate
 from simpleloop.harness.store import Store
 from simpleloop.harness.workspace import Workspace
 
@@ -156,7 +155,10 @@ def _make_source(tmp_path: Path) -> Path:
     return src
 
 
-def test_rename_from_frozen_to_editable_exposes_both_paths(tmp_path: Path):
+def test_rename_exposes_both_paths_in_changed_paths(tmp_path: Path):
+    # changed_paths must surface BOTH sides of a rename so the harness commit
+    # captures the whole change. (The historical path-gate that checked these
+    # against editable/frozen is gone — protection is now via the mount map.)
     src = _make_source(tmp_path)
     (src / "frozen.txt").write_text("protected\n")
     _git(src, "add", "frozen.txt")
@@ -172,9 +174,6 @@ def test_rename_from_frozen_to_editable_exposes_both_paths(tmp_path: Path):
     changed = ws.changed_paths(wt)
 
     assert changed == ["editable/moved.txt", "frozen.txt"]
-    assert gate.check_diff(
-        changed, ["editable/**"], ["frozen.txt"],
-    ) == (False, ["frozen.txt: touches a frozen path"])
 
 
 def _seed_run(tmp_path: Path):

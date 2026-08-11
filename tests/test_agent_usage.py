@@ -13,7 +13,7 @@ class RecordingRuntime:
         self.calls = []
         self.overrides = None
 
-    def exec_argv(self, payload, *, cwd):
+    def exec_argv(self, payload, *, cwd, mounts=None, scaffold=None):
         self.calls.append((list(payload), Path(cwd)))
         return ["apptainer", "exec", "image.sif", *payload]
 

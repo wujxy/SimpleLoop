@@ -32,7 +32,7 @@ from .harness import views
 from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
-from .container.runtime import ApptainerRuntime
+from .container.runtime import ApptainerRuntime, MountMap
 from .harness.workspace import Workspace
 
 
@@ -499,7 +499,11 @@ def _build_context(
                            max_output_tokens=max_output_tokens,
                            model=executor["model"],
                            base_url=executor["base_url"],
-                           usage_observer=telemetry.record_usage)
+                           usage_observer=telemetry.record_usage,
+                           mounts=MountMap(
+                               rw=tuple(cfg["editable_paths"]),
+                               ro=tuple(cfg.get("read_only_paths") or ()),
+                           ))
     workspace = Workspace(
         run_dir=run_dir_path,
         repo_path=cfg["repo_path"],

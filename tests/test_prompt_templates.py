@@ -52,11 +52,14 @@ def test_executor_assembles_active_semantics_and_safety(tmp_path: Path):
 
     result = executor.execute(
         agent, proposal="replace lookup", goal="faster",
-        editable=["src/**"], frozen=["bench/**"], workspace=EmptyWorkspace(),
+        workspace=EmptyWorkspace(),
         worktree=tmp_path, round_id=0, prompt_dir=prompt_dir,
     )
 
     assert result.reason == "executor made no changes"
     assert agent.prompt.startswith("ACTIVE EXECUTOR")
     assert "Direction to implement:\nreplace lookup" in agent.prompt
-    assert "bench/**" in agent.prompt
+    # editable/frozen are no longer injected into the executor prompt — the
+    # file world is constructed by the container mount map, not stated in prose.
+    assert "Editable paths" not in agent.prompt
+    assert "Frozen paths" not in agent.prompt
