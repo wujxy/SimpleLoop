@@ -77,6 +77,12 @@ eval:
         description: >
           The complete evaluator, including both builds, tests, and benchmark,
           finishes successfully and emits every required metric.
+      - key: SINGLE_THREADED
+        description: >
+          The benchmark ran single-threaded (Sniper NTHREADS=1 and OMP/MKL/ROOT
+          pinned to 1). Speedups must come from algorithm or code improvements,
+          not from parallelism — multi-threading would reduce SPEED_MS without a
+          real improvement.
 
 source:
   path: ../../../omilrec-v100-opt-pkg 

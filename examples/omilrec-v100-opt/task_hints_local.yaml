@@ -86,6 +86,12 @@ eval:
           Checks that the resulting artifact can be built and exercised by the
           complete external evaluator and that all expected evaluation metrics
           are produced successfully.
+      - key: SINGLE_THREADED
+        description: >
+          Checks that the benchmark ran single-threaded (Sniper NTHREADS=1 and
+          OMP/MKL/ROOT pinned to 1). Speedups must come from algorithm or code
+          improvements, not from parallelism — multi-threading the reconstruction
+          would reduce SPEED_MS without a real improvement.
 
 source:
   path: ../../../omilrec-v100-gated
