@@ -46,7 +46,7 @@ roles:
   executor:
     api: anthropic
     model: glm-5.2
-    base_url: https://aiapi.ihep.ac.cn/apiv2
+    base_url: https://aiapi.ihep.ac.cn/apiv2/anthropic
 
 runtime:
   image: ../junosw-apptainer.sif

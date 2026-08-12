@@ -37,7 +37,7 @@ roles:
   executor:
     api: anthropic
     model: glm-5.2
-    base_url: https://aiapi.ihep.ac.cn/apiv2
+    base_url: sk-GHrvyBmucuHRAJjrlKKpPXsKPkbxgitHamnlUZkIJTIlobo
 
 runtime:
   image: ../junosw-apptainer.sif
@@ -89,14 +89,4 @@ source:
   baseline_ref: simpleloop-v100-gated-baseline
 
 execution:
-  backend: hepjob
-  hepjob:
-    schedd_name: scheduler@schedd12.ihep.ac.cn
-    collector: cm01.ihep.ac.cn
-    accounting_group: JUNO.juno.default
-    cpu_model: zen5
-    machine_constraint: 'Machine == "lhws316.ihep.ac.cn"'
-    memory_mb: 4096
-    poll_seconds: 15
-    max_attempts: 2
-    run_timeout_seconds: 7200
+  backend: local

@@ -7,14 +7,13 @@ task:
     suite and scripts/check_drift.py must still pass. Edit only tinyalgo source.
 
 safety:
+  # The executor's writable world: only the tinyalgo source dir is mounted
+  # read-write into the executor container. tests/ + scripts/ (the eval harness)
+  # are NOT listed, so they are absent from the executor — it can neither see
+  # nor edit them. No after-the-fact path gate; the mount IS the constraint.
   editable_paths:
-    - "tinyalgo/**/*.py"
-  frozen_paths:
-    - "tests/**"
-    - "scripts/**"
-    - "benchmarks/**"
-    - "README.md"
-    - "pyproject.toml"
+    - tinyalgo
+  read_only_paths: []
 
 loop:
   max_rounds: 4
@@ -34,7 +33,7 @@ roles:
   executor:
     api: anthropic
     model: glm-5.2
-    base_url: https://aiapi.ihep.ac.cn/apiv2
+    base_url: https://aiapi.ihep.ac.cn/apiv2/anthropic
 
 runtime:
   image: apptainer.sif
