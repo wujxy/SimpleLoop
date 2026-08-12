@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from ..explore import ExploreReport, analyze_explore_health
+from ..explore import ExploreReport
 from ..harness.memory import read_history, resolve_episode
 from .context import build_startup_pack, build_generation_context
 from .experiment_index import (
@@ -83,20 +83,6 @@ class MemoryService:
             editable_prefixes=editable_prefixes,
         )
 
-    def analyze_explore(self, *, current_round: int) -> ExploreReport:
-        """Compute the search-health report from the current Ledger + Finding
-        archive. This is the single source of truth the Proposer consults —
-        compute it once per wakeup and reuse for the startup pack, the
-        per-step state header, the nudges, and the challenge guard."""
-        objective = (self.metrics_schema or {}).get("objective") or {}
-        return analyze_explore_health(
-            self.load_findings(),
-            self.load_experiments(),
-            current_round=current_round,
-            objective_key=objective.get("key"),
-            lower_is_better=bool(objective.get("lower_is_better")),
-        )
-
     def build_startup_pack(
         self,
         *,
@@ -132,8 +118,6 @@ class MemoryService:
             for record in history
             if isinstance(record, dict) and record.get("abstention")
         ][-recent_rounds:]
-        if explore is None:
-            explore = self.analyze_explore(current_round=current_round)
         return build_startup_pack(
             goal=goal,
             editable=editable,

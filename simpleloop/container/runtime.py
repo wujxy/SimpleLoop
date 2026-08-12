@@ -263,7 +263,7 @@ class ApptainerRuntime:
         *,
         workspace: str | Path,
         repo: str | Path,
-        history: str | Path,
+        history: str | Path | None,
         scratch: str | Path,
         cwd: str,
     ) -> list[str]:
@@ -275,7 +275,10 @@ class ApptainerRuntime:
         proposer can write scratch code, compile, and run toy experiments.
         ``/repo`` stays read-only, which structurally prevents the proposer
         from committing (creating artifacts is the candidate's job, not the
-        proposer's)."""
+        proposer's). ``history`` is the run directory whose ``history.jsonl``
+        and ``rounds/`` are bind-mounted read-only for the Cognitive element;
+        pass ``None`` for the history-blind Generator so no past-experiment
+        files enter its world (the boundary is the mount, not a prompt)."""
         if cwd not in {"workspace", "scratch"}:
             raise ValueError("research cwd must be 'workspace' or 'scratch'")
         argv = [
@@ -290,15 +293,16 @@ class ApptainerRuntime:
         ]
         if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
             argv.append("--userns")
-        evidence = Path(history).resolve()
-        history_file = evidence / "history.jsonl"
-        rounds = evidence / "rounds"
-        if history_file.is_file():
-            argv.extend([
-                "--bind", f"{history_file}:/history.jsonl:ro",
-            ])
-        if rounds.is_dir():
-            argv.extend(["--bind", f"{rounds}:/rounds:ro"])
+        if history is not None:
+            evidence = Path(history).resolve()
+            history_file = evidence / "history.jsonl"
+            rounds = evidence / "rounds"
+            if history_file.is_file():
+                argv.extend([
+                    "--bind", f"{history_file}:/history.jsonl:ro",
+                ])
+            if rounds.is_dir():
+                argv.extend(["--bind", f"{rounds}:/rounds:ro"])
         argv.extend([
             "--bind", f"{Path(workspace).resolve()}:/workspace:rw",
             "--bind", f"{Path(repo).resolve()}:/repo:ro",

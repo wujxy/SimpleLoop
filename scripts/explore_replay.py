@@ -4,7 +4,7 @@
 For each round R the proposer would have woken at, this script reconstructs
 the Ledger + Finding state visible up to R-1 and prints when each Explore
 policy signal (per-finding, family, global) would have first fired — and
-whether ``challenge_required`` would have forced a ``challenge_response``.
+whether ``challenge_required`` would have been set.
 
 Usage:
     python scripts/explore_replay.py <run_dir>

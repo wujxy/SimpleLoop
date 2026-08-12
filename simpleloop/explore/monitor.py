@@ -83,7 +83,7 @@ def analyze_explore_health(
       ``global_health=None``, ``challenge_required=False``.
     - otherwise per-finding / family / global health is computed and
       ``challenge_required`` reflects any active ``challenge``-severity family
-      or global signal.
+      or global signal (informational only — does not gate submit).
     """
     del current_round  # reserved for future dormancy-aware logic; findings carry rounds.
 

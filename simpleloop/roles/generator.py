@@ -466,7 +466,7 @@ class GeneratorAgent(ResearchAgent):
                 runtime=self.runtime,
                 workspace=source_path,
                 repo=repo_path,
-                history_dir=run_dir,
+                history_dir=None,  # no history mounts — history-blind by boundary, not prompt
                 scratch=Path(scratch),
                 memory_service=None,  # no history tools
                 command_timeout_seconds=self.command_timeout_seconds,

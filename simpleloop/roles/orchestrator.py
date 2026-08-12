@@ -26,6 +26,7 @@ from .model import ChatModel
 from .hypothesis import HypothesisCard
 from .generator import GeneratorAgent
 from .proposer import ProposerAgent, ProposerResult, BranchResult
+from ..explore import analyze_explore_from_schema
 from ..explore.models import ExploreReport
 from ..container.runtime import ApptainerRuntime
 from ..memory.models import ResearchProposal
@@ -152,8 +153,12 @@ class ProposerOrchestrator:
 
         # --- Explore (for the Cognitive element only, not the Generator) ---
         try:
-            explore = memory_service.analyze_explore(
-                current_round=current_round)
+            explore = analyze_explore_from_schema(
+                memory_service.load_findings(),
+                memory_service.load_experiments(),
+                current_round=current_round,
+                metrics_schema=memory_service.metrics_schema,
+            )
         except Exception:
             explore = None
 
@@ -385,7 +390,12 @@ class ProposerOrchestrator:
             base_sha=base_sha, gate_block=gate_block,
         )
         try:
-            explore = memory_service.analyze_explore(current_round=current_round)
+            explore = analyze_explore_from_schema(
+                memory_service.load_findings(),
+                memory_service.load_experiments(),
+                current_round=current_round,
+                metrics_schema=memory_service.metrics_schema,
+            )
         except Exception:
             explore = None
         lane = LaneState(lane_id=lane_id, assigned_ops=tuple(assigned_ops))

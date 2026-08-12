@@ -58,8 +58,8 @@ from ..memory.models import (
     NewFindingTarget,
     ResearchProposal,
 )
+from ..explore import analyze_explore_from_schema
 from ..explore.models import ExploreReport
-from ..explore.render import render_explore_for_state_header
 from ..prompts import load_semantic
 
 
@@ -652,8 +652,12 @@ class ProposerAgent(ResearchAgent):
         )
         if explore is None:
             try:
-                explore = memory_service.analyze_explore(
-                    current_round=current_round)
+                explore = analyze_explore_from_schema(
+                    memory_service.load_findings(),
+                    memory_service.load_experiments(),
+                    current_round=current_round,
+                    metrics_schema=memory_service.metrics_schema,
+                )
             except Exception:
                 explore = None
         startup_pack = memory_service.build_startup_pack(

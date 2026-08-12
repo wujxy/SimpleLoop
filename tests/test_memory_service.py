@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from simpleloop.explore import analyze_explore_from_schema
 from simpleloop.memory import MemoryService
 from simpleloop.memory.models import (
     ExistingFindingTarget,
@@ -216,10 +217,15 @@ def test_startup_pack_surfaces_deliberation_signals(tmp_path: Path):
         _chain(1, "s1", "s0", 90.0),   # neutral vs s0
         _chain(2, "s2", "s1", 90.0),   # neutral vs s1
     )
+    explore = analyze_explore_from_schema(
+        svc.load_findings(), svc.load_experiments(),
+        current_round=3, metrics_schema=METRICS,
+    )
     pack = svc.build_startup_pack(
         goal="fast", editable=["src/"], frozen=["tests/"],
         base_sha="abc", gate_block="- physics: pass",
         candidates_per_round=1, hints=None, current_round=3,
+        explore=explore,
     )
     assert "Explore health" in pack
     assert "mechanism_challenge" in pack

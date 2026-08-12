@@ -1,21 +1,19 @@
 """Rendering helpers for the Explore search-health report.
 
-Three consumers:
+Two consumers:
 
 - :func:`render_explore_for_startup` — the long-form block embedded in the
-  Proposer's startup pack (findings + families + global + the challenge POLICY
-  paragraph when ``challenge_required``).
+  Proposer's startup pack (findings + families + global + an informational
+  POLICY paragraph when ``challenge_required``).
 - :func:`render_explore_for_state_header` — compact tags spliced into the
   per-step working-state header.
-- :func:`render_challenge_repair_message` — the protocol-correction text fed
-  back when a submit lacks the required ``challenge_response``.
 
-All output is plain text; nothing here is a scientific verdict.
+All output is plain text and informational only — nothing here is a scientific
+verdict, and nothing gates or forces a submit.
 """
 from __future__ import annotations
 
 from .models import (
-    SEVERITY_CHALLENGE,
     ExploreReport,
     FamilyExploreHealth,
     FindingExploreHealth,
@@ -33,9 +31,9 @@ def render_explore_for_startup(report: ExploreReport | None) -> str:
 
     Returns ``""`` on the first round or when there is nothing to show.
     Preserves the per-finding line format the Scientist already knows, then
-    appends family and global blocks, then — when a challenge is required — the
-    POLICY paragraph stating the submit requirement up front (so no repair turn
-    is wasted telling the Proposer what it could have read on wakeup).
+    appends family and global blocks, then — when ``challenge_required`` is set
+    — an informational POLICY paragraph reminding the Proposer the signal does
+    not gate submit and exists only to prompt harder thinking.
     """
     if report is None or report.first_round:
         return ""
@@ -74,38 +72,6 @@ def render_explore_for_startup(report: ExploreReport | None) -> str:
             "paperwork."
         )
     return "\n".join(lines) + "\n"
-
-
-def render_generation_boundary(report: ExploreReport | None) -> str:
-    """Render the negative-feedback boundary for the Generator.
-
-    Lists (region, mechanism) families that are exhausted
-    (consecutive_no_improve >= threshold). This is the ONLY Explore signal the
-    Generator consumes — positive feedback ("the bottleneck is here") would
-    collapse diversity, so it is never emitted here. Returns a plain-text
-    block; the Generator wraps it into its prompt.
-    """
-    if report is None or report.first_round:
-        return "Generation boundary: (no history — first round, all open)."
-    exhausted = []
-    for fam in report.families:
-        if fam.consecutive_no_improve >= _BOUNDARY_NO_IMPROVE:
-            exhausted.append(
-                f"  {fam.code_region} :: {', '.join(fam.mechanisms or ['?'])} "
-                f"(no improvement for {fam.consecutive_no_improve} attempts)"
-            )
-    if not exhausted:
-        return "Generation boundary: (no exhausted regions — all directions open)."
-    return (
-        "Generation boundary — EXHAUSTED families (do not produce variants):\n"
-        + "\n".join(exhausted)
-    )
-
-
-# Threshold for the generation boundary. Higher than the stall threshold (4)
-# used for the old submit gate: as a steering signal a false positive is
-# costlier — it cuts a whole region from the generation space.
-_BOUNDARY_NO_IMPROVE = 5
 
 
 def _render_finding_line(fh: FindingExploreHealth) -> str:
@@ -195,43 +161,3 @@ def render_explore_for_state_header(report: ExploreReport | None) -> str:
     if report.challenge_required:
         lines.append("  challenge_required: true")
     return "\n".join(lines)
-
-
-def render_challenge_repair_message(report: ExploreReport) -> str:
-    """The protocol-correction text fed back when a submit under an active
-    challenge lacks a valid ``challenge_response``.
-
-    Lists exactly three legal paths so the Proposer is never stuck.
-    """
-    reasons = ", ".join(report.challenge_reasons) or "family/global stagnation"
-    return (
-        "Protocol correction required (challenge_response_required). "
-        f"Explore health shows active stagnation ({reasons}). You may: "
-        "(1) reframe_research to a different mechanism family, "
-        "(2) abandon_direction if no direction clears the bar, or "
-        "(3) submit_proposals only with a challenge_response object that names "
-        "triggered_policy, stalled_family, what_was_exhausted, "
-        "null_hypothesis, why_this_is_not_same_family_variant, "
-        "why_worth_one_more_experiment, and real evidence_refs you examined "
-        "this round. Return exactly one JSON action object."
-    )
-
-
-def has_challenge_signal(report: ExploreReport | None) -> bool:
-    """Convenience: True if any active challenge-severity signal exists."""
-    if report is None:
-        return False
-    if report.challenge_required:
-        return True
-    for fam in report.families:
-        if any(
-            s.active and s.severity == SEVERITY_CHALLENGE
-            for s in fam.policy_signals
-        ):
-            return True
-    if report.global_health and any(
-        s.active and s.severity == SEVERITY_CHALLENGE
-        for s in report.global_health.policy_signals
-    ):
-        return True
-    return False

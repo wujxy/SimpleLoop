@@ -20,7 +20,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .model import ChatModel
-from .research_tools import ResearchTools
 from ..container.runtime import ApptainerRuntime
 from ..explore.models import ExploreReport
 from ..explore.render import render_explore_for_state_header
@@ -273,20 +272,6 @@ class ResearchAgent:
         return None
 
     # ---- shared tool loop ----
-
-    def _make_tools(self, *, source, repo, history_dir, scratch,
-                    memory_service, current_round) -> ResearchTools:
-        return ResearchTools(
-            runtime=self.runtime,
-            source=source,
-            repo=repo,
-            history_dir=history_dir,
-            scratch=scratch,
-            memory_service=memory_service,
-            command_timeout_seconds=self.command_timeout_seconds,
-            command_output_cap_chars=self.command_output_cap_chars,
-            current_round=current_round,
-        )
 
     def _step(
         self, state: WorkingState, messages: list, system_prompt: str,

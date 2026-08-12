@@ -129,7 +129,7 @@ class ResearchCommandRunner:
         runtime,
         workspace: Path,
         repo: Path,
-        history_dir: Path,
+        history_dir: Path | None,
         scratch: Path,
         timeout_seconds: int,
         output_cap_chars: int,
@@ -137,7 +137,7 @@ class ResearchCommandRunner:
         self.runtime = runtime
         self.workspace = Path(workspace)
         self.repo = Path(repo)
-        self.history_dir = Path(history_dir)
+        self.history_dir = Path(history_dir) if history_dir is not None else None
         self.scratch = Path(scratch)
         self.timeout_seconds = timeout_seconds
         self.output_cap_chars = output_cap_chars
@@ -298,7 +298,7 @@ class ResearchTools:
         runtime,
         workspace: Path,
         repo: Path,
-        history_dir: Path,
+        history_dir: Path | None,
         scratch: Path,
         memory_service,
         command_timeout_seconds: int,

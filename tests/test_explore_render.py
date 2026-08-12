@@ -1,10 +1,9 @@
-"""Tests for simpleloop.explore.render — startup/state-header/repair text."""
+"""Tests for simpleloop.explore.render — startup/state-header text."""
 from __future__ import annotations
 
 from simpleloop.explore.monitor import analyze_explore_health
 from simpleloop.explore.models import PolicySignal, SEVERITY_CHALLENGE
 from simpleloop.explore.render import (
-    render_challenge_repair_message,
     render_explore_for_state_header,
     render_explore_for_startup,
 )
@@ -90,23 +89,6 @@ def test_state_header_empty_when_nothing_active():
     r = ExploreReport(first_round=False, analysis_eligible=True)
     assert render_explore_for_state_header(r) == ""
     assert render_explore_for_state_header(None) == ""
-
-
-def test_repair_message_lists_three_legal_paths():
-    r = _stall_report()
-    msg = render_challenge_repair_message(r)
-    assert "challenge_response_required" in msg
-    assert "reframe_research" in msg
-    assert "abandon_direction" in msg
-    assert "submit_proposals" in msg
-    assert "exactly one JSON action object" in msg
-
-
-def test_repair_message_includes_challenge_reasons():
-    r = _stall_report()
-    msg = render_challenge_repair_message(r)
-    # The family_stall reason should appear somewhere in the message.
-    assert "family_stall" in msg
 
 
 def test_render_handles_manual_report_with_signal_only():

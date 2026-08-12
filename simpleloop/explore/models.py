@@ -28,7 +28,7 @@ KIND_REGRESSION = "regression"
 KIND_UNCLASSIFIED = "unclassified"
 
 # Policy signal severities. ``challenge`` severity feeds ``challenge_required``
-# and forces a ``challenge_response`` on submit; ``watch``/``info`` are nudges.
+# (informational only — does not gate submit); ``watch``/``info`` are nudges.
 SEVERITY_INFO = "info"
 SEVERITY_WATCH = "watch"
 SEVERITY_CHALLENGE = "challenge"
@@ -210,8 +210,8 @@ class ExploreReport:
     missing, ``analysis_eligible`` is False: fact counts that do not need the
     objective are still produced, but no classification-derived counts and no
     policy signals. ``challenge_required`` is True iff any family/global signal
-    of ``challenge`` severity is active — per-finding signals never escalate to
-    a forced challenge.
+    of ``challenge`` severity is active — per-finding signals never set it. The
+    flag is informational context for the agent; it does not gate submit.
     """
 
     first_round: bool

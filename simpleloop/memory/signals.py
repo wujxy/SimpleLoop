@@ -3,8 +3,9 @@
 The real implementation now lives in :mod:`simpleloop.explore`. This module
 keeps the legacy ``compute_deliberation_signals`` *dict shape* alive so that
 older callers and ``tests/test_deliberation_signals.py`` keep working without a
-rewrite. New code should call ``MemoryService.analyze_explore(...)`` /
-``simpleloop.explore.analyze_explore_health(...)`` and consume the structured
+rewrite. New code should call
+``simpleloop.explore.analyze_explore_from_schema(...)`` (or the underlying
+``analyze_explore_health(...)``) and consume the structured
 :class:`~simpleloop.explore.ExploreReport` instead.
 
 Why a wrapper rather than ``ExploreReport.to_legacy_signals()``: the legacy

@@ -332,6 +332,43 @@ def test_research_argv_is_contained_offline_with_writable_workspace(
     assert argv[argv.index("--cwd") + 1] == "/workspace"
 
 
+def test_research_argv_omits_history_mounts_when_history_is_none(
+    tmp_path: Path,
+):
+    """The history-blind Generator passes history=None so /history.jsonl and
+    /rounds never enter its container — the boundary is the mount itself, not a
+    prompt instruction. Files may exist on disk; None still skips the binds."""
+    base = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
+    runtime = ApptainerRuntime(
+        base.image, [tmp_path], base.run_dir,
+        executable=base.executable,
+    )
+    workspace = tmp_path / "workspace"
+    repo = tmp_path / "repo-view"
+    scratch = tmp_path / "scratch"
+    for path in (workspace, repo, scratch):
+        path.mkdir()
+    # History files exist on disk — None must still suppress the binds.
+    (runtime.run_dir / "history.jsonl").write_text("{}\n", encoding="utf-8")
+    (runtime.run_dir / "rounds").mkdir()
+
+    argv = runtime.research_exec_argv(
+        ["bash", "-lc", "true"],
+        workspace=workspace,
+        repo=repo,
+        history=None,
+        scratch=scratch,
+        cwd="workspace",
+    )
+
+    assert not any(":/history.jsonl:ro" in a for a in argv)
+    assert not any(":/rounds:ro" in a for a in argv)
+    # The core research mounts are unaffected.
+    assert f"{workspace.resolve()}:/workspace:rw" in argv
+    assert f"{repo.resolve()}:/repo:ro" in argv
+    assert f"{scratch.resolve()}:/scratch:rw" in argv
+
+
 def test_research_argv_accepts_only_workspace_or_scratch_cwd(tmp_path: Path):
     runtime = _make_runtime(tmp_path)
     with pytest.raises(ValueError, match="workspace.*scratch"):
