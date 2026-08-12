@@ -21,6 +21,11 @@ Minimal schema:
   loop.scientist_steps: int          (optional, default 200; Scientist step budget per lane — one agent doing what
                                       the old generator+cognitive pipeline split between two. Legacy gen_steps /
                                       cognitive_steps are accepted as aliases.)
+  loop.context: object               (optional; Scientist live-context compaction — emergency_threshold_tokens
+                                      [int|null, default 100000], window_pairs [int, default 3],
+                                      window_max_chars [int, default 24000]. When prompt tokens cross the
+                                      threshold, oldest (assistant, observation) pairs are shed. Set
+                                      emergency_threshold_tokens: null to disable.)
   roles.researcher: object           (optional; required by agent-driven runs, omitted in static mode)
   roles.executor: object             (required for candidate execution; api/model/base_url — auth via ANTHROPIC_AUTH_TOKEN env)
   runtime.image: path                (required; readable SIF image)
@@ -303,6 +308,10 @@ def _resolve(
         "candidates_per_round": int(candidates_per_round),
         "max_workers": int(max_workers),
         "scientist_steps": int(scientist_steps),
+        # Optional Scientist live-context compaction policy (emergency token
+        # threshold + window). Passed through raw; ContextPolicy.from_config
+        # validates. None = use ContextPolicy defaults (compaction ON at 100k).
+        "context": loop.get("context"),
         "runtime_image": runtime_image,
         "runtime_definition": runtime_definition,
         "runtime_binds": runtime_binds,

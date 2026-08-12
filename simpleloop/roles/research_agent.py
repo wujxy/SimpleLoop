@@ -172,6 +172,7 @@ def _build_telemetry(
         "tool_calls": state.counts.get("tool", 0),
         "source_reads": state.counts.get("source_read", 0),
         "protocol_repairs": state.protocol_repairs,
+        "compactions": state.counts.get("compact", 0),
         "outcome": outcome,
         "reason_kind": reason_kind,
         "enrichment_partial": enrichment_partial,

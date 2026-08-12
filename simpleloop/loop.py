@@ -496,6 +496,7 @@ def _build_context(
     if enable_researcher:
         researcher = roles["researcher"]
         from .roles.orchestrator import ProposerOrchestrator
+        from .roles.proposer import ContextPolicy
         proposer_agent = ProposerOrchestrator(
             model=model_mod.build_chat_model(researcher),
             runtime=runtime,
@@ -505,6 +506,7 @@ def _build_context(
                 "command_output_cap_chars"
             ],
             usage_observer=telemetry.record_usage,
+            context_policy=ContextPolicy.from_config(cfg.get("context")),
         )
     executor = roles["executor"]
     executor_agent = Agent(runtime=runtime, command="claude",

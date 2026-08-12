@@ -86,9 +86,24 @@ class ScientistSession:
             except (OSError, json.JSONDecodeError):
                 meta = {}
 
-        scientist_id = str(meta.get("scientist_id") or "").strip()
-        if not scientist_id:
-            scientist_id = _new_scientist_id()
+        loaded_id = str(meta.get("scientist_id") or "").strip()
+        scientist_id = loaded_id or _new_scientist_id()
+        # Persist a fresh scientist_id IMMEDIATELY — before any round runs — so
+        # a worker killed mid-first-round does not leave session.jsonl orphaned
+        # from its identity (the archive would otherwise load under a new UUID:
+        # the same lived trajectory with a different ID card).
+        if not loaded_id:
+            meta = {
+                "scientist_id": scientist_id,
+                "prompt_version": prompt_version,
+                "created_round": None,
+                "last_round": None,
+                "last_base_sha": None,
+            }
+            session_dir.joinpath("meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         trajectory: list[dict] = []
         if session_dir.joinpath("session.jsonl").exists():

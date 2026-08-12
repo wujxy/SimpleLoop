@@ -21,6 +21,7 @@ from pathlib import Path
 from ..container.runtime import ApptainerRuntime, MountMap
 from .model import ChatModel
 from .proposer import (
+    ContextPolicy,
     ProposerError,
     ProposerResult,
     SCIENTIST_PROMPT_VERSION,
@@ -64,6 +65,7 @@ class ProposerOrchestrator:
         command_timeout_seconds: int,
         command_output_cap_chars: int,
         usage_observer=None,
+        context_policy: ContextPolicy | None = None,
     ):
         self.model = model
         self.runtime = runtime
@@ -78,6 +80,7 @@ class ProposerOrchestrator:
             command_timeout_seconds=command_timeout_seconds,
             command_output_cap_chars=command_output_cap_chars,
             usage_observer=usage_observer,
+            context_policy=context_policy,
         )
 
     def run(

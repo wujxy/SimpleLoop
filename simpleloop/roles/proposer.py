@@ -116,6 +116,202 @@ _TAIL_TURNS = 8
 SCIENTIST_PROMPT_VERSION = "scientist-v1"
 
 
+# --- Live-context compaction (Option A: deterministic shedding) -----------
+#
+# Within one round the live ``messages`` list grows by two messages per step
+# (assistant reply + tool observation). On a source-reading-heavy task each
+# observation can be ~10 KB, so by ~step 60-80 the context window is full —
+# long before the 200-step budget. Compaction is the safety net: when the
+# context crosses a token threshold, shed the OLDEST (assistant, observation)
+# turn-pairs, keeping the framing seed + the most recent pairs verbatim.
+#
+# Design (ported from ../SimpleLoop scientist_context._cap_tail):
+#   - whole-pair accounting: an observation is never orphaned from the action
+#     that produced it (the resumed Scientist would stare at a result it can't
+#     remember wanting);
+#   - most-recent pair always survives, even when the cap is smaller than one
+#     pair (sentinel guard);
+#   - char + pair-count dual budget.
+#
+# This compacts ONLY the live ``messages`` sent to the model. The immutable
+# session.jsonl archive is appended to in full (every observation, every world
+# event) and is never mutated — the Scientist's complete lived history stays
+# auditable and is what tail_turns() reads on the next resume.
+
+@dataclass(frozen=True)
+class ContextPolicy:
+    """Scientist live-context compaction policy.
+
+    ``emergency_threshold_tokens`` is the trigger: when the most recent model
+    call's prompt-token count exceeds it, compact. Set to None to disable.
+    The window knobs bound what survives compaction (most-recent pairs, within
+    a char budget). Defaults are conservative — a normal 6-12 step round never
+    triggers; this only fires in the long-investigation tail.
+    """
+    emergency_threshold_tokens: int | None = 100_000
+    window_pairs: int = 3
+    window_max_chars: int = 24_000
+
+    @classmethod
+    def from_config(cls, raw: object) -> "ContextPolicy":
+        if raw is None:
+            return cls()
+        if not isinstance(raw, dict):
+            raise ValueError("loop.context: must be an object")
+        unknown = set(raw) - {
+            "emergency_threshold_tokens", "window_pairs", "window_max_chars",
+        }
+        if unknown:
+            raise ValueError(
+                f"loop.context: unknown key(s): {sorted(unknown)}")
+        policy = cls()
+        if "emergency_threshold_tokens" in raw:
+            value = raw["emergency_threshold_tokens"]
+            if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool)
+                    or value < 1):
+                raise ValueError(
+                    "loop.context.emergency_threshold_tokens: "
+                    "must be a positive integer or null")
+            policy = ContextPolicy(
+                emergency_threshold_tokens=value,
+                window_pairs=policy.window_pairs,
+                window_max_chars=policy.window_max_chars,
+            )
+        if "window_pairs" in raw:
+            value = raw["window_pairs"]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(
+                    "loop.context.window_pairs: must be a positive integer")
+            policy = ContextPolicy(
+                emergency_threshold_tokens=policy.emergency_threshold_tokens,
+                window_pairs=value,
+                window_max_chars=policy.window_max_chars,
+            )
+        if "window_max_chars" in raw:
+            value = raw["window_max_chars"]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(
+                    "loop.context.window_max_chars: must be a positive integer")
+            policy = ContextPolicy(
+                emergency_threshold_tokens=policy.emergency_threshold_tokens,
+                window_pairs=policy.window_pairs,
+                window_max_chars=value,
+            )
+        return policy
+
+
+def _prompt_tokens(usage: object) -> int | None:
+    """Extract the prompt-token count from a provider usage object (dict,
+    pydantic model, or None). OpenAI-compatible endpoints report
+    ``prompt_tokens``; some adapters use ``input_tokens``."""
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        for key in ("prompt_tokens", "input_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int):
+                return value
+        return None
+    if hasattr(usage, "model_dump"):
+        dumped = usage.model_dump()
+        return _prompt_tokens(dumped)
+    for attr in ("prompt_tokens", "input_tokens"):
+        value = getattr(usage, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """Char-based fallback (~4 chars/token for mixed code/prose) when the
+    provider reports no prompt-token count. Used only for the trigger then."""
+    return sum(len(m.get("content") or "") for m in messages) // 4
+
+
+def _cap_tail(
+    tail: list[dict], window_pairs: int, window_max_chars: int,
+) -> list[dict]:
+    """Keep the most recent whole (assistant, user) turn-units from ``tail``
+    until the cap bites, preserving chronological and within-pair order.
+
+    A turn-unit is an assistant message immediately followed by a user message
+    (a tool observation OR a protocol correction). The most-recent unit is
+    always retained: the cap checks are guarded by ``start`` still sitting on
+    the sentinel, so the first (most-recent) unit is always admitted —
+    guaranteeing the most-recent complete pair survives even when the cap is
+    smaller than a single pair. A trailing unpaired message is treated as a
+    singleton unit.
+    """
+    if not tail:
+        return tail
+    chars = 0
+    pairs_kept = 0
+    start = len(tail)  # sentinel: nothing retained yet
+    i = len(tail) - 1
+    while i >= 0:
+        cur = tail[i]
+        nxt = tail[i - 1] if i >= 1 else None
+        if (cur.get("role") == "user" and nxt is not None
+                and nxt.get("role") == "assistant"):
+            # a (assistant, user) pair straddling i-1, i
+            pair_chars = (len(cur.get("content") or "")
+                          + len(nxt.get("content") or ""))
+            if start < len(tail) and (
+                    pairs_kept >= window_pairs
+                    or chars + pair_chars > window_max_chars):
+                break
+            start = i - 1
+            chars += pair_chars
+            pairs_kept += 1
+            i -= 2
+        else:
+            single_chars = len(cur.get("content") or "")
+            if start < len(tail) and chars + single_chars > window_max_chars:
+                break
+            start = i
+            chars += single_chars
+            i -= 1
+    return tail[start:]
+
+
+def _compact_live_messages(
+    messages: list[dict], *, window_pairs: int, window_max_chars: int,
+) -> tuple[list[dict], dict]:
+    """Compact the live ``messages`` list: preserve the framing preamble
+    (everything before the first assistant message — cold-start seed, world
+    event) and cap the (assistant, user) turn-pair region to the most recent
+    pairs within budget.
+
+    Returns (new_messages, info). ``info["compacted"]`` is False when there
+    was nothing to shed (too few messages, or the result would not shrink).
+    Never mutates the input; the caller assigns the result back.
+    """
+    if len(messages) <= 2:
+        return messages, {"compacted": False}
+    first_assistant = None
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant":
+            first_assistant = i
+            break
+    if first_assistant is None or first_assistant >= len(messages) - 1:
+        return messages, {"compacted": False}
+    preamble = messages[:first_assistant]
+    tail = messages[first_assistant:]
+    kept = _cap_tail(tail, window_pairs, window_max_chars)
+    new_messages = list(preamble) + list(kept)
+    if len(new_messages) >= len(messages):
+        return messages, {"compacted": False}
+    dropped = len(messages) - len(new_messages)
+    return new_messages, {
+        "compacted": True,
+        "dropped": dropped,
+        "kept_pairs": len(kept) // 2,
+        "before_msgs": len(messages),
+        "after_msgs": len(new_messages),
+    }
+
+
 # --- Prompt scaffolding ----------------------------------------------------
 
 _TOOL_BLOCK = (
@@ -177,10 +373,11 @@ _RUNTIME_BOUNDARIES = """Runtime boundaries:
 
 _COLD_START = (
     "You are beginning this research. The goal, the gates, and the current "
-    "accepted revision are in your standing context above. Investigate the "
-    "problem and the code until you have your own understanding, then submit "
-    "the directions you believe are worth an experiment. Take the time your "
-    "judgment needs — there is no phase you must rush through."
+    "accepted revision are in your standing context above. Begin working on "
+    "the research problem. Use the laboratory as your judgment requires — "
+    "investigate, probe, and form your own understanding. When you have "
+    "directions you believe should be tried, submit them. There is no phase "
+    "you must rush through; take the time your judgment needs."
 )
 
 _BUDGET_NUDGE = (
@@ -580,6 +777,7 @@ class ScientistAgent(ResearchAgent):
         command_timeout_seconds: int,
         command_output_cap_chars: int,
         usage_observer=None,
+        context_policy: ContextPolicy | None = None,
     ):
         super().__init__(
             model=model, runtime=runtime,
@@ -589,6 +787,42 @@ class ScientistAgent(ResearchAgent):
             usage_observer=usage_observer,
         )
         self._proposal_slots = 1
+        self._context_policy = context_policy or ContextPolicy()
+
+    def _maybe_compact(
+        self, messages: list[dict], usages: list, state: WorkingState,
+    ) -> None:
+        """Shed the oldest turn-pairs from the live ``messages`` when the
+        context crosses the token threshold. Mutates ``messages`` in place
+        (the caller's reference stays valid); the session.jsonl archive is
+        untouched. Uses the most recent model call's prompt-token count, with a
+        char-based fallback when the provider reports none."""
+        policy = self._context_policy
+        threshold = policy.emergency_threshold_tokens
+        if threshold is None:
+            return
+        usage = usages[-1] if usages else None
+        tokens = _prompt_tokens(usage)
+        if tokens is None:
+            tokens = _estimate_tokens(messages)
+        if tokens <= threshold:
+            return
+        new_messages, info = _compact_live_messages(
+            messages,
+            window_pairs=policy.window_pairs,
+            window_max_chars=policy.window_max_chars,
+        )
+        if not info["compacted"]:
+            return
+        messages[:] = new_messages
+        _bump(state, "compact")
+        print(
+            f"[scientist] emergency compact at ~{tokens} tokens: "
+            f"{info['before_msgs']}→{info['after_msgs']} msgs, "
+            f"kept {info['kept_pairs']} turn-pair(s) "
+            f"(window={policy.window_pairs}/{policy.window_max_chars}c)",
+            flush=True,
+        )
 
     def _parse_action(self, text: str) -> dict:
         return parse_response(text, self._proposal_slots)
@@ -645,6 +879,14 @@ class ScientistAgent(ResearchAgent):
                     f"{base_sha[:10]}."
                 )
             messages.append({"role": "user", "content": world_event})
+            # Archive the world event into the Scientist's lived history — it is
+            # something this Scientist was told (observed), so the immutable
+            # archive must record it. tail_turns() still excludes it on a later
+            # resume (it is an orphan user, superseded by the notebook + the
+            # next world event); archiving and re-injection are separate.
+            session.append_message(
+                "user", world_event, round_id=current_round,
+            )
             print(
                 f"[scientist] resume — scientist_id={session.scientist_id[:8]} "
                 f"tail={len(messages) // 2} turn-blocks",
@@ -679,6 +921,11 @@ class ScientistAgent(ResearchAgent):
                 command_output_cap_chars=self.command_output_cap_chars,
                 current_round=current_round,
             )
+            # If the round STARTS already over threshold (a bloated resume tail
+            # of large prior-round observations — the cross-round stacking case),
+            # shed before the first model call so we never open a round already
+            # over the window. No usage yet → char-based estimate drives it.
+            self._maybe_compact(messages, [], state)
             for _step_num in range(steps_budget):
                 step = _step_num + 1
                 print(f"[scientist step {step}/{steps_budget}] thinking",
@@ -698,7 +945,11 @@ class ScientistAgent(ResearchAgent):
                 if name == "submit_proposals":
                     proposals = action["proposals"]
                     _bump(state, name)
-                    # Persist this final turn before checkpoint/suspend.
+                    # The terminal submit reply enters BOTH the live context
+                    # and the archive, so the suspension checkpoint sees what
+                    # the Scientist just decided (it must recall its own
+                    # submitted directions when writing the continuation note).
+                    messages.append({"role": "assistant", "content": reply_text})
                     session.append_message("assistant", reply_text,
                                            round_id=current_round)
                     print(
@@ -749,6 +1000,12 @@ class ScientistAgent(ResearchAgent):
                     f"{name} ok={observation.get('ok')}",
                     flush=True,
                 )
+                # The live context grows by one (assistant, observation) pair
+                # per step. On source-heavy tasks this fills the window long
+                # before the step budget — shed oldest pairs when it does. The
+                # archive was just written in full above, so compacting the live
+                # list loses nothing from the Scientist's lived record.
+                self._maybe_compact(messages, usages, state)
 
             # Budget exhausted without a submit.
             abstain_reason = (

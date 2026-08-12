@@ -39,6 +39,7 @@ from .memory.models import (
 )
 from .roles import model as model_mod
 from .roles.orchestrator import ProposerOrchestrator
+from .roles.proposer import ContextPolicy
 
 
 def stamp() -> str:
@@ -134,6 +135,7 @@ def build_lane_deps(
         command_timeout_seconds=researcher.get("command_timeout_seconds", 120),
         command_output_cap_chars=researcher.get("command_output_cap_chars", 12000),
         usage_observer=usage_observer,
+        context_policy=ContextPolicy.from_config(cfg.get("context")),
     )
     workspace = Workspace(
         run_dir=run_dir,
