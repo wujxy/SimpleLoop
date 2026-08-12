@@ -83,7 +83,7 @@ class RunContext:
     workspace: Workspace | None = None
     store: Store | None = None
     telemetry: RunTelemetry | None = None
-    proposer_agent: proposer_mod.ProposerAgent | None = None
+    proposer_agent: "ProposerOrchestrator | None" = None
     executor_agent: Agent | None = None
     prompt_dir: Path | None = None
     gate_lines: str = ""

@@ -793,7 +793,6 @@ def _run_loop_integration(
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
-    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FakeProposer)
     # In the branch-then-deepen architecture, the loop uses ProposerOrchestrator.
     from simpleloop.roles import orchestrator as orch_mod
     monkeypatch.setattr(orch_mod, "ProposerOrchestrator", FakeProposer)
@@ -984,7 +983,6 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
-    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FailingProposer)
     from simpleloop.roles import orchestrator as orch_mod
     monkeypatch.setattr(orch_mod, "ProposerOrchestrator", FailingProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)

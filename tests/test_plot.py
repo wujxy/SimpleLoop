@@ -36,7 +36,6 @@ class _FakeProposer:
 
 def _patch_researcher(monkeypatch) -> None:
     monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", _FakeModel)
-    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", _FakeProposer)
 
 # The six detail images are drawn by the offline script, not the package.
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plot_details.py"

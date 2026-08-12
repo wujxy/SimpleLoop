@@ -55,10 +55,8 @@ class ProposerLaneSpec:
     workspace_path: str = ""
     result_dir: str = ""
     prompt_dir: str = ""
-    assigned_ops: list[str] = field(default_factory=list)
-    select_quota: int = 1
-    gen_steps: int = 216
-    cognitive_steps: int = 148
+    proposal_slots: int = 1
+    scientist_steps: int = 200
     attempt: int = 1
 
     def to_dict(self) -> dict:
@@ -70,10 +68,8 @@ class ProposerLaneSpec:
             "workspace_path": self.workspace_path,
             "result_dir": self.result_dir,
             "prompt_dir": self.prompt_dir,
-            "assigned_ops": list(self.assigned_ops),
-            "select_quota": self.select_quota,
-            "gen_steps": self.gen_steps,
-            "cognitive_steps": self.cognitive_steps,
+            "proposal_slots": self.proposal_slots,
+            "scientist_steps": self.scientist_steps,
             "attempt": self.attempt,
         }
 
@@ -92,10 +88,8 @@ class ProposerLaneSpec:
             workspace_path=str(data.get("workspace_path") or ""),
             result_dir=str(data.get("result_dir") or ""),
             prompt_dir=str(data.get("prompt_dir") or ""),
-            assigned_ops=list(data.get("assigned_ops") or []),
-            select_quota=int(data.get("select_quota") or 1),
-            gen_steps=int(data.get("gen_steps") or 216),
-            cognitive_steps=int(data.get("cognitive_steps") or 148),
+            proposal_slots=int(data.get("proposal_slots") or 1),
+            scientist_steps=int(data.get("scientist_steps") or 200),
             attempt=int(data.get("attempt") or 1),
         )
 
@@ -189,11 +183,9 @@ def proposal_from_dict(d: dict):
 
 
 def _lane_result_to_dict(lr) -> dict:
-    proposals = []
-    if lr.proposals:
-        proposals = [_proposal_to_dict(p) for p in lr.proposals]
-    elif lr.proposal is not None:
-        proposals = [_proposal_to_dict(lr.proposal)]
+    proposals = (
+        [_proposal_to_dict(p) for p in lr.proposals] if lr.proposals else []
+    )
     return {
         "status": "COMPLETED",
         "lane_id": lr.lane_id,
@@ -201,7 +193,6 @@ def _lane_result_to_dict(lr) -> dict:
         "proposals": proposals,
         "reason_kind": lr.reason_kind,
         "explanation": lr.explanation,
-        "enrichment_partial": bool(lr.enrichment_partial),
         "abstain_reason": lr.abstain_reason,
         "trace": lr.trace or {},
         "telemetry": lr.deliberation_telemetry or {},
@@ -230,12 +221,11 @@ def run_lane(deps: ProposerLaneDeps, spec: ProposerLaneSpec) -> dict:
     workspace = Path(spec.workspace_path)
     lane_result = deps.orchestrator.run_lane_episode(
         lane_id=spec.lane_id,
-        assigned_ops=spec.assigned_ops,
         workspace=workspace,
         base_sha=spec.base_sha,
         goal=cfg["goal"],
         editable=cfg["editable_paths"],
-        # frozen is now mount-enforced (EROFS outside editable); vestigial list
+        # frozen is mount-enforced (EROFS outside editable); vestigial list
         # kept for call-site compatibility.
         frozen=[],
         world_mount=world_mount_map(cfg),
@@ -246,9 +236,8 @@ def run_lane(deps: ProposerLaneDeps, spec: ProposerLaneSpec) -> dict:
         gate_block=deps.gate_lines,
         prompt_dir=deps.prompt_dir,
         hints=cfg.get("hints") or None,
-        select_quota=spec.select_quota,
-        gen_steps=spec.gen_steps,
-        cognitive_steps=spec.cognitive_steps,
+        proposal_slots=spec.proposal_slots,
+        scientist_steps=spec.scientist_steps,
     )
     return _lane_result_to_dict(lane_result)
 

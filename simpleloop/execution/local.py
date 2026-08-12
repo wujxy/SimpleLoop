@@ -45,8 +45,7 @@ class LocalBackend(ExecutionBackend):
                 candidates_per_round=cfg.get("candidates_per_round", 1),
                 gate_block=ctx.gate_lines, prompt_dir=ctx.prompt_dir,
                 hints=cfg.get("hints") or None,
-                gen_steps=cfg.get("gen_steps", 216),
-                cognitive_steps=cfg.get("cognitive_steps", 148),
+                scientist_steps=cfg.get("scientist_steps", 200),
             )
         finally:
             ctx.workspace.remove_lane_workspace(0)

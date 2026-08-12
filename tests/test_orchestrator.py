@@ -1,590 +1,150 @@
-"""Tests for the single generator-cognitive partner-lane orchestrator.
+"""Tests for the Scientist orchestrator adapter.
 
-The old pool-filter architecture (dedup → frozen prefilter → cap → list-wise
-selection) is gone. Each lane binds one Generator to one Cognitive element for
-its full lifetime. These tests verify:
-  - the scheduler (5-of-9 ops, mode selection)
-  - one lane generates the full hypothesis batch and selects the round batch
-  - all submitted proposals are collected (no cap, no dedup)
-  - the feedback_generator → regenerate loop (≤3 budget)
-  - the history-free context is what the generator receives
-  - the lane trace structure
+The orchestrator owns NO research logic — it loads/resumes the Scientist
+session, runs one round, persists the session, and maps the outcome to
+LaneResult / ProposerResult. These tests monkeypatch ScientistAgent.research so
+no model or container is needed; they verify the session lifecycle, the
+result-shape mapping (the interface firewall loop.py depends on), and that the
+Scientist persists as the same persona across rounds.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
-
-from simpleloop.memory import MemoryService
-from simpleloop.container.runtime import MountMap
-from simpleloop.roles.orchestrator import (
-    ProposerOrchestrator, _Mode,
-    _sample_generative_ops, _SCHEDULED_OP_COUNT,
-    _MAX_REGENERATIONS, LaneState, LaneResult,
-)
-from simpleloop.roles.hypothesis import HypothesisCard
-from simpleloop.roles.model import ModelReply
-from simpleloop.roles import proposer as proposer_mod
-from simpleloop.roles import generator as generator_mod
+from simpleloop.memory.models import NewFindingTarget, ResearchProposal
+from simpleloop.roles.orchestrator import LaneResult, ProposerOrchestrator
+from simpleloop.roles.proposer import ScientistRound
 
 
-_METRICS_SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True}}
-
-
-# --- helpers ---------------------------------------------------------------
-
-def _card(op="G6", region="src/foo.cc", mech="getter", interv="cache"):
-    return HypothesisCard(
-        generative_op=op, region=region, mechanism=mech,
-        intervention_family=interv, why_plausible="w",
-        critical_unknown="u",
-    )
-
-
-def _card_json(op="G6", region="src/foo.cc", mech="getter", interv="cache"):
-    return {
-        "generative_op": op, "region": region, "mechanism": mech,
-        "intervention_family": interv, "why_plausible": "w",
-        "critical_unknown": "u", "slot": "guided",
-        "facts_read": ["function foo() exists in src/foo.cc"],
-    }
-
-
-def _gen_reply(cards):
-    return ModelReply(json.dumps({"hypotheses": [_card_json() for _ in cards]}))
-
-
-def _submit_action():
-    return {
-        "action": "submit_proposals",
-        "proposals": [{
-            "instruction": "Cache invariant LPMT constants",
-            "research_target": {
-                "mode": "new",
-                "question": "Can caching LPMT constants speed up FCN?",
-                "mechanisms": ["cache-locality"],
-                "code_regions": ["src/foo.cc"],
-            },
-        }],
-    }
-
-
-def _block_action():
-    return {
-        "action": "block",
-        "reason_kind": "false_claim",
-        "explanation": "the claimed function is not present",
-        "evidence_refs": ["source:src/foo.cc"],
-    }
-
-
-def _feedback_action():
-    return {
-        "action": "feedback_generator",
-        "evidence_refs": ["experiment:r3c0"],
-        "observation": "r3c0 tried caching here and gained <1%",
-        "relation_to_seed": "same mechanism in the same region",
-        "implication": "the cache appears already effective here",
-    }
-
-
-def _run_args(tmp_path, candidates_per_round=2):
-    repo = tmp_path / "repo"
-    run_dir = tmp_path / "run"
-    repo.mkdir(exist_ok=True)
-    run_dir.mkdir(exist_ok=True)
-    ws = tmp_path / "workspace-0"
-    (ws / "src").mkdir(parents=True, exist_ok=True)
-    (ws / "src" / "foo.cc").write_text("// target\n", encoding="utf-8")
-    return {"goal": "make it faster", "editable": ["src/**"],
-            "frozen": ["tests/**"], "memory_service": MemoryService(
-                run_dir=run_dir, metrics_schema=_METRICS_SCHEMA),
-            "world_mount": MountMap(),
-            "base_sha": "abc", "workspaces": [ws], "repo_path": repo,
-            "run_dir": run_dir, "current_round": 0,
-            "candidates_per_round": candidates_per_round,
-            "gate_block": "- gate: pass", "prompt_dir": None}
-
-
-def _orchestrator(model, **kw):
+def _make_orch() -> ProposerOrchestrator:
+    # model/runtime are never used once research is monkeypatched.
     return ProposerOrchestrator(
-        model=model, runtime=object(), timeout_seconds=60,
-        command_timeout_seconds=5,
-        command_output_cap_chars=1000,
+        model=object(), runtime=object(), timeout_seconds=60,
+        command_timeout_seconds=10, command_output_cap_chars=1000,
     )
 
 
-# --- scheduler -------------------------------------------------------------
-
-class TestGenerativeOpScheduler:
-    def test_sample_returns_five_distinct_valid_ops(self):
-        ops = _sample_generative_ops()
-        assert len(ops) == _SCHEDULED_OP_COUNT == 5
-        assert len(set(ops)) == 5
-        valid = {"G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"}
-        assert set(ops) <= valid
-
-    def test_sample_varies_across_calls(self):
-        draws = {_sample_generative_ops() for _ in range(20)}
-        assert len(draws) > 1
-
-
-def test_lane_quota_scheduler_is_removed():
-    from simpleloop.roles import orchestrator as orchestrator_mod
-
-    assert not hasattr(orchestrator_mod, "lane_quotas")
-
-
-# --- 1:1 lane architecture -------------------------------------------------
-
-class TestPartnerLanes:
-    def test_single_lane_generates_ten_and_selects_round_quota(
-            self, tmp_path, monkeypatch):
-        """One lane owns all ten seeds and selects the round's four outputs."""
-        gen_calls = []
-
-        class BatchGenerator:
-            def run(self, **kwargs):
-                gen_calls.append(kwargs)
-                return generator_mod.GenerationResult(
-                    cards=[_card(mech=f"m{i}") for i in range(10)])
-
-        args = _run_args(tmp_path, candidates_per_round=4)
-        orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = BatchGenerator()
-        branch_cards = []
-        quotas = []
-
-        def fake_research_batch(*, hypotheses, select_quota, **_kwargs):
-            branch_cards.extend(hypotheses)
-            quotas.append(select_quota)
-            return proposer_mod.BranchResult(
-                hypothesis=hypotheses[0],
-                proposals=tuple(
-                    SimpleNamespace(instruction="ok")
-                    for _ in range(select_quota)
-                ),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 1},
-            )
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-                            fake_research_batch)
-        result = orch.run(**args)
-
-        assert len(gen_calls) == 1
-        assert gen_calls[0]["hypotheses_per_lane"] == 10
-        assert len(branch_cards) == 10
-        assert quotas == [4]
-        assert len(result.proposals) == 4
-        assert result.deliberation_telemetry["n_proposals"] == 4
-
-    def test_no_dedup_duplicate_signatures_both_run(
-            self, tmp_path, monkeypatch):
-        """The lane receives its whole batch before the cognitive audit."""
-        cards = [_card(mech="same"), _card(mech="same")]
-
-        class BatchGenerator:
-            def run(self, **kwargs):
-                return generator_mod.GenerationResult(cards=cards)
-
-        args = _run_args(tmp_path, candidates_per_round=4)
-        orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = BatchGenerator()
-        seen = []
-
-        def fake_research_batch(*, hypotheses, **_kwargs):
-            seen.extend(hypotheses)
-            return proposer_mod.BranchResult(
-                hypothesis=hypotheses[0],
-                proposals=tuple(
-                    SimpleNamespace(instruction="ok") for _ in hypotheses
-                ),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 1},
-            )
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-                            fake_research_batch)
-        result = orch.run(**args)
-
-        assert len(seen) == 2
-        assert len(result.proposals) == 2
-
-    def test_no_frozen_prefilter_frozen_region_still_runs(
-            self, tmp_path, monkeypatch):
-        """A card whose region is under a frozen path still gets a branch —
-        the cognitive element's Sieve handles frozen blocks, not the
-        orchestrator."""
-        class FrozenRegionGenerator:
-            def run(self, **kwargs):
-                return generator_mod.GenerationResult(
-                    cards=[_card(region="tests/ref.cc")])
-
-        args = _run_args(tmp_path, candidates_per_round=1)
-        args["frozen"] = ["tests/**"]
-        orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = FrozenRegionGenerator()
-        seen = []
-
-        def fake_research_batch(*, hypotheses, **_kwargs):
-            seen.extend(hypotheses)
-            return proposer_mod.BranchResult(
-                hypothesis=hypotheses[0],
-                proposals=tuple(
-                    SimpleNamespace(instruction="ok") for _ in hypotheses
-                ),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 1},
-            )
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-                            fake_research_batch)
-        result = orch.run(**args)
-
-        assert len(seen) == 1                    # not prefilered
-        assert len(result.proposals) == 1
-
-    def test_single_lane_submission_is_collected(
-            self, tmp_path, monkeypatch):
-        """The retained lane boundary records one batch submission."""
-        cards = [_card(mech="live"), _card(mech="doomed")]
-
-        class TwoCardGenerator:
-            def run(self, **kwargs):
-                return generator_mod.GenerationResult(cards=cards)
-
-        args = _run_args(tmp_path, candidates_per_round=4)
-        orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = TwoCardGenerator()
-
-        def fake_research_batch(*, hypotheses, **_kwargs):
-            h = hypotheses[0]
-            return proposer_mod.BranchResult(
-                hypothesis=h,
-                proposals=(SimpleNamespace(instruction="ok"),),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 1},
-            )
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-                            fake_research_batch)
-        result = orch.run(**args)
-
-        assert len(result.proposals) == 1
-        assert not result.abstained
-        lanes = result.trace["lanes"]
-        assert len(lanes) == 1
-        assert lanes[0]["outcome"] == "submit"
-
-    def test_all_lanes_block_abstains(self, tmp_path, monkeypatch):
-        class BlockingGenerator:
-            def run(self, **kwargs):
-                return generator_mod.GenerationResult(cards=[_card()])
-
-        args = _run_args(tmp_path, candidates_per_round=2)
-        orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = BlockingGenerator()
-
-        def fake_research_batch(*, hypotheses, **_kwargs):
-            h = hypotheses[0]
-            return proposer_mod.BranchResult(
-                hypothesis=h, outcome="block",
-                reason_kind="false_claim", explanation="no",
-                block_evidence_refs=("source:src/foo.cc",),
-                deliberation_telemetry={"tool_calls": 1},
-            )
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-                            fake_research_batch)
-        result = orch.run(**args)
-
-        assert result.abstained
-        assert result.proposals == []
-
-    def test_generator_receives_history_free_context(
-            self, tmp_path, monkeypatch):
-        """The generator's context must NOT contain history/dashboard/explore —
-        only objective/gates/paths/base_sha."""
-        received_context = []
-
-        class CapturingGenerator:
-            def run(self, **kwargs):
-                received_context.append(kwargs["context"])
-                return generator_mod.GenerationResult(cards=[_card()])
-
-        args = _run_args(tmp_path, candidates_per_round=1)
-        orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = CapturingGenerator()
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-            lambda *, hypotheses, **_: proposer_mod.BranchResult(
-                hypothesis=hypotheses[0],
-                proposals=(SimpleNamespace(instruction="ok"),),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 0},
-            ))
-        orch.run(**args)
-
-        assert len(received_context) == 1
-        ctx = received_context[0]
-        assert "make it faster" in ctx              # objective
-        assert "abc" in ctx                          # base_sha
-        assert "src/**" in ctx                       # editable (writable world)
-        # Frozen paths are no longer listed — the mount enforces them (EROFS).
-        assert "frozen" not in ctx.lower()
-        assert "read-only" in ctx.lower() or ":ro" in ctx
-        # No history/dashboard/explore/frontier in the generation context.
-        assert "dashboard" not in ctx.lower()
-        assert "frontier" not in ctx.lower()
-        assert "exhausted" not in ctx.lower()
-
-    def test_lane_trace_structure(self, tmp_path, monkeypatch):
-        class SimpleGenerator:
-            def run(self, **kwargs):
-                return generator_mod.GenerationResult(
-                    cards=[_card(mech="m", region="src/foo.cc")])
-
-        args = _run_args(tmp_path, candidates_per_round=4)
-        orch = _orchestrator(_gen_reply([_card()]))
-        orch.generator = SimpleGenerator()
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-            lambda *, hypotheses, **_: proposer_mod.BranchResult(
-                hypothesis=hypotheses[0],
-                proposals=(SimpleNamespace(instruction="ok"),),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 2},
-            ))
-        result = orch.run(**args)
-
-        assert "lanes" in result.trace
-        assert len(result.trace["lanes"]) == 1
-        for lane in result.trace["lanes"]:
-            assert "lane_id" in lane
-            assert "assigned_ops" in lane
-            assert "all_cards" in lane
-            assert "sig" in lane
-            assert "outcome" in lane
-            assert "tool_calls" in lane
-            assert len(lane["assigned_ops"]) == 5
-
-
-# --- feedback_generator → regenerate loop -----------------------------------
-
-class TestFeedbackLoop:
-    def test_feedback_triggers_regeneration(self, tmp_path, monkeypatch):
-        """When the cognitive element issues feedback_generator, the callback
-        invokes generator.regenerate() and the new hypothesis is used."""
-        regen_calls = []
-
-        class RegeneratingGenerator:
-            def __init__(self):
-                self.first = True
-            def run(self, **kwargs):
-                self.first = False
-                return generator_mod.GenerationResult(
-                    cards=[_card(mech="initial")])
-            def regenerate(self, *, context, feedback, transcript,
-                           source_path=None, repo_path=None, run_dir=None,
-                           world_mount=None,
-                           prompt_dir=None, assigned_ops=None, max_steps=None,
-                           hypotheses_per_lane=1, ideas_per_lens=1):
-                regen_calls.append(feedback)
-                return generator_mod.GenerationResult(
-                    cards=[_card(mech="regenerated")])
-
-        args = _run_args(tmp_path, candidates_per_round=1)
-        orch = _orchestrator(_gen_reply([_card()]))
-        gen = RegeneratingGenerator()
-        orch.generator = gen
-
-        branch_calls = []
-
-        def fake_research_batch(*, hypotheses, generator_regenerate, **_kwargs):
-            h = hypotheses[0]
-            branch_calls.append(h)
-            if h.mechanism == "initial":
-                # Cognitive finds history evidence → feed back to generator.
-                new_card = generator_regenerate(_feedback_action())
-                # The callback returns the new hypothesis; the batch would
-                # continue with it. For this test we simulate the batch
-                # re-auditing the new card and submitting.
-                return proposer_mod.BranchResult(
-                    hypothesis=new_card,
-                    proposals=(SimpleNamespace(instruction="ok"),),
-                    proposal=SimpleNamespace(instruction="ok"),
-                    deliberation_telemetry={"tool_calls": 1},
-                )
-            return proposer_mod.BranchResult(
-                hypothesis=h,
-                proposals=(SimpleNamespace(instruction="ok"),),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 1},
-            )
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-                            fake_research_batch)
-        result = orch.run(**args)
-
-        assert len(regen_calls) == 1
-        assert regen_calls[0]["action"] == "feedback_generator"
-        assert len(result.proposals) == 1
-
-    def test_regeneration_budget_enforced(self, tmp_path, monkeypatch):
-        """After _MAX_REGENERATIONS regenerations, the callback raises."""
-        class RegeneratingGenerator:
-            def __init__(self):
-                self.n = 0
-            def run(self, **kwargs):
-                return generator_mod.GenerationResult(
-                    cards=[_card(mech="initial")])
-            def regenerate(self, *, context, feedback, transcript,
-                           source_path=None, repo_path=None, run_dir=None,
-                           world_mount=None,
-                           prompt_dir=None, assigned_ops=None, max_steps=None,
-                           hypotheses_per_lane=1, ideas_per_lens=1):
-                self.n += 1
-                return generator_mod.GenerationResult(
-                    cards=[_card(mech=f"regen-{self.n}")])
-
-        args = _run_args(tmp_path, candidates_per_round=1)
-        orch = _orchestrator(_gen_reply([_card()]))
-        gen = RegeneratingGenerator()
-        orch.generator = gen
-
-        def fake_research_batch(*, hypotheses, generator_regenerate, **_kwargs):
-            # The feedback loop happens INSIDE research_batch. Call the
-            # callback repeatedly until it raises, then submit.
-            last = hypotheses[0]
-            for _ in range(_MAX_REGENERATIONS):
-                last = generator_regenerate(_feedback_action())
-            # One more should exhaust the budget.
-            with pytest.raises(RuntimeError, match="budget exhausted"):
-                generator_regenerate(_feedback_action())
-            return proposer_mod.BranchResult(
-                hypothesis=last,
-                proposals=(SimpleNamespace(instruction="ok"),),
-                proposal=SimpleNamespace(instruction="ok"),
-                deliberation_telemetry={"tool_calls": 1},
-            )
-
-        monkeypatch.setattr(orch.proposer, "research_batch",
-                            fake_research_batch)
-        result = orch.run(**args)
-
-        assert gen.n == _MAX_REGENERATIONS
-        assert len(result.proposals) == 1
-
-
-# --- generator.regenerate unit tests ---------------------------------------
-
-class TestGeneratorRegenerate:
-    def test_regenerate_uses_transcript_and_feedback(self, monkeypatch, tmp_path):
-        """regenerate() sends context + transcript + feedback to the model."""
-        from simpleloop.roles.generator import GeneratorAgent
-        from simpleloop.roles import generator as gen_mod
-
-        captured = {}
-
-        class CapturingModel:
-            def __init__(self):
-                self._n = 0
-            def complete(self, *, system, messages, timeout_seconds):
-                self._n += 1
-                if self._n == 1:
-                    captured["messages"] = list(messages)
-                    captured["system"] = system
-                    return ModelReply(json.dumps({
-                        "action": "run_research_command",
-                        "command": "ls src/", "cwd": "work",
-                    }))
-                if self._n == 2:
-                    return ModelReply(json.dumps({
-                        "action": "emit_lever_map",
-                        "levers": [{"part": "foo", "role": "hot",
-                                    "structural_space": "cache"}],
-                    }))
-                return ModelReply(json.dumps({
-                    "action": "submit_hypothesis",
-                    "hypothesis": _card_json(),
-                }))
-
-        class FakeTools:
-            def __init__(self, **kwargs):
-                pass
-            def execute(self, action, *, deadline):
-                return {"ok": True, "returncode": 0, "output": ""}
-
-        monkeypatch.setattr(gen_mod, "ResearchTools", FakeTools)
-        gen = GeneratorAgent(
-            model=CapturingModel(), runtime=None, timeout_seconds=30,
-            max_steps=10, command_timeout_seconds=10,
-            command_output_cap_chars=10000,
+def _kwargs(tmp_path, **over):
+    base = dict(
+        goal="g", editable=["src"], frozen=[], world_mount=None,
+        memory_service=None, base_sha="b", repo_path=tmp_path,
+        run_dir=tmp_path, current_round=0, gate_block="g", prompt_dir=None,
+    )
+    base.update(over)
+    return base
+
+
+# ---- result-shape mapping (the loop.py interface firewall) ----
+
+def test_run_maps_submit_to_proposer_result(monkeypatch, tmp_path):
+    orch = _make_orch()
+
+    def fake_research(**kw):
+        return ScientistRound(proposals=[
+            ResearchProposal(instruction="dir A",
+                             research_target=NewFindingTarget(question="qA")),
+            ResearchProposal(instruction="dir B",
+                             research_target=NewFindingTarget(question="qB")),
+        ])
+
+    monkeypatch.setattr(orch.scientist, "research", fake_research)
+    result = orch.run(workspaces=[tmp_path], candidates_per_round=4,
+                      scientist_steps=10, **_kwargs(tmp_path))
+    assert not result.abstained
+    assert len(result.proposals) == 2
+    assert result.proposals[0].instruction == "dir A"
+    # trace + telemetry present (loop.py forwards them)
+    assert "lanes" in result.trace
+    assert result.deliberation_telemetry["n_proposals"] == 2
+
+
+def test_run_maps_abstain_to_proposer_result(monkeypatch, tmp_path):
+    orch = _make_orch()
+    monkeypatch.setattr(
+        orch.scientist, "research",
+        lambda **kw: ScientistRound(proposals=[], abstained=True,
+                                    abstain_reason="nothing worth it"),
+    )
+    result = orch.run(workspaces=[tmp_path], candidates_per_round=2,
+                      scientist_steps=10, **_kwargs(tmp_path))
+    assert result.abstained
+    assert result.proposals == []
+    assert "nothing worth it" in (result.abstain_reason or "")
+
+
+def test_run_lane_episode_returns_lane_result(monkeypatch, tmp_path):
+    orch = _make_orch()
+    monkeypatch.setattr(
+        orch.scientist, "research",
+        lambda **kw: ScientistRound(proposals=[
+            ResearchProposal(instruction="x",
+                             research_target=NewFindingTarget(question="q"))]),
+    )
+    lr = orch.run_lane_episode(lane_id=0, workspace=tmp_path,
+                               proposal_slots=1, scientist_steps=10,
+                               **_kwargs(tmp_path))
+    assert isinstance(lr, LaneResult)
+    assert lr.outcome == "submit"
+    assert len(lr.proposals) == 1
+
+
+def test_run_lane_episode_error_maps_to_error_outcome(monkeypatch, tmp_path):
+    orch = _make_orch()
+
+    def boom(**kw):
+        raise RuntimeError("model exploded")
+
+    monkeypatch.setattr(orch.scientist, "research", boom)
+    lr = orch.run_lane_episode(lane_id=0, workspace=tmp_path,
+                               proposal_slots=1, scientist_steps=10,
+                               **_kwargs(tmp_path))
+    assert lr.outcome == "error"
+    assert "model exploded" in (lr.abstain_reason or "")
+
+
+# ---- session lifecycle: the Scientist persists across rounds ----
+
+def test_session_persists_across_rounds_same_persona(monkeypatch, tmp_path):
+    """Round 0 cold-starts and leaves a marker; round 1 resumes and the
+    orchestrator hands research a session that already carries round 0's
+    trajectory — same scientist_id throughout."""
+    orch = _make_orch()
+    seen: list[tuple[int, str, bool]] = []
+
+    def fake_research(*, session, current_round, **kw):
+        seen.append((current_round, session.scientist_id,
+                     session.is_first_round()))
+        session.append_message(
+            "assistant", f"round{current_round}-marker",
+            round_id=current_round,
         )
-        feedback = {
-            "action": "feedback_generator",
-            "evidence_refs": ("experiment:r3c0",),
-            "observation": "tried this before, gained nothing",
-            "relation_to_seed": "same mechanism",
-            "implication": "the gain margin here is small",
-        }
-        transcript = [
-            {"role": "user", "content": "initial context"},
-            {"role": "assistant", "content": "initial hypothesis"},
-        ]
-        result = gen.regenerate(
-            context="history-free context", feedback=feedback,
-            transcript=transcript,
-            source_path=tmp_path / "src", repo_path=tmp_path / "repo",
-            run_dir=tmp_path / "run", world_mount=MountMap(),
-        )
-        msgs = captured["messages"]
-        # context is first, then transcript, then feedback
-        assert msgs[0]["content"] == "history-free context"
-        assert len(msgs) == 4                          # 1 ctx + 2 transcript + 1 feedback
-        assert "History feedback" in msgs[-1]["content"]
-        assert "the gain margin here is small" in msgs[-1]["content"]
-        assert len(result.cards) == 1
+        session.write_notebook(f"note from round {current_round}")
+        return ScientistRound(proposals=[
+            ResearchProposal(instruction="d",
+                             research_target=NewFindingTarget(question="q"))])
 
+    monkeypatch.setattr(orch.scientist, "research", fake_research)
 
-# --- history-free context builder ------------------------------------------
+    orch.run_lane_episode(lane_id=0, workspace=tmp_path,
+                          proposal_slots=1, scientist_steps=10,
+                          **_kwargs(tmp_path, current_round=0, base_sha="a"))
+    orch.run_lane_episode(lane_id=0, workspace=tmp_path,
+                          proposal_slots=1, scientist_steps=10,
+                          **_kwargs(tmp_path, current_round=1, base_sha="b"))
 
-class TestGenerationContext:
-    def test_context_contains_only_objective_and_gates(self):
-        from simpleloop.memory.context import build_generation_context
-        ctx = build_generation_context(
-            goal="make it faster", editable=["src/**"], frozen=["tests/**"],
-            base_sha="abc123", gate_block="- gate: pass",
-        )
-        assert "make it faster" in ctx
-        assert "abc123" in ctx
-        assert "src/**" in ctx
-        # frozen list is no longer rendered — the mount enforces the ro/rw split
-        assert "frozen" not in ctx.lower()
-        assert "read-only" in ctx.lower() or ":ro" in ctx
-        assert "- gate: pass" in ctx
-        # No history/dashboard/explore/frontier.
-        assert "dashboard" not in ctx.lower()
-        assert "frontier" not in ctx.lower()
-        assert "exhausted" not in ctx.lower()
+    assert seen[0][2] is True    # round 0 = cold start
+    assert seen[1][2] is False   # round 1 = resume
+    assert seen[0][1] == seen[1][1]  # same scientist_id (stable identity)
 
-    def test_service_facade_delegates_to_context_builder(
-            self, tmp_path, monkeypatch):
-        from simpleloop.memory.context import build_generation_context
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
-        svc = MemoryService(
-            run_dir=run_dir, metrics_schema=_METRICS_SCHEMA)
-        expected = build_generation_context(
-            goal="g", editable=["a"], frozen=["b"],
-            base_sha="s", gate_block="gb",
-        )
-        actual = svc.build_generation_context(
-            goal="g", editable=["a"], frozen=["b"],
-            base_sha="s", gate_block="gb",
-        )
-        assert actual == expected
+    # meta.json persisted with the last round + the round-1 notebook survived
+    meta = json.loads(
+        (tmp_path / "scientists" / "lane-0" / "meta.json").read_text())
+    assert meta["last_round"] == 1
+    assert meta["scientist_id"] == seen[0][1]
+    notebook = (tmp_path / "scientists" / "lane-0" / "notebook.md").read_text()
+    assert "round 1" in notebook
+    # round-0 trajectory is in the immutable archive
+    archive = (tmp_path / "scientists" / "lane-0"
+               / "session.jsonl").read_text()
+    assert "round0-marker" in archive

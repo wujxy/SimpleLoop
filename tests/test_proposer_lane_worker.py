@@ -29,8 +29,8 @@ def test_proposer_lane_spec_roundtrip():
         lane_id=2, round_id=3, base_sha="abc123",
         run_dir="/run", workspace_path="/run/lanes/lane-2/workspace",
         result_dir="/run/rounds/r3/lanes/l2",
-        prompt_dir="/p", assigned_ops=["G1", "G4"], select_quota=2,
-        gen_steps=50, cognitive_steps=30, attempt=1,
+        prompt_dir="/p", proposal_slots=2,
+        scientist_steps=50, attempt=1,
     )
     rebuilt = ProposerLaneSpec.from_dict(json.loads(json.dumps(spec.to_dict())))
     assert rebuilt == spec

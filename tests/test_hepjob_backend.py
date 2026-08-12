@@ -206,10 +206,8 @@ def test_proposer_backend_submits_one_lane_with_full_round_quota(
     prepared = []
     submitted = []
 
-    def fake_prepare(lane_id, round_id, base_sha, *, select_quota,
-                     assigned_ops):
-        prepared.append((lane_id, round_id, base_sha, select_quota,
-                         assigned_ops))
+    def fake_prepare(lane_id, round_id, base_sha, *, proposal_slots):
+        prepared.append((lane_id, round_id, base_sha, proposal_slots))
         return SimpleNamespace(candidate_id=lane_id)
 
     monkeypatch.setattr(backend, "_ensure_job_env", lambda: None)
@@ -224,8 +222,7 @@ def test_proposer_backend_submits_one_lane_with_full_round_quota(
     jobs = backend.run_proposer_lanes(round_id=3, base_sha="parent")
 
     assert len(prepared) == len(submitted) == len(jobs) == 1
-    assert prepared[0][:4] == (0, 3, "parent", 4)
-    assert len(prepared[0][4]) == 5
+    assert prepared[0] == (0, 3, "parent", 4)
 
 
 def test_completed_after_gone_with_finished(tmp_path, monkeypatch):

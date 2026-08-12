@@ -758,15 +758,13 @@ class HEPJobBackend(ExecutionBackend):
         """Submit the single proposer-lane job, collect proposals, return a
         ProposerResult. Reuses _Job + the condor wrappers; lane-specific
         prepare/submit/read/collect own the workspace + manifest shape."""
-        from ..roles.orchestrator import _sample_generative_ops
         self._round_id = round_id
         self._parent_sha = base_sha
         self._journal = None
         self._ensure_job_env()
         job = self._prepare_lane(
             0, round_id, base_sha,
-            select_quota=self.ctx.cfg.get("candidates_per_round", 1),
-            assigned_ops=list(_sample_generative_ops()),
+            proposal_slots=self.ctx.cfg.get("candidates_per_round", 1),
         )
         self._submit_lane(job)
         jobs = [job]
@@ -777,7 +775,7 @@ class HEPJobBackend(ExecutionBackend):
             self._clear_inflight_proposer()
 
     def _prepare_lane(self, lane_id: int, round_id: int, base_sha: str, *,
-                      select_quota: int, assigned_ops: list[str]) -> _Job:
+                      proposal_slots: int) -> _Job:
         result_dir = (self.run_dir / "rounds" / f"r{round_id}"
                       / "lanes" / f"l{lane_id}")
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -785,21 +783,18 @@ class HEPJobBackend(ExecutionBackend):
         job = _Job(candidate_id=lane_id, worktree_id=str(lane_id),
                    result_dir=result_dir)
         self._write_lane_manifest(job, round_id, base_sha, workspace,
-                                  select_quota=select_quota,
-                                  assigned_ops=assigned_ops)
+                                  proposal_slots=proposal_slots)
         return job
 
     def _write_lane_manifest(self, job: _Job, round_id: int, base_sha: str,
-                             workspace: Path, *, select_quota: int,
-                             assigned_ops: list[str]) -> None:
+                             workspace: Path, *, proposal_slots: int) -> None:
         spec = proposer_lane_worker.ProposerLaneSpec(
             lane_id=job.candidate_id, round_id=round_id, base_sha=base_sha,
             run_dir=str(self.run_dir), workspace_path=str(workspace),
             result_dir=str(job.result_dir),
             prompt_dir=str(getattr(self.ctx, "prompt_dir", None) or ""),
-            assigned_ops=assigned_ops, select_quota=select_quota,
-            gen_steps=self.ctx.cfg.get("gen_steps", 216),
-            cognitive_steps=self.ctx.cfg.get("cognitive_steps", 148),
+            proposal_slots=proposal_slots,
+            scientist_steps=self.ctx.cfg.get("scientist_steps", 200),
             attempt=job.attempt,
         )
         (job.result_dir / "manifest.json").write_text(

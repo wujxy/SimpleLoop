@@ -1014,7 +1014,6 @@ def test_run_preflights_before_agent_or_workspace(
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
-    monkeypatch.setattr(loop_mod.proposer_mod, "ProposerAgent", FakeProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 

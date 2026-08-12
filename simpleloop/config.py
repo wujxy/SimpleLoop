@@ -16,10 +16,11 @@ Minimal schema:
   loop.max_rounds: int                (required)
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
   loop.agent_max_output_tokens: int  (optional, default 64000; per claude call output ceiling)
-  loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout)
+  loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout — the Scientist's proposal-slot pool)
   loop.max_workers: int              (optional, default 1; candidate concurrency)
-  loop.gen_steps: int                (optional, default 216; generator step budget per lane)
-  loop.cognitive_steps: int          (optional, default 148; cognitive element step budget per lane)
+  loop.scientist_steps: int          (optional, default 200; Scientist step budget per lane — one agent doing what
+                                      the old generator+cognitive pipeline split between two. Legacy gen_steps /
+                                      cognitive_steps are accepted as aliases.)
   roles.researcher: object           (optional; required by agent-driven runs, omitted in static mode)
   roles.executor: object             (required for candidate execution; api/model/base_url — auth via ANTHROPIC_AUTH_TOKEN env)
   runtime.image: path                (required; readable SIF image)
@@ -120,6 +121,12 @@ def load_resolved(run_dir: str | Path) -> dict[str, Any]:
             "researcher": resolved.pop("researcher"),
             "executor": None,
         }
+    # Back-compat: runs resolved before the Scientist refactor stored the step
+    # budget as cognitive_steps/gen_steps. Map them so --continue still works.
+    if "scientist_steps" not in resolved:
+        resolved["scientist_steps"] = resolved.get(
+            "cognitive_steps", resolved.get("gen_steps", 200)
+        )
     return resolved
 
 
@@ -227,16 +234,18 @@ def _resolve(
     if not isinstance(max_workers, int) or max_workers < 1:
         raise ConfigError("loop.max_workers: must be a positive integer")
 
-    # Generator step budget per lane (survey + lever map + hypothesis emit).
-    gen_steps = loop.get("gen_steps", 216)
-    if not isinstance(gen_steps, int) or gen_steps < 4:
+    # Scientist step budget per lane. The Scientist is one agent doing what the
+    # old generator+cognitive pipeline split between two, so there is a single
+    # budget. Legacy `cognitive_steps` / `gen_steps` are accepted as aliases so
+    # existing configs keep working.
+    scientist_steps = loop.get("scientist_steps")
+    if scientist_steps is None:
+        scientist_steps = loop.get(
+            "cognitive_steps", loop.get("gen_steps", 200)
+        )
+    if not isinstance(scientist_steps, int) or scientist_steps < 4:
         raise ConfigError(
-            "loop.gen_steps: must be an integer >= 4")
-    # Cognitive element step budget per lane (sieve + select + enrich).
-    cognitive_steps = loop.get("cognitive_steps", 148)
-    if not isinstance(cognitive_steps, int) or cognitive_steps < 4:
-        raise ConfigError(
-            "loop.cognitive_steps: must be an integer >= 4")
+            "loop.scientist_steps: must be an integer >= 4")
 
     src_path = source.get("path")
     if not src_path:
@@ -293,8 +302,7 @@ def _resolve(
         "agent_max_output_tokens": int(agent_max_output_tokens),
         "candidates_per_round": int(candidates_per_round),
         "max_workers": int(max_workers),
-        "gen_steps": int(gen_steps),
-        "cognitive_steps": int(cognitive_steps),
+        "scientist_steps": int(scientist_steps),
         "runtime_image": runtime_image,
         "runtime_definition": runtime_definition,
         "runtime_binds": runtime_binds,

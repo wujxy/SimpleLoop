@@ -1,29 +1,32 @@
-"""Cognitive element: per-hypothesis Sieve + Enricher.
+"""The Scientist: one persistent researcher per proposer lane.
 
-Each hypothesis card from the generator is researched in isolation by one agent
-loop. The cognitive element is NOT a reviewer: it never judges whether an idea
-is worth trying. Merit — will the change preserve correctness, will it be
-faster — is structurally unknowable by an LLM in this domain and is reserved
-for the Harness, which is the only source of truth. The cognitive element has
-exactly two jobs:
+The Scientist owns the research problem. It wakes into a world (workspace +
+shell + a library of prior experiments), forms its own understanding, and
+submits directions it judges worth an experiment. There is no Generator, no
+hypothesis card, no Sieve/Select/Enrich — those were a workflow imposed on the
+model from outside. The Scientist is a person; the workflow lives in its head,
+not in the runtime.
 
-- **Sieve (light):** read just enough at the target site to confirm the three
-  objective bars. Block ONLY on an objective failure — a false factual claim
-  about the code, a frozen-path conflict, or a self-contradiction — each backed
-  by a ``source:`` ref read this round.
-- **Enrich (deep):** rewrite the card into an executor-ready ``instruction``
-  (precise location + the code facts read + the correctness constraint the
-  executor must preserve + a declaration of which realization decisions are
-  left to the executor), then ``submit``. It never writes the implementation,
-  line-level code, or derived math.
+Continuity model (three layers):
+  - recent trajectory      short-term cognition (this round's lived conversation)
+  - notebook.md            revisable autobiographical long-term memory (an anchor,
+                           NOT the sole carrier of identity — lossy, may be wrong)
+  - ledger / workspace     world facts (authoritative; win on disagreement)
 
-This runtime never restricts the search space on a judgment. Submit is the
-default terminal; block is rare and evidence-bound; budget exhaustion submits
-partial (it never abandons an idea).
+The call boundary is NOT a cognitive boundary: one Scientist's trajectory
+persists across rounds via session.jsonl + notebook.md, and a round ends in a
+*SUSPENSION* (paused while experiments run), not a psychological episode. The
+next round is a resume, not a restart.
 
-Doc reference: prompts/proposer.md.
-Continuity across rounds is supplied by the persistent Experiment Ledger,
-Finding Archive, and Frontier — NOT by this runtime's round-local state.
+Output protocol: every response is one JSON object ``{"message": ..., "action":
+{...}}``. ``message`` is optional natural text the Scientist chooses to leave in
+its trajectory — communication, NOT a substitute for acting, and NOT the
+continuity mechanism (the trajectory is). The runtime parses only the required
+``action``; the raw reply (message included) is appended to the conversation.
+
+The ``ProposerResult`` shape is unchanged so loop.py / the execution backends
+need no modification — the lane contract (result.json) is the interface
+firewall of this refactor.
 """
 from __future__ import annotations
 
@@ -48,33 +51,31 @@ from .research_agent import (
     _build_trace,
     _fingerprint,
     _register_evidence,
-    _render_state_header,
-    _result_summary,
-    _action_summary,
+    _source_path_exists,
 )
+from .scientist_session import ScientistSession
 from ..container.runtime import ApptainerRuntime
+from ..memory.context import build_generation_context
 from ..memory.models import (
     ExistingFindingTarget,
     NewFindingTarget,
     ResearchProposal,
 )
-from ..explore import analyze_explore_from_schema
-from ..explore.models import ExploreReport
 from ..prompts import load_semantic
 
 
 class ProposerError(AgentError):
-    """The cognitive element violated its action or budget contract."""
+    """The Scientist violated its action or budget contract."""
 
 
 @dataclass(frozen=True)
 class ProposerResult:
-    """One round's structured output.
+    """One round's structured output — the interface the Loop consumes.
 
-    ``proposals`` is a list of ``ResearchProposal``. When no branch produced a
-    proposal the orchestrator abstains (``abstained`` True, empty proposals).
-    ``deliberation_telemetry`` carries behavioral facts for the round record;
-    ``trace`` is the non-authoritative trajectory (never injected forward).
+    Shape is unchanged from the Generator→Cognitive pipeline so loop.py, the
+    execution backends, and the trace/handoff writers need no changes.
+    ``proposals`` is a list of ``ResearchProposal``; ``abstained`` is True when
+    the Scientist submitted zero directions this round.
     """
 
     proposals: list[ResearchProposal]
@@ -87,123 +88,220 @@ class ProposerResult:
 
 
 @dataclass(frozen=True)
-class BranchResult:
-    """One hypothesis branch's outcome.
+class ScientistRound:
+    """Internal: one Scientist round's outcome, mapped to LaneResult by the
+    orchestrator."""
 
-    ``outcome`` is one of:
-    - ``"submit"``: the card was enriched into an executor-ready proposal
-      (``proposal`` set; ``enrichment_partial`` True if the budget ran out
-      mid-enrich and a partial instruction was submitted instead).
-      In batch mode, ``proposals`` holds all K enriched proposals.
-    - ``"block"``:  the card failed an objective bar (``reason_kind`` +
-      ``block_evidence_refs`` set).
-    - ``"error"``:  the branch worker faulted (set by the orchestrator).
-    """
-    hypothesis: object  # HypothesisCard
-    proposal: ResearchProposal | None = None
-    proposals: tuple[ResearchProposal, ...] = ()  # batch mode: K proposals
-    outcome: str = "submit"
-    reason_kind: str | None = None        # set on block
-    explanation: str | None = None        # set on block
-    block_evidence_refs: tuple[str, ...] = ()
-    enrichment_partial: bool = False      # set on budget-exhaust submit
+    proposals: list[ResearchProposal]
+    abstained: bool = False
+    abstain_reason: str | None = None
     usage: object = None
     deliberation_telemetry: dict = field(default_factory=dict)
     trace: dict = field(default_factory=dict)
 
 
-# --- Tunables (cognitive-specific) -----------------------------------------
-
-_BLOCK_REASON_KINDS = frozenset({"false_claim", "frozen", "contradiction"})
+# --- Tunables --------------------------------------------------------------
 
 # Research / memory tools never terminate the loop.
-_RESEARCH_TOOL_ACTIONS = frozenset(
-    {"run_research_command"} | MEMORY_TOOL_ACTIONS
-)
+_RESEARCH_TOOL_ACTIONS = frozenset({"run_research_command"} | MEMORY_TOOL_ACTIONS)
+
+# How many complete (assistant→observation) turn-blocks to carry from the prior
+# trajectory into the resume context. The notebook carries the long-term; this
+# carries recent lived detail. Each observation is capped at
+# command_output_cap_chars, so this bounds the short-term-memory token cost.
+_TAIL_TURNS = 8
+
+# Prompt-version stamp recorded in meta.json so a prompt change is observable
+# per Scientist across rounds.
+SCIENTIST_PROMPT_VERSION = "scientist-v1"
 
 
 # --- Prompt scaffolding ----------------------------------------------------
 
-_PROTOCOL_ENVELOPE = (
-    "Runtime contract (immutable):\n"
-    "Return exactly one JSON object per response, with no prose outside it."
+_TOOL_BLOCK = (
+    "Research tools (your lab and your library — use them freely to "
+    "investigate, verify, and understand):\n" + render_research_tool_prompt()
 )
 
-_RESEARCH_PHASE_NOTE = (
-    "Research tools (use freely to locate and read the target):\n"
-    + render_research_tool_prompt()
-)
+_PROTOCOL_BLOCK = """Output protocol (immutable): every response is exactly one \
+JSON object. It carries one required field and one optional field.
 
-_PROTOCOL_BLOCK = """Control actions (you are done only when you submit or block):
-- {"action":"select_for_enrich","selected":[
-    {"hypothesis_idx":0,"slot":"hotspot|new_direction",
-     "evidence_refs":["experiment:r0c0"],"rationale":"..."}]}
-  Declare which hypotheses you will enrich. This sets the scope for your
-  enrichment work, so submit_proposals can follow it. Each selection needs
-  evidence_refs (history + source reads) and a rationale.
+  {"message": "...optional...", "action": {"action": "...", ...fields...}}
+
+- "action" (required): one research tool call, OR submit_proposals.
+- "message" (optional): natural text you choose to leave in your own research
+  trajectory — what you might say aloud while working. It is NOT required and
+  NOT a substitute for acting; if you have nothing to add, omit it. It is
+  communication that future-you will see, not a report you must file.
+
+Control action (the only non-tool action):
 - {"action":"submit_proposals","proposals":[
     {"instruction":"...",
-     "research_target":{"mode":"existing","finding_id":"F-NNN"},
+     "research_target":{"mode":"existing","finding_id":"F-NNN"}
+                      | {"mode":"new","question":"...",
+                         "mechanisms":[...],"code_regions":[...]},
      "evidence_refs":["source:src/foo.cc:FunctionName"],
      "material_difference":"..."}]}
-  Submit enriched proposals — one per hypothesis you selected. The instruction
-  embeds: (a) location at the function/class level, (b) the code facts you
-  read that motivate the change, (c) the correctness constraint the executor
-  preserves, and (d) which realization decisions you leave to the executor.
-  research_target declares an existing finding (mode=existing, F-NNN) or a
-  new question (mode=new, with question/mechanisms/code_regions).
-  evidence_refs and material_difference are optional. There is NO annotations
-  field.
-- {"action":"block","reason_kind":"false_claim|frozen|contradiction",
-  "explanation":"...","evidence_refs":["source:src/foo.cc:FunctionName"]}
-  Block only for an objective failure, citing at least one source: ref you
-  read this round. reason_kind is one of:
-    false_claim   — the card asserts a fact about the code that the code
-                    refutes (cite the source:line that refutes it);
-    frozen        — the only implementation site is under a frozen path
-                    (cite it);
-    contradiction — the card's own claims are mutually inconsistent (cite the
-                    source that makes them so).
-  "Too hard", "too risky", "unlikely to work", "low ROI", or "already tried"
-  are merit judgments reserved for the Harness. If you catch yourself wanting
-  to block for one of those, enrich and submit_proposals instead — let the
-  Harness decide.
+  Submit the directions you believe are worth an experiment. You may submit
+  between 0 and {n} proposals. {n} is exploitable research capacity — NOT a
+  quota to fill and NOT a reward to hoard: submit every direction you judge
+  worth its execution cost, neither padding to fill the slots nor withholding a
+  worthwhile bet. Submitting 0 (with a reason in "message") is an honest
+  abstention when you currently see nothing worth the compute; a single
+  well-considered direction is legitimate; several distinct directions worth
+  testing in parallel are equally legitimate. The instruction states WHAT to
+  try and WHY you think it may move the goal; the executor reads the real code
+  and decides the concrete implementation, so you need not reach line-level
+  detail. evidence_refs and material_difference are optional.
 """
 
 _RUNTIME_BOUNDARIES = """Runtime boundaries:
 - /work is your writable lab: the accepted source tree's editable paths,
   materialized read-write. Read it, write scratch code, compile, run toy
   experiments to understand the code and the task. It is disposable — nothing
-  you write here becomes an artifact. Other source files (tests, build files)
-  are visible read-only.
+  you write here becomes an artifact. Other source files are visible read-only.
 - /repo is the read-only Git repository. Use `git show <sha>`, `git diff`,
   `git log` to inspect any prior experiment's source (the history is shared).
-  You CANNOT commit, branch, or reset — creating artifacts is the candidate's
+  You CANNOT commit, branch, or reset — creating artifacts is the executor's
   job, and the read-only /repo structurally prevents it.
 - /history.jsonl and /rounds are persisted run evidence when present;
   /scratch is temporary writable space.
 - Anything you measure in your lab (a toy build, a probe) is for YOUR
   understanding only. It is never a merit fact: whether a change is faster or
-  correct is the Harness's verdict, not yours.
-- You cannot call the Executor or Harness, edit candidates, choose a parent,
+  correct is the Harness's verdict, not yours. You may predict, judge, and bet
+  boldly — but distinguish your scientific judgment from what has actually been
+  established by experiment.
+- You cannot call the executor or Harness, edit candidates, choose a parent,
   or declare evaluation and Gate facts. Only Harness records are authoritative.
 """.strip()
 
-_PARTIAL_SUBMIT_REMINDER = (
-    "Budget nearly exhausted. Submit your enriched proposal now — partial "
-    "enrichment is acceptable. Block only if you have found an objective "
-    "source conflict and can cite a source: ref for it. Return exactly one "
-    "JSON action object."
+_COLD_START = (
+    "You are beginning this research. The goal, the gates, and the current "
+    "accepted revision are in your standing context above. Investigate the "
+    "problem and the code until you have your own understanding, then submit "
+    "the directions you believe are worth an experiment. Take the time your "
+    "judgment needs — there is no phase you must rush through."
+)
+
+_BUDGET_NUDGE = (
+    "Your research turn is nearing its computation budget. If you have "
+    "directions you currently believe are worth an experiment, submit them now "
+    "via submit_proposals. This is a resource notice, not a required phase — "
+    "keep researching if your best judgment says nothing yet clears the bar."
+)
+
+_SUSPEND_PROMPT = (
+    "Your research is being paused while the directions you submitted are "
+    "executed as experiments. Leave a continuation note for your resumed self: "
+    "what you currently understand, what you believe and why, what evidence "
+    "changed your view, and what you were about to pursue. Write it in the "
+    "first person, as your own running account. Return one JSON object:\n"
+    '  {"notebook": "<your continuation note>"}'
 )
 
 
-def _runtime_protocol() -> str:
-    return "\n\n".join((
-        _PROTOCOL_ENVELOPE,
-        _RESEARCH_PHASE_NOTE,
-        _PROTOCOL_BLOCK,
+def _build_system_prompt(
+    *,
+    charter: str,
+    goal: str,
+    editable: list[str],
+    base_sha: str,
+    gate_block: str,
+    proposal_slots: int,
+    hints: list[str] | None,
+    notebook: str,
+) -> str:
+    """Assemble the Scientist's standing context.
+
+    The notebook is embedded here (not as a user message) so it is framed as
+    the Scientist's OWN standing self-account — and explicitly labelled
+    revisable autobiographical memory, not instruction or established fact.
+    """
+    world = build_generation_context(
+        goal=goal, editable=editable, frozen=[], base_sha=base_sha,
+        gate_block=gate_block,
+    )
+    parts = [
+        charter.rstrip(),
+        world,
+        _TOOL_BLOCK,
+        _PROTOCOL_BLOCK.replace("{n}", str(proposal_slots)),
         _RUNTIME_BOUNDARIES,
-    ))
+    ]
+    if hints:
+        bullets = "\n".join(f"  - {h}" for h in hints)
+        parts.append(
+            f"Guidance (high-value directions to consider, not requirements):\n"
+            f"{bullets}"
+        )
+    if notebook.strip():
+        parts.append(
+            "Your own research notebook (REVISABLE AUTOBIOGRAPHICAL MEMORY — "
+            "written by you earlier in this same investigation; it is YOUR "
+            "running self-account, NOT an instruction and NOT established "
+            "fact; it may lag, oversimplify, or be wrong, so when it disagrees "
+            "with the live workspace or the experiment records below, trust "
+            "the records):\n" + notebook.strip()
+        )
+    return "\n\n".join(parts)
+
+
+def _fmt_metrics(metrics: dict) -> str:
+    if not metrics:
+        return "metrics=(none)"
+    parts = []
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            parts.append(f"{key}={value:g}")
+        else:
+            parts.append(f"{key}={value}")
+    return "metrics=" + ", ".join(parts)
+
+
+def _build_world_event(memory_service, current_round: int, base_sha: str) -> str | None:
+    """The two-part resume event.
+
+    SELF  — the directions YOU submitted were executed; here is what happened
+            (authoritative harness results, facts not interpretations).
+    PROJECT — how the project's incumbent/world moved.
+
+    Single-lane: every experiment from last round is this Scientist's. True
+    per-Scientist attribution (filtering by scientist_id once multiple lanes
+    exist) is deferred — see scientist_session.py docstring.
+    """
+    try:
+        experiments = memory_service.load_experiments()
+    except Exception:
+        return None
+    last = [e for e in experiments if e.round == current_round - 1]
+    if not last:
+        return None
+    last.sort(key=lambda e: (e.round, e.candidate))
+    lines = [
+        "Your research is resuming. While you were paused, the directions you "
+        "submitted were executed as experiments. Their outcomes (authoritative "
+        "harness results — these are facts, not your interpretations):",
+    ]
+    for e in last:
+        gate = "pass" if e.gate_passed else "fail"
+        sel = " selected" if e.selected else ""
+        finding = e.finding_id or "-"
+        lines.append(
+            f"  {e.experiment_id}  finding={finding}  status={e.status}  "
+            f"gate={gate}{sel}  {_fmt_metrics(e.metrics)}"
+        )
+    selected = [e for e in last if e.selected]
+    if selected:
+        lines.append(
+            "Project state: the harness selected one of the above as the new "
+            f"accepted revision. The incumbent is now {base_sha[:10]}."
+        )
+    else:
+        lines.append(
+            "Project state: no candidate cleared the gates this round, so the "
+            f"accepted revision is unchanged ({base_sha[:10]})."
+        )
+    return "\n".join(lines)
 
 
 # --- Guard repair messages -------------------------------------------------
@@ -212,12 +310,7 @@ _GUARD_REASONS = {
     "repeated_tool": (
         "That tool call is identical to the previous one and would add no new "
         "information. Change the query, inspect a different region, or move on "
-        "via submit_proposals or block."
-    ),
-    "block_needs_source": (
-        "A block must cite at least one source: ref to a path you actually read "
-        "this round. If you have no such evidence, you cannot block — enrich "
-        "and submit_proposals instead."
+        "via submit_proposals."
     ),
 }
 
@@ -226,8 +319,8 @@ def _guard_repair_message(reason: str) -> str:
     base = _GUARD_REASONS.get(reason, "")
     return (
         f"Protocol correction required ({reason}). {base} Return exactly one "
-        "JSON action object matching the Runtime contract, with no prose or "
-        "additional JSON."
+        "JSON object with an 'action', with no prose or additional JSON "
+        "outside it."
     )
 
 
@@ -331,22 +424,11 @@ def _parse_proposal(value) -> ResearchProposal:
     )
 
 
-def _opt_str(value) -> str:
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise ProposerError("expected a string field")
-    return value.strip()
-
-
-def _parse_action(text: str, candidates_per_round: int) -> dict:
-    try:
-        action = json.loads(text)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ProposerError("proposer response must be one JSON object") from exc
-    if not isinstance(action, dict) or not isinstance(action.get("action"), str):
-        raise ProposerError("proposer action must be a JSON object with action")
-    name = action["action"]
+def _dispatch(action: dict, proposal_slots: int) -> dict:
+    """Validate one inner action object. Tool actions and submit_proposals."""
+    name = action.get("action")
+    if not isinstance(name, str):
+        raise ProposerError("action.action must be a string")
 
     # --- research / memory tools (never terminate) ---
     if name == "run_research_command":
@@ -427,151 +509,65 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
             "filters": filters or {}, "limit": limit, "buckets": buckets,
         }
 
-    # --- feedback to Generator (non-terminal, triggers regeneration) ---
-    if name == "feedback_generator":
-        _require_keys(
-            action,
-            {"action", "evidence_refs", "observation",
-             "relation_to_seed", "implication"},
-        )
-        refs = _require_string_list(
-            action["evidence_refs"], name="feedback_generator.evidence_refs",
-        )
-        observation = action["observation"]
-        if not isinstance(observation, str) or not observation.strip():
-            raise ProposerError(
-                "feedback_generator.observation must be a non-empty string")
-        relation = action["relation_to_seed"]
-        if not isinstance(relation, str) or not relation.strip():
-            raise ProposerError(
-                "feedback_generator.relation_to_seed must be non-empty")
-        implication = action["implication"]
-        if not isinstance(implication, str) or not implication.strip():
-            raise ProposerError(
-                "feedback_generator.implication must be a non-empty string")
-        return {
-            "action": name,
-            "evidence_refs": tuple(refs),
-            "observation": observation.strip(),
-            "relation_to_seed": relation.strip(),
-            "implication": implication.strip(),
-        }
-
-    # --- control actions ---
-    if name == "select_for_enrich":
-        _require_keys(action, {"action", "selected"})
-        selected = action["selected"]
-        if not isinstance(selected, list) or not selected:
-            raise ProposerError("select_for_enrich.selected must be non-empty")
-        parsed_sel = []
-        for item in selected:
-            if not isinstance(item, dict):
-                raise ProposerError("select_for_enrich items must be objects")
-            _require_keys(item, {"hypothesis_idx", "slot",
-                                 "evidence_refs", "rationale"})
-            idx = item["hypothesis_idx"]
-            if not isinstance(idx, int) or idx < 0:
-                raise ProposerError(
-                    "select_for_enrich.hypothesis_idx must be a non-negative int")
-            slot = item["slot"]
-            if not isinstance(slot, str) or not slot.strip():
-                raise ProposerError(
-                    "select_for_enrich.slot must be a non-empty string")
-            refs = _require_string_list(
-                item["evidence_refs"], name="select_for_enrich.evidence_refs")
-            rationale = item["rationale"]
-            if not isinstance(rationale, str) or not rationale.strip():
-                raise ProposerError(
-                    "select_for_enrich.rationale must be non-empty")
-            parsed_sel.append({
-                "hypothesis_idx": idx,
-                "slot": slot.strip(),
-                "evidence_refs": tuple(refs),
-                "rationale": rationale.strip(),
-            })
-        return {"action": name, "selected": parsed_sel}
-
+    # --- terminal action ---
     if name == "submit_proposals":
         _require_keys(action, {"action", "proposals"})
         proposals = action["proposals"]
-        if (not isinstance(proposals, list)
-                or not 1 <= len(proposals) <= candidates_per_round):
+        if not isinstance(proposals, list):
+            raise ProposerError("proposals must be a list")
+        if len(proposals) > proposal_slots:
             raise ProposerError(
-                f"expected 1..{candidates_per_round} proposals"
+                f"at most {proposal_slots} proposal(s) allowed; "
+                f"got {len(proposals)}"
             )
+        # 0 proposals is a legal abstention.
         parsed = [_parse_proposal(item) for item in proposals]
         return {"action": name, "proposals": parsed}
 
-    if name == "block":
-        _require_keys(
-            action, {"action", "reason_kind", "explanation", "evidence_refs"})
-        rk = action["reason_kind"]
-        if rk not in _BLOCK_REASON_KINDS:
-            raise ProposerError(
-                f"block.reason_kind must be one of {sorted(_BLOCK_REASON_KINDS)}, "
-                f"got {rk!r}"
-            )
-        explanation = action["explanation"]
-        if not isinstance(explanation, str) or not explanation.strip():
-            raise ProposerError("block.explanation must be non-empty")
-        refs = _require_string_list(
-            action["evidence_refs"], name="block.evidence_refs",
+    raise ProposerError(f"unknown action: {name}")
+
+
+def parse_response(text: str, proposal_slots: int) -> dict:
+    """Parse one Scientist response.
+
+    Top level is ``{"message"?: str, "action": {...}}``. ``message`` is
+    optional natural text (left in the trajectory via the raw reply; not read
+    here). Only the inner ``action`` is validated and returned.
+    """
+    try:
+        obj = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProposerError("response must be one JSON object") from exc
+    if not isinstance(obj, dict):
+        raise ProposerError("response must be one JSON object")
+    action = obj.get("action")
+    if not isinstance(action, dict) or not isinstance(action.get("action"), str):
+        raise ProposerError(
+            "response must be a JSON object with an 'action' object"
         )
-        return {
-            "action": name,
-            "reason_kind": rk,
-            "explanation": explanation.strip(),
-            "evidence_refs": tuple(refs),
-        }
-
-    raise ProposerError(f"unknown proposer action: {name}")
+    return _dispatch(action, proposal_slots)
 
 
-# --- Cognitive-specific guards -------------------------------------------
-
-from .research_agent import _source_path_exists  # noqa: E402
-
-
-def _validate_block_evidence(
-    refs, state: WorkingState, source_root: Path,
-) -> bool:
-    """True when the block cites at least one ``source:`` ref to a path the
-    agent read this branch (present in ``new_evidence``) that exists under
-    the workspace. The uniform objective choke point for every block."""
-    for ref in refs:
-        if ":" not in ref:
-            continue
-        kind, _, rest = ref.partition(":")
-        if kind == "source":
-            if ("__source_examined__" in state.new_evidence
-                    and _source_path_exists(rest, source_root)):
-                return True
-    return False
-
+# --- Guard ----------------------------------------------------------------
 
 def _validate_action_guard(
     state: WorkingState, action: dict, source_root: Path,
 ) -> str | None:
-    """Return a repair reason, or None when the action satisfies the guards."""
+    """Only remaining guard: an exact-repeat tool call back-to-back adds
+    nothing and risks a loop. Every cognitive guard (block evidence, quota
+    consistency, select-before-submit) was removed with the pipeline."""
     name = action["action"]
     if name in _RESEARCH_TOOL_ACTIONS:
-        # Exact-repeat only: an identical tool call back-to-back adds nothing.
         fp = _fingerprint(action)
         if (state.last_tool_fingerprint is not None
                 and fp == state.last_tool_fingerprint):
             return "repeated_tool"
-        return None
-    if name == "block":
-        if not _validate_block_evidence(action["evidence_refs"], state, source_root):
-            return "block_needs_source"
-        return None
-    # submit_proposals: no guard — merit is not the cognitive element's job.
     return None
 
 
-# --- The cognitive element ------------------------------------------------
+# --- The Scientist --------------------------------------------------------
 
-class ProposerAgent(ResearchAgent):
+class ScientistAgent(ResearchAgent):
     _error_class = ProposerError
 
     def __init__(
@@ -592,24 +588,21 @@ class ProposerAgent(ResearchAgent):
             command_output_cap_chars=command_output_cap_chars,
             usage_observer=usage_observer,
         )
-        self._candidates_per_round = 1
+        self._proposal_slots = 1
 
     def _parse_action(self, text: str) -> dict:
-        return _parse_action(text, self._candidates_per_round)
+        return parse_response(text, self._proposal_slots)
 
     def _validate_guard(
         self, state: WorkingState, action: dict, source_root: Path,
     ) -> str | None:
         return _validate_action_guard(state, action, source_root)
 
-    def research_batch(
+    def research(
         self,
         *,
-        hypotheses: list,  # list[HypothesisCard]
-        select_quota: int,
         goal: str,
         editable: list[str],
-        frozen: list[str],
         world_mount,
         memory_service,
         base_sha: str,
@@ -619,128 +612,57 @@ class ProposerAgent(ResearchAgent):
         current_round: int,
         gate_block: str,
         prompt_dir: Path | None,
+        proposal_slots: int,
         hints: list[str] | None = None,
-        explore=None,
+        session: ScientistSession,
         max_steps: int | None = None,
-        generator_regenerate=None,
-    ) -> BranchResult:
-        """Batch audit: sieve + dedup + select up to K + enrich selections.
-
-        All seed hypotheses from the generator are audited in one context.
-        The cognitive element selects up to ``select_quota`` for enrichment with
-        evidence-based rationale, enriches each, and submits all K as
-        proposals. This is NOT merit judgment — selection is based on
-        historical coverage facts (ledger) and source facts, not predictions.
-        """
-        from .hypothesis import HypothesisCard, dedup_by_signature
-        assert all(isinstance(h, HypothesisCard) for h in hypotheses)
-        assert select_quota >= 1
-        self._candidates_per_round = select_quota
-
-        # Dedup by signature before presenting to the cognitive element.
-        deduped = dedup_by_signature(hypotheses, per_bin=1)
-        if not deduped:
-            return BranchResult(
-                hypothesis=hypotheses[0] if hypotheses else None,
-                outcome="block",
-                reason_kind="contradiction",
-                explanation="all hypotheses deduplicated to nothing",
-                block_evidence_refs=(),
-            )
-
-        system_prompt = (
-            f"{load_semantic('proposer', prompt_dir).rstrip()}\n\n"
-            f"{_runtime_protocol()}"
+    ) -> ScientistRound:
+        """Run one round of this Scientist's research, persisting its lived
+        trajectory and notebook into ``session`` as it goes."""
+        self._proposal_slots = proposal_slots
+        charter = load_semantic("proposer", prompt_dir)
+        system_prompt = _build_system_prompt(
+            charter=charter, goal=goal, editable=editable, base_sha=base_sha,
+            gate_block=gate_block, proposal_slots=proposal_slots,
+            hints=hints, notebook=session.notebook,
         )
-        if explore is None:
-            try:
-                explore = analyze_explore_from_schema(
-                    memory_service.load_findings(),
-                    memory_service.load_experiments(),
-                    current_round=current_round,
-                    metrics_schema=memory_service.metrics_schema,
+
+        # --- assemble the live context (cold start vs resume) ---
+        if session.is_first_round():
+            messages: list[dict] = [{"role": "user", "content": _COLD_START}]
+            print("[scientist] cold start — first round of this Scientist",
+                  flush=True)
+        else:
+            messages = list(session.tail_turns(_TAIL_TURNS))
+            world_event = _build_world_event(
+                memory_service, current_round, base_sha,
+            )
+            if world_event is None:
+                world_event = (
+                    "Your research is resuming. No experiments were run from "
+                    "your last round (you submitted no directions, or the "
+                    "round abstained). The accepted revision remains "
+                    f"{base_sha[:10]}."
                 )
-            except Exception:
-                explore = None
-        startup_pack = memory_service.build_startup_pack(
-            goal=goal, editable=editable, frozen=frozen,
-            base_sha=base_sha, gate_block=gate_block,
-            candidates_per_round=select_quota, hints=hints,
-            current_round=current_round, explore=explore,
-        )
-
-        # Build the batch intro listing all deduped hypotheses.
-        hyp_lines = []
-        for i, h in enumerate(deduped):
-            hyp_lines.append(
-                f"  [{i}] (lens {h.generative_op})\n"
-                f"      region: {h.region}\n"
-                f"      mechanism: {h.mechanism}\n"
-                f"      intervention_family: {h.intervention_family}\n"
-                f"      why_plausible: {h.why_plausible}\n"
-                f"      critical_unknown: {h.critical_unknown}\n"
-                f"      facts_read:\n"
-                + "".join(f"        - {f}\n" for f in h.facts_read)
+            messages.append({"role": "user", "content": world_event})
+            print(
+                f"[scientist] resume — scientist_id={session.scientist_id[:8]} "
+                f"tail={len(messages) // 2} turn-blocks",
+                flush=True,
             )
-        batch_intro = (
-            f"You are auditing {len(deduped)} seed hypotheses from your "
-            f"Generator partner, listed below. You have the experiment "
-            f"ledger and explore health in your startup context.\n\n"
-            f"## Hypotheses\n\n"
-            + "\n".join(hyp_lines)
-            + f"\n## Protocol: batch audit\n\n"
-            f"The work has three phases, each feeding the next.\n\n"
-            f"1. **Sieve:** check each hypothesis against the three objective "
-            f"bars — factual claims hold, site not frozen, self-consistent. "
-            f"You may read source to verify. This filters out leads that are "
-            f"factually wrong before you invest in enrichment.\n"
-            f"2. **Select:** your partner gave you leads, not plans. Choose "
-            f"up to {select_quota} worth pursuing via `select_for_enrich`, each "
-            f"with `evidence_refs` and a `rationale` grounded in facts. "
-            f"Prefer materially different mechanisms or code regions when "
-            f"useful, but this is a semantic preference, not a uniqueness "
-            f"gate. Do not regenerate merely to fill the limit.\n"
-            f"3. **Enrich:** for each selected lead, read the actual "
-            f"implementation until you understand the function and class "
-            f"structure, the code facts, and the correctness constraints. "
-            f"Then `submit_proposals` with one proposal per selected lead. "
-            f"A proposal is a scheme direction between the lead and the "
-            f"implementation: locate at function/class level, state the "
-            f"constraint, declare what is left open. The executor reads the "
-            f"real source and makes the concrete changes.\n\n"
-            f"You are still NOT a reviewer. 'This will be faster' is a "
-            f"prediction — leave it to the Harness. 'This region has 0 "
-            f"prior attempts' is a fact. 'This family improved last round' "
-            f"is a fact. Select on facts, not predictions. You are done "
-            f"when you submit_proposals or block (block only if ALL "
-            f"hypotheses fail an objective bar)."
-        )
 
-        messages = [
-            {"role": "user", "content": startup_pack},
-            {"role": "user", "content": batch_intro},
-        ]
         steps_budget = max_steps or self.max_steps
         started = time.monotonic()
         deadline = started + self.timeout_seconds
-        usages = []
+        usages: list = []
         state = WorkingState()
-        state.candidate_directions = (
-            f"batch audit of {len(deduped)} hypotheses, select {select_quota}")
         budget_reminder_step = int(0.8 * steps_budget)
         reminded = False
-        print(
-            f"[batch] {len(deduped)} hypotheses, select_quota={select_quota} "
-            f"max_steps={steps_budget}",
-            flush=True,
-        )
 
-        selected_indices: list[int] = []
-        selected_rationales: list[str] = []
-        all_proposals: list[ResearchProposal] = []
-        has_selected = False
+        proposals: list[ResearchProposal] = []
+        abstain_reason: str | None = None
 
-        with TemporaryDirectory(prefix="simpleloop-batch-") as scratch, \
+        with TemporaryDirectory(prefix="simpleloop-scratch-") as scratch, \
                 TemporaryDirectory(prefix="simpleloop-session-") as session_root:
             home = Path(session_root) / "home"
             home.mkdir(mode=0o700)
@@ -759,13 +681,13 @@ class ProposerAgent(ResearchAgent):
             )
             for _step_num in range(steps_budget):
                 step = _step_num + 1
-                print(f"[batch step {step}/{steps_budget}] thinking", flush=True)
+                print(f"[scientist step {step}/{steps_budget}] thinking",
+                      flush=True)
                 if (not reminded and budget_reminder_step > 0
                         and step >= budget_reminder_step):
-                    messages.append({
-                        "role": "user", "content": _PARTIAL_SUBMIT_REMINDER,
-                    })
+                    messages.append({"role": "user", "content": _BUDGET_NUDGE})
                     reminded = True
+
                 action, reply_text = self._step(
                     state, messages, system_prompt, deadline, usages, step,
                     source_root=source_path, steps_budget=steps_budget,
@@ -773,179 +695,35 @@ class ProposerAgent(ResearchAgent):
                 name = action["action"]
                 state.action_log.append({"action": name, "step": step})
 
-                if name == "select_for_enrich":
-                    _bump(state, name)
-                    new_sel = action["selected"]
-                    if len(selected_indices) + len(new_sel) > select_quota:
-                        state.protocol_repairs += 1
-                        print(
-                            f"[batch step {step}/{steps_budget}] "
-                            f"select exceeds quota: have {len(selected_indices)}, "
-                            f"adding {len(new_sel)}, quota {select_quota}",
-                            flush=True,
-                        )
-                        messages.extend([
-                            {"role": "assistant", "content": reply_text},
-                            {"role": "user", "content": (
-                                f"You have selected {len(selected_indices)} "
-                                f"hypothesis(es) and are adding {len(new_sel)}, "
-                                f"but the limit is {select_quota}. Select at "
-                                f"most {select_quota} total. "
-                                f"Return exactly one JSON action object."
-                            )},
-                        ])
-                        continue
-                    for sel in new_sel:
-                        idx = sel["hypothesis_idx"]
-                        if idx >= len(deduped):
-                            raise ProposerError(
-                                f"select_for_enrich idx {idx} out of range "
-                                f"(have {len(deduped)} hypotheses)")
-                        selected_indices.append(idx)
-                        selected_rationales.append(sel["rationale"])
-                    has_selected = True
-                    print(
-                        f"[batch] selected {selected_indices} "
-                        f"steps={step}",
-                        flush=True,
-                    )
-                    # Prompt to start enriching the selected hypotheses.
-                    sel_cards = [deduped[i] for i in selected_indices]
-                    enrich_prompt = (
-                        f"Selected {len(sel_cards)} hypothesis/hypotheses. "
-                        f"Now enrich each one: read the target site until "
-                        f"the executor can act without further codebase "
-                        f"search, then submit_proposals with "
-                        f"{len(sel_cards)} enriched proposals — one per "
-                        f"selected hypothesis."
-                    )
-                    for i, h in enumerate(sel_cards):
-                        enrich_prompt += (
-                            f"\n\nHypothesis {i}: "
-                            f"region={h.region} mechanism={h.mechanism} "
-                            f"intervention_family={h.intervention_family}")
-                    messages.extend([
-                        {"role": "assistant", "content": reply_text},
-                        {"role": "user", "content": enrich_prompt},
-                    ])
-                    continue
-
                 if name == "submit_proposals":
-                    if not has_selected:
-                        state.protocol_repairs += 1
-                        print(
-                            f"[batch step {step}/{steps_budget}] "
-                            f"submit without select -- rejected",
-                            flush=True,
-                        )
-                        messages.extend([
-                            {"role": "assistant", "content": reply_text},
-                            {"role": "user", "content": (
-                                "You submitted proposals before calling "
-                                "select_for_enrich. Your partner gave you "
-                                f"{len(deduped)} leads; select_for_enrich "
-                                f"declares which {select_quota} you are "
-                                "taking on, and sets the scope for your "
-                                "enrichment. Select first, then enrich and "
-                                "submit. Return exactly one JSON action object."
-                            )},
-                        ])
-                        continue
-                    if len(action["proposals"]) != len(selected_indices):
-                        state.protocol_repairs += 1
-                        print(
-                            f"[batch step {step}/{steps_budget}] "
-                            f"submit count {len(action['proposals'])} != "
-                            f"selected {len(selected_indices)} -- rejected",
-                            flush=True,
-                        )
-                        messages.extend([
-                            {"role": "assistant", "content": reply_text},
-                            {"role": "user", "content": (
-                                f"You selected {len(selected_indices)} "
-                                f"hypothesis(es) but submitted "
-                                f"{len(action['proposals'])} proposal(s). "
-                                f"Each selected hypothesis gets one proposal, "
-                                f"so submit {len(selected_indices)} total. "
-                                "Return exactly one JSON action object."
-                            )},
-                        ])
-                        continue
+                    proposals = action["proposals"]
                     _bump(state, name)
-                    all_proposals = action["proposals"]
+                    # Persist this final turn before checkpoint/suspend.
+                    session.append_message("assistant", reply_text,
+                                           round_id=current_round)
                     print(
-                        f"[batch] submit {len(all_proposals)} proposal(s) "
-                        f"steps={step} "
-                        f"elapsed={time.monotonic() - started:.1f}s",
+                        f"[scientist] submit {len(proposals)} proposal(s) "
+                        f"step={step} elapsed={time.monotonic() - started:.1f}s",
                         flush=True,
                     )
-                    return BranchResult(
-                        hypothesis=deduped[selected_indices[0]]
-                        if selected_indices else deduped[0],
-                        proposal=all_proposals[0],
-                        proposals=tuple(all_proposals),
-                        outcome="submit",
+                    self._suspension_checkpoint(
+                        system_prompt, messages, state, session, deadline,
+                        usages, current_round,
+                    )
+                    abstained = len(proposals) == 0
+                    return ScientistRound(
+                        proposals=proposals,
+                        abstained=abstained,
+                        abstain_reason=(
+                            "submitted no directions this round"
+                            if abstained else None
+                        ),
                         usage=usages,
                         deliberation_telemetry=_build_telemetry(
                             state, steps=step, outcome="submit"),
                         trace=_build_trace(
-                            state, round_id=current_round,
-                            outcome="submit", explore=explore),
+                            state, round_id=current_round, outcome="submit"),
                     )
-
-                if name == "block":
-                    _bump(state, name)
-                    print(
-                        f"[batch] block steps={step} "
-                        f"reason_kind={action['reason_kind']} "
-                        f"elapsed={time.monotonic() - started:.1f}s",
-                        flush=True,
-                    )
-                    return BranchResult(
-                        hypothesis=deduped[0],
-                        outcome="block",
-                        reason_kind=action["reason_kind"],
-                        explanation=action["explanation"],
-                        block_evidence_refs=action["evidence_refs"],
-                        usage=usages,
-                        deliberation_telemetry=_build_telemetry(
-                            state, steps=step, outcome="block",
-                            reason_kind=action["reason_kind"]),
-                        trace=_build_trace(
-                            state, round_id=current_round, outcome="block",
-                            reason_kind=action["reason_kind"],
-                            evidence_refs=action["evidence_refs"],
-                            explore=explore),
-                    )
-
-                if name == "feedback_generator":
-                    _bump(state, name)
-                    if generator_regenerate is None:
-                        raise ProposerError(
-                            "feedback_generator issued but no "
-                            "generator_regenerate callback was provided")
-                    print(f"[batch] feedback_generator steps={step}", flush=True)
-                    new_hypothesis = generator_regenerate(action)
-                    envelope = {
-                        "state": _render_state_header(state, explore),
-                        "feedback": action,
-                        "new_hypothesis": {
-                            "generative_op": new_hypothesis.generative_op,
-                            "region": new_hypothesis.region,
-                            "mechanism": new_hypothesis.mechanism,
-                            "intervention_family":
-                                new_hypothesis.intervention_family,
-                            "why_plausible": new_hypothesis.why_plausible,
-                            "critical_unknown": new_hypothesis.critical_unknown,
-                        },
-                    }
-                    messages.extend([
-                        {"role": "assistant", "content": reply_text},
-                        {"role": "user", "content": json.dumps(
-                            envelope, ensure_ascii=False,
-                        )},
-                    ])
-                    continue
 
                 # tool call
                 observation = tools.execute(action, deadline=deadline)
@@ -955,95 +733,82 @@ class ProposerAgent(ResearchAgent):
                 if observation.get("ok") and name == "run_research_command":
                     _bump(state, "source_read")
                     state.located = True
-                print(
-                    f"[batch step {step}/{steps_budget}] "
-                    f"{_result_summary(action, observation)}",
-                    flush=True,
+                obs_envelope = json.dumps(
+                    {"tool_result": observation}, ensure_ascii=False,
                 )
-                envelope = {
-                    "state": _render_state_header(state, explore),
-                    "tool_result": observation,
-                }
                 messages.extend([
                     {"role": "assistant", "content": reply_text},
-                    {"role": "user", "content": json.dumps(
-                        envelope, ensure_ascii=False,
-                    )},
+                    {"role": "user", "content": obs_envelope},
                 ])
+                session.append_message("assistant", reply_text,
+                                       round_id=current_round)
+                session.append_message("user", obs_envelope,
+                                       round_id=current_round)
+                print(
+                    f"[scientist step {step}/{steps_budget}] "
+                    f"{name} ok={observation.get('ok')}",
+                    flush=True,
+                )
 
-            # Budget exhausted — partial submit if we have any proposals.
-            if all_proposals:
-                print(
-                    f"[batch] budget exhausted with {len(all_proposals)} "
-                    f"proposals — returning partial",
-                    flush=True,
-                )
-                return BranchResult(
-                    hypothesis=deduped[selected_indices[0]]
-                    if selected_indices else deduped[0],
-                    proposal=all_proposals[0],
-                    proposals=tuple(all_proposals),
-                    outcome="submit",
-                    enrichment_partial=True,
-                    usage=usages,
-                    deliberation_telemetry=_build_telemetry(
-                        state, steps=steps_budget, outcome="submit",
-                        enrichment_partial=True),
-                    trace=_build_trace(
-                        state, round_id=current_round, outcome="submit",
-                        explore=explore),
-                )
-            # No proposals — partial submit from selected hypotheses.
-            if selected_indices:
-                print(
-                    f"[batch] budget exhausted after select, before enrich "
-                    f"— partial submit for {len(selected_indices)} selected",
-                    flush=True,
-                )
-                partial_proposals = []
-                for idx in selected_indices:
-                    h = deduped[idx]
-                    partial_proposals.append(ResearchProposal(
-                        instruction=(
-                            "Enrichment incomplete (batch budget exhausted); "
-                            "the executor should locate and implement the "
-                            "hypothesis directly.\n"
-                            f"region: {h.region}\n"
-                            f"mechanism: {h.mechanism}\n"
-                            f"intervention_family: {h.intervention_family}\n"
-                            f"why_plausible: {h.why_plausible}\n"
-                            f"critical_unknown: {h.critical_unknown}\n"
-                        ),
-                        research_target=NewFindingTarget(
-                            question=(h.why_plausible or h.mechanism)[:200],
-                        ),
-                    ))
-                return BranchResult(
-                    hypothesis=deduped[selected_indices[0]],
-                    proposal=partial_proposals[0],
-                    proposals=tuple(partial_proposals),
-                    outcome="submit",
-                    enrichment_partial=True,
-                    usage=usages,
-                    deliberation_telemetry=_build_telemetry(
-                        state, steps=steps_budget, outcome="submit",
-                        enrichment_partial=True),
-                    trace=_build_trace(
-                        state, round_id=current_round, outcome="submit",
-                        explore=explore),
-                )
-            # Nothing selected at all — block.
-            return BranchResult(
-                hypothesis=deduped[0],
-                outcome="block",
-                reason_kind="contradiction",
-                explanation="batch budget exhausted before any selection",
-                block_evidence_refs=(),
+            # Budget exhausted without a submit.
+            abstain_reason = (
+                "research budget exhausted before the Scientist submitted "
+                "directions"
+            )
+            print(f"[scientist] {abstain_reason}", flush=True)
+            self._suspension_checkpoint(
+                system_prompt, messages, state, session, deadline, usages,
+                current_round,
+            )
+            return ScientistRound(
+                proposals=[],
+                abstained=True,
+                abstain_reason=abstain_reason,
                 usage=usages,
                 deliberation_telemetry=_build_telemetry(
-                    state, steps=steps_budget, outcome="block",
-                    reason_kind="contradiction"),
+                    state, steps=steps_budget, outcome="abstain"),
                 trace=_build_trace(
-                    state, round_id=current_round, outcome="block",
-                    reason_kind="contradiction", explore=explore),
+                    state, round_id=current_round, outcome="abstain"),
             )
+
+    def _suspension_checkpoint(
+        self, system_prompt: str, messages: list[dict], state: WorkingState,
+        session: ScientistSession, deadline: float, usages: list,
+        round_id: int,
+    ) -> None:
+        """Ask the Scientist to leave a continuation note for its resumed self,
+        and persist it as the notebook (rewritten, not appended).
+
+        Best-effort: a parse failure or zero remaining budget leaves the prior
+        notebook untouched rather than failing the round.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 5:
+            return
+        prompt_messages = list(messages) + [{"role": "user", "content": _SUSPEND_PROMPT}]
+        try:
+            reply = self.model.complete(
+                system=system_prompt, messages=prompt_messages,
+                timeout_seconds=remaining,
+            )
+        except Exception as exc:
+            print(f"[scientist] suspension checkpoint model call failed: {exc}",
+                  flush=True)
+            return
+        if reply.usage is not None:
+            usages.append(reply.usage)
+            if self.usage_observer is not None:
+                self.usage_observer(reply.usage)
+        try:
+            obj = json.loads(reply.text)
+            note = obj.get("notebook")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            note = None
+        if isinstance(note, str) and note.strip():
+            session.write_notebook(note.strip())
+            session.append_message("user", _SUSPEND_PROMPT, round_id=round_id)
+            session.append_message("assistant", reply.text, round_id=round_id)
+            print("[scientist] notebook updated at suspension", flush=True)
+        else:
+            print("[scientist] suspension produced no notebook; left as-is",
+                  flush=True)
