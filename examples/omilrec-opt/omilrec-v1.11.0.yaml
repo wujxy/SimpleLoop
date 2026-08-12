@@ -28,22 +28,20 @@ task:
     changes. See CLAUDE.md "FCN Idempotency" for the rules.
 
 safety:
+  # The writable world: the source under optimization + the build-output dirs
+  # the eval writes (build, TEMP — gitignored, so they never get committed).
+  # Everything else in the repo (tests, scripts, CMakeLists, docs, ...) is
+  # mounted read-only AUTOMATICALLY: the whole tree is visible and runnable,
+  # and edits outside this set fail with EROFS. The mount IS the ro/rw boundary.
   editable_paths:
-    - "OMILRECV2/src/**/*.cc"
-    - "OMILRECV2/src/**/*.h"
-  frozen_paths:
-    - "tests/**"
-    - "scripts/**"
-    - "benchmarks/**"
-    - "CMakeLists.txt"
-    - "OMILRECV2/CMakeLists.txt"
-    - "tests/unit/CMakeLists.txt"
-    - "pyproject.toml"
-    - "docs/**"
-    - "CLAUDE.md"
-    - "README.md"
-    - ".gitattributes"
-    - ".gitignore"
+    - OMILRECV2/src
+    - OMILRECV2/python
+    - CMakeLists.txt
+    - OMILRECV2/CMakeLists.txt
+    - build
+    - build-asan
+    - InstallArea
+    - TEMP
 
 loop:
   max_rounds: 4

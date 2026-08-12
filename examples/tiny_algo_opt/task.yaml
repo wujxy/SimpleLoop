@@ -7,13 +7,12 @@ task:
     suite and scripts/check_drift.py must still pass. Edit only tinyalgo source.
 
 safety:
-  # The executor's writable world: only the tinyalgo source dir is mounted
-  # read-write into the executor container. tests/ + scripts/ (the eval harness)
-  # are NOT listed, so they are absent from the executor — it can neither see
-  # nor edit them. No after-the-fact path gate; the mount IS the constraint.
+  # The writable world: the tinyalgo source dir either lane MAY change.
+  # Everything else (tests, scripts — the eval harness) is mounted read-only
+  # AUTOMATICALLY: visible and runnable, but edits there fail with EROFS.
+  # The mount IS the ro/rw boundary.
   editable_paths:
     - tinyalgo
-  read_only_paths: []
 
 loop:
   max_rounds: 4

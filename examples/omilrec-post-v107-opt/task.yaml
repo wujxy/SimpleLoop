@@ -20,7 +20,6 @@ safety:
     - build-asan
     - InstallArea
     - TEMP
-  read_only_paths: []
 
 loop:
   max_rounds: 20

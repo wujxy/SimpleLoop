@@ -66,7 +66,7 @@ def _write_task_config(
     raw = {
         "kind": "task",
         "task": {"goal": "test"},
-        "safety": {"editable_paths": ["**/*.py"]},
+        "safety": {"editable_paths": ["src"]},
         "loop": {"max_rounds": 1},
         "runtime": {"image": "runtime.sif"},
         "eval": {

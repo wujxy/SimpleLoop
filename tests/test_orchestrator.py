@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from simpleloop.memory import MemoryService
+from simpleloop.container.runtime import MountMap
 from simpleloop.roles.orchestrator import (
     ProposerOrchestrator, _Mode,
     _sample_generative_ops, _SCHEDULED_OP_COUNT,
@@ -101,6 +102,7 @@ def _run_args(tmp_path, candidates_per_round=2):
     return {"goal": "make it faster", "editable": ["src/**"],
             "frozen": ["tests/**"], "memory_service": MemoryService(
                 run_dir=run_dir, metrics_schema=_METRICS_SCHEMA),
+            "world_mount": MountMap(),
             "base_sha": "abc", "workspaces": [ws], "repo_path": repo,
             "run_dir": run_dir, "current_round": 0,
             "candidates_per_round": candidates_per_round,
@@ -331,8 +333,10 @@ class TestPartnerLanes:
         ctx = received_context[0]
         assert "make it faster" in ctx              # objective
         assert "abc" in ctx                          # base_sha
-        assert "src/**" in ctx                       # editable
-        assert "tests/**" in ctx                     # frozen
+        assert "src/**" in ctx                       # editable (writable world)
+        # Frozen paths are no longer listed — the mount enforces them (EROFS).
+        assert "frozen" not in ctx.lower()
+        assert "read-only" in ctx.lower() or ":ro" in ctx
         # No history/dashboard/explore/frontier in the generation context.
         assert "dashboard" not in ctx.lower()
         assert "frontier" not in ctx.lower()
@@ -386,6 +390,7 @@ class TestFeedbackLoop:
                     cards=[_card(mech="initial")])
             def regenerate(self, *, context, feedback, transcript,
                            source_path=None, repo_path=None, run_dir=None,
+                           world_mount=None,
                            prompt_dir=None, assigned_ops=None, max_steps=None,
                            hypotheses_per_lane=1, ideas_per_lens=1):
                 regen_calls.append(feedback)
@@ -439,6 +444,7 @@ class TestFeedbackLoop:
                     cards=[_card(mech="initial")])
             def regenerate(self, *, context, feedback, transcript,
                            source_path=None, repo_path=None, run_dir=None,
+                           world_mount=None,
                            prompt_dir=None, assigned_ops=None, max_steps=None,
                            hypotheses_per_lane=1, ideas_per_lens=1):
                 self.n += 1
@@ -494,7 +500,7 @@ class TestGeneratorRegenerate:
                     captured["system"] = system
                     return ModelReply(json.dumps({
                         "action": "run_research_command",
-                        "command": "ls src/", "cwd": "workspace",
+                        "command": "ls src/", "cwd": "work",
                     }))
                 if self._n == 2:
                     return ModelReply(json.dumps({
@@ -534,7 +540,7 @@ class TestGeneratorRegenerate:
             context="history-free context", feedback=feedback,
             transcript=transcript,
             source_path=tmp_path / "src", repo_path=tmp_path / "repo",
-            run_dir=tmp_path / "run",
+            run_dir=tmp_path / "run", world_mount=MountMap(),
         )
         msgs = captured["messages"]
         # context is first, then transcript, then feedback
@@ -557,7 +563,9 @@ class TestGenerationContext:
         assert "make it faster" in ctx
         assert "abc123" in ctx
         assert "src/**" in ctx
-        assert "tests/**" in ctx
+        # frozen list is no longer rendered — the mount enforces the ro/rw split
+        assert "frozen" not in ctx.lower()
+        assert "read-only" in ctx.lower() or ":ro" in ctx
         assert "- gate: pass" in ctx
         # No history/dashboard/explore/frontier.
         assert "dashboard" not in ctx.lower()

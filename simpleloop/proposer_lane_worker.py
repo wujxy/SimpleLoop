@@ -30,7 +30,7 @@ from pathlib import Path
 
 from . import config as config_mod
 from .candidate_worker import write_result
-from .container.runtime import ApptainerRuntime
+from .container.runtime import ApptainerRuntime, world_mount_map
 from .harness import views
 from .harness.workspace import Workspace
 from .memory import MemoryService
@@ -235,7 +235,10 @@ def run_lane(deps: ProposerLaneDeps, spec: ProposerLaneSpec) -> dict:
         base_sha=spec.base_sha,
         goal=cfg["goal"],
         editable=cfg["editable_paths"],
+        # frozen is now mount-enforced (EROFS outside editable); vestigial list
+        # kept for call-site compatibility.
         frozen=[],
+        world_mount=world_mount_map(cfg),
         memory_service=deps.memory_service,
         repo_path=deps.workspace.repo,
         run_dir=deps.run_dir,

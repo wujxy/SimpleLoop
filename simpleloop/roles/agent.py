@@ -148,16 +148,12 @@ class Agent:
         try:
             if self.mounts is not None:
                 sandbox = tempfile.mkdtemp(prefix="simpleloop-exec-")
-                scaffold = Path(sandbox) / "work"
                 home = Path(sandbox) / "home"
-                scaffold.mkdir()
                 home.mkdir(mode=0o700)
             else:
-                scaffold = None
                 home = None
             argv = self.runtime.exec_argv(
-                payload, cwd=cwd, mounts=self.mounts,
-                scaffold=scaffold, home=home)
+                payload, cwd=cwd, mounts=self.mounts, home=home)
 
             prompt_bytes = prompt.encode("utf-8")
             print(f"[{label}] claude call started (timeout={self.timeout_seconds}s, cwd={cwd}, "

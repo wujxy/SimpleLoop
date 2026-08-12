@@ -13,7 +13,7 @@ from simpleloop.harness import evals as evals_mod
 from simpleloop import loop as loop_mod
 from simpleloop.container import runtime as runtime_mod
 from simpleloop.harness.evals import EvalResult
-from simpleloop.container.runtime import ApptainerRuntime, RuntimePreflightError
+from simpleloop.container.runtime import ApptainerRuntime, MountMap, RuntimePreflightError
 
 
 _MISSING = object()
@@ -289,18 +289,26 @@ def test_exec_argv_does_not_duplicate_run_directory_bind(tmp_path: Path):
     assert f"{runtime.run_dir}:{runtime.run_dir}:rw" in argv
 
 
-def test_research_argv_is_contained_offline_with_writable_workspace(
+def test_proposer_exec_argv_is_contained_offline_with_worktree_ro_world(
     tmp_path: Path,
 ):
+    """The proposer's /work world: the whole worktree mounted read-only, the
+    editable path overlaid read-write, external data read-only, plus /repo +
+    /scratch + history as extra_binds, fully offline (--network none). The host
+    worktree never leaks wholesale and credentials stay out."""
     base = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
     runtime = ApptainerRuntime(
         base.image, [tmp_path], base.run_dir,
         executable=base.executable,
     )
-    workspace = tmp_path / "workspace"
-    repo = tmp_path / "repo-view"
+    worktree = tmp_path / "worktree"
+    (worktree / "src").mkdir(parents=True)    # editable (overlaid rw)
+    (worktree / "tests").mkdir(parents=True)  # read-only (via the ro base)
+    repo = tmp_path / "repo"
     scratch = tmp_path / "scratch"
-    for path in (workspace, repo, scratch):
+    data = tmp_path / "data"
+    home = tmp_path / "home"
+    for path in (repo, scratch, data, home):
         path.mkdir()
     history = runtime.run_dir / "history.jsonl"
     history.write_text("{}\n", encoding="utf-8")
@@ -309,73 +317,74 @@ def test_research_argv_is_contained_offline_with_writable_workspace(
     secret = runtime.run_dir / "job_env.sh"
     secret.write_text("export ANTHROPIC_API_KEY=secret\n", encoding="utf-8")
 
-    argv = runtime.research_exec_argv(
+    mounts = MountMap(rw=("src",), external_ro=(str(data),))
+    extra_binds = [
+        f"{repo.resolve()}:/repo:ro",
+        f"{scratch.resolve()}:/scratch:rw",
+        f"{history.resolve()}:/history.jsonl:ro",
+        f"{rounds.resolve()}:/rounds:ro",
+    ]
+    argv = runtime.exec_argv(
         ["bash", "-lc", "git show --stat HEAD"],
-        workspace=workspace,
-        repo=repo,
-        history=runtime.run_dir,
-        scratch=scratch,
-        cwd="workspace",
+        cwd=worktree, mounts=mounts, home=home,
+        extra_binds=extra_binds, work_cwd="/work", network=False,
     )
 
     assert "--containall" in argv
     assert argv[argv.index("--network") + 1] == "none"
-    # /workspace is the writable lab (read-write); /repo stays read-only so the
-    # proposer can read history but cannot commit.
-    assert f"{workspace.resolve()}:/workspace:rw" in argv
+    # the worktree-ro world: whole worktree ro at /work, editable overlaid rw
+    assert f"{worktree.resolve()}:/work:ro" in argv
+    assert f"{(worktree / 'src').resolve()}:/work/src:rw" in argv
+    assert f"{data.resolve()}:{data.resolve()}:ro" in argv
+    # role extras
     assert f"{repo.resolve()}:/repo:ro" in argv
+    assert f"{scratch.resolve()}:/scratch:rw" in argv
     assert f"{history.resolve()}:/history.jsonl:ro" in argv
     assert f"{rounds.resolve()}:/rounds:ro" in argv
-    assert f"{scratch.resolve()}:/scratch:rw" in argv
+    # the host run_dir does not leak wholesale; the secret stays out
     assert f"{tmp_path.resolve()}:{tmp_path.resolve()}:ro" not in argv
     assert not any(str(secret) in arg for arg in argv)
-    assert argv[argv.index("--cwd") + 1] == "/workspace"
+    assert argv[argv.index("--cwd") + 1] == "/work"
 
 
-def test_research_argv_omits_history_mounts_when_history_is_none(
+def test_proposer_exec_argv_omits_history_binds_for_history_blind_generator(
     tmp_path: Path,
 ):
-    """The history-blind Generator passes history=None so /history.jsonl and
-    /rounds never enter its container — the boundary is the mount itself, not a
-    prompt instruction. Files may exist on disk; None still skips the binds."""
+    """The history-blind Generator passes no history in extra_binds, so
+    /history.jsonl and /rounds never enter its container — even when the files
+    exist on disk. The boundary is what is in extra_binds, not a prompt."""
     base = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
     runtime = ApptainerRuntime(
         base.image, [tmp_path], base.run_dir,
         executable=base.executable,
     )
-    workspace = tmp_path / "workspace"
-    repo = tmp_path / "repo-view"
+    worktree = tmp_path / "worktree"
+    (worktree / "src").mkdir(parents=True)
+    repo = tmp_path / "repo"
     scratch = tmp_path / "scratch"
-    for path in (workspace, repo, scratch):
+    home = tmp_path / "home"
+    for path in (repo, scratch, home):
         path.mkdir()
-    # History files exist on disk — None must still suppress the binds.
+    # History files exist on disk — omitting them from extra_binds keeps them out.
     (runtime.run_dir / "history.jsonl").write_text("{}\n", encoding="utf-8")
     (runtime.run_dir / "rounds").mkdir()
 
-    argv = runtime.research_exec_argv(
+    mounts = MountMap(rw=("src",))
+    extra_binds = [
+        f"{repo.resolve()}:/repo:ro",
+        f"{scratch.resolve()}:/scratch:rw",
+    ]
+    argv = runtime.exec_argv(
         ["bash", "-lc", "true"],
-        workspace=workspace,
-        repo=repo,
-        history=None,
-        scratch=scratch,
-        cwd="workspace",
+        cwd=worktree, mounts=mounts, home=home,
+        extra_binds=extra_binds, work_cwd="/work", network=False,
     )
 
     assert not any(":/history.jsonl:ro" in a for a in argv)
     assert not any(":/rounds:ro" in a for a in argv)
-    # The core research mounts are unaffected.
-    assert f"{workspace.resolve()}:/workspace:rw" in argv
+    # the core research extras are unaffected.
     assert f"{repo.resolve()}:/repo:ro" in argv
     assert f"{scratch.resolve()}:/scratch:rw" in argv
-
-
-def test_research_argv_accepts_only_workspace_or_scratch_cwd(tmp_path: Path):
-    runtime = _make_runtime(tmp_path)
-    with pytest.raises(ValueError, match="workspace.*scratch"):
-        runtime.research_exec_argv(
-            ["true"], workspace=tmp_path, repo=tmp_path,
-            history=tmp_path, scratch=tmp_path, cwd="history",
-        )
 
 
 def test_research_env_contains_no_credentials(monkeypatch, tmp_path: Path):

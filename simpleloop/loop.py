@@ -32,7 +32,7 @@ from .harness import views
 from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
-from .container.runtime import ApptainerRuntime, executor_mount_map
+from .container.runtime import ApptainerRuntime, world_mount_map
 from .harness.workspace import Workspace
 from .processes import run_signal_handlers
 
@@ -249,7 +249,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
     try:
         ctx.runtime.executor_preflight(
             worktree=preflight_worktree,
-            mounts=executor_mount_map(cfg),
+            mounts=world_mount_map(cfg),
         )
     finally:
         ctx.workspace.remove_worktree(preflight_id)
@@ -514,7 +514,7 @@ def _build_context(
                            model=executor["model"],
                            base_url=executor["base_url"],
                            usage_observer=telemetry.record_usage,
-                           mounts=executor_mount_map(cfg))
+                           mounts=world_mount_map(cfg))
     workspace = Workspace(
         run_dir=run_dir_path,
         repo_path=cfg["repo_path"],

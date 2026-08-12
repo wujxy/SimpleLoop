@@ -54,49 +54,63 @@ def test_default_backend_is_local(tmp_path: Path):
     assert cfg["hepjob"]["max_attempts"] == 2
 
 
-def test_executor_read_only_binds_resolve_absolute_paths(tmp_path: Path):
+def test_read_only_binds_resolve_absolute_paths(tmp_path: Path):
     raw = _base_task(tmp_path)
     dep = tmp_path / "dep"
     dep.mkdir()
-    raw["runtime"]["executor_read_only_binds"] = [str(dep)]
+    raw["runtime"]["read_only_binds"] = [str(dep)]
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     cfg = config_mod.load(path)
 
-    assert cfg["executor_read_only_binds"] == [str(dep.resolve())]
+    assert cfg["read_only_binds"] == [str(dep.resolve())]
 
 
-def test_executor_read_only_binds_default_empty(tmp_path: Path):
+def test_read_only_binds_default_empty(tmp_path: Path):
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(_base_task(tmp_path)), encoding="utf-8")
-    assert config_mod.load(path)["executor_read_only_binds"] == []
+    assert config_mod.load(path)["read_only_binds"] == []
 
 
 @pytest.mark.parametrize("value", ["relative", "", 7])
-def test_executor_read_only_binds_reject_invalid_entries(
+def test_read_only_binds_reject_invalid_entries(
     tmp_path: Path, value,
 ):
     raw = _base_task(tmp_path)
-    raw["runtime"]["executor_read_only_binds"] = [value]
+    raw["runtime"]["read_only_binds"] = [value]
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     with pytest.raises(
-        config_mod.ConfigError, match="runtime.executor_read_only_binds",
+        config_mod.ConfigError, match="runtime.read_only_binds",
     ):
         config_mod.load(path)
 
 
-def test_executor_read_only_binds_reject_missing_directory(tmp_path: Path):
+def test_read_only_binds_reject_missing_directory(tmp_path: Path):
     raw = _base_task(tmp_path)
-    raw["runtime"]["executor_read_only_binds"] = [str(tmp_path / "missing")]
+    raw["runtime"]["read_only_binds"] = [str(tmp_path / "missing")]
     path = tmp_path / "task.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     with pytest.raises(
-        config_mod.ConfigError, match="runtime.executor_read_only_binds",
+        config_mod.ConfigError, match="runtime.read_only_binds",
     ):
+        config_mod.load(path)
+
+
+@pytest.mark.parametrize("removed_key", ["frozen_paths", "read_only_paths"])
+def test_safety_rejects_removed_keys(tmp_path: Path, removed_key: str):
+    """The safety block rejects unknown keys loudly. Both frozen_paths and
+    read_only_paths were removed — only editable_paths remains (everything
+    else is mounted read-only automatically), so neither old key is accepted."""
+    raw = _base_task(tmp_path)
+    raw["safety"][removed_key] = ["tests/**"]
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(config_mod.ConfigError, match="unknown key"):
         config_mod.load(path)
 
 

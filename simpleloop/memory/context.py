@@ -1,9 +1,15 @@
 """Build the Proposer's round-start context pack.
 
 The pack is deliberately compact — objective, gates, accepted revision,
-editable/frozen paths, the most recent factual dashboard, the Research
-Frontier, and a memory-tool cheatsheet. It carries NO ``ref: note`` full
-history, and NO instruction to summarize prior candidates. See design doc §6.1.
+the editable (writable) path set + the read-only world statement, the most
+recent factual dashboard, the Research Frontier, and a memory-tool cheatsheet.
+It carries NO ``ref: note`` full history, and NO instruction to summarize prior
+candidates. See design doc §6.1.
+
+Note: the ``frozen`` parameter is retained in the signatures for call-site
+compatibility but is no longer rendered — under the mount-world model the
+read-only set is "everything not editable", enforced by the container mount
+(EROFS), so an explicit frozen list adds nothing.
 """
 from __future__ import annotations
 
@@ -34,8 +40,9 @@ Harness Gates:
 {gate_block or "(declared in factual records)"}
 
 Current accepted revision: {base_sha}
-Editable paths: {json.dumps(editable, ensure_ascii=False)}
-Frozen paths: {json.dumps(frozen, ensure_ascii=False)}
+Editable paths (writable world — mounted :rw): {json.dumps(editable, ensure_ascii=False)}
+Read-only world: every other path is mounted :ro — the whole repo is visible
+and runnable, but edits outside the editable set fail at the filesystem.
 """
 
 
@@ -83,8 +90,9 @@ Harness Gates:
 {gate_block or "(declared in factual records)"}
 
 Current accepted revision: {base_sha}
-Editable paths: {json.dumps(editable, ensure_ascii=False)}
-Frozen paths: {json.dumps(frozen, ensure_ascii=False)}
+Editable paths (writable world — mounted :rw): {json.dumps(editable, ensure_ascii=False)}
+Read-only world: every other path is mounted :ro — the whole repo is visible
+and runnable, but edits outside the editable set fail at the filesystem.
 
 Recent factual dashboard (last {recent_rounds} round(s), authoritative harness output):
 {dashboard}

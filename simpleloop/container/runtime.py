@@ -80,10 +80,17 @@ mkdir -p "$HOME/.claude" || { echo "executor home is not writable" >&2; exit 126
     exit 126
 }
 rm "$HOME/.claude/simpleloop-preflight"
-test ! -e /work/.simpleloop-preflight-hidden || {
-    echo "unlisted worktree path leaked into executor" >&2
+# The whole worktree is mounted read-only at /work. The sentinel (written by
+# the harness at the worktree root) must be VISIBLE but UNWRITABLE — proving
+# the ro base is enforced by the filesystem itself, not a post-hoc gate.
+test -e /work/.simpleloop-preflight-hidden || {
+    echo "worktree root is not visible at /work" >&2
     exit 126
 }
+if : >> /work/.simpleloop-preflight-hidden 2>/dev/null; then
+    echo "read-only base is writable at /work (ro enforcement failed)" >&2
+    exit 126
+fi
 for spec in "$@"; do
     mode=${spec%%:*}
     path=${spec#*:}
@@ -97,11 +104,12 @@ for spec in "$@"; do
                 test -w "/work/$path" || { echo "rw path is not writable: $path" >&2; exit 126; }
             fi
             ;;
-        ro)
-            test -e "/work/$path" || { echo "missing ro path: $path" >&2; exit 126; }
-            ;;
         external)
             test -e "$path" || { echo "missing external path: $path" >&2; exit 126; }
+            ;;
+        *)
+            echo "unknown preflight spec mode: $mode" >&2
+            exit 126
             ;;
     esac
 done
@@ -111,23 +119,30 @@ printf 'executor preflight: PASS\n'
 
 @dataclass(frozen=True)
 class MountMap:
-    """The executor's file world: worktree-relative paths to mount read-write
-    (the writable world — source + build-output dirs) and read-only (the build
-    needs to read them but they are not optimization targets). Anything not
-    listed is ABSENT from the executor container. Pure data — the harness fills
-    it from config; no project-specific names live here."""
+    """The writable subset of the file world both lanes mount. The whole
+    worktree is mounted read-only at ``/work`` (everything visible + runnable);
+    each path in ``rw`` is overlaid ``:rw`` on top (the writable world — source
+    + build-output dirs the agent/eval may write). ``external_ro`` are absolute
+    host dirs (e.g. /cvmfs) mounted ``:ro`` as-is. Pure data — the harness
+    fills it from config; no project-specific names live here."""
 
     rw: tuple[str, ...] = ()
-    ro: tuple[str, ...] = ()
     external_ro: tuple[str, ...] = ()
 
 
-def executor_mount_map(cfg: dict) -> MountMap:
-    """Build the executor's complete, role-scoped filesystem contract."""
+def world_mount_map(cfg: dict) -> MountMap:
+    """Build the shared filesystem contract both lanes derive from.
+
+    The writable world is ``editable_paths``; everything else in the worktree
+    is mounted read-only automatically (the whole tree is visible + runnable,
+    only the editable subset is writable). Both lanes use the same map — so the
+    writable set (the only thing that matters for proposal feasibility) is
+    identical across lanes — and layer role extras (``/repo``, ``/scratch``,
+    history) on top via ``extra_binds``.
+    """
     return MountMap(
         rw=tuple(cfg["editable_paths"]),
-        ro=tuple(cfg.get("read_only_paths") or ()),
-        external_ro=tuple(cfg.get("executor_read_only_binds") or ()),
+        external_ro=tuple(cfg.get("read_only_binds") or ()),
     )
 
 
@@ -138,25 +153,15 @@ def _account_home() -> Path:
     return home
 
 
-def _prepare_bind_source(
-    worktree: Path, rel: str, *, writable: bool,
-) -> Path | None:
-    """Resolve a worktree-relative mount source. Build-output dirs (rw) may not
-    exist yet — create them so the bind source exists. read-only paths that
-    don't exist are warned and skipped (the build can't read what isn't there,
-    but a stale config entry shouldn't abort the run)."""
+def _prepare_rw_source(worktree: Path, rel: str) -> Path:
+    """Resolve a worktree-relative WRITABLE overlay source. Build-output dirs
+    (e.g. ``build``, ``TEMP``) may not exist yet in a fresh worktree — create
+    them so the ``:rw`` overlay bind source exists."""
     src = worktree / rel
     if src.exists():
         return src
-    if writable:
-        src.mkdir(parents=True, exist_ok=True)
-        return src
-    print(
-        f"[runtime] warning: read-only mount '{rel}' not found in worktree; "
-        f"skipping",
-        flush=True,
-    )
-    return None
+    src.mkdir(parents=True, exist_ok=True)
+    return src
 
 
 class ApptainerRuntime:
@@ -184,18 +189,29 @@ class ApptainerRuntime:
         *,
         cwd: str | Path,
         mounts: "MountMap | None" = None,
-        scaffold: str | Path | None = None,
         home: str | Path | None = None,
+        extra_binds: Sequence[str] = (),
+        work_cwd: str = "/work",
+        network: bool = True,
     ) -> list[str]:
         """Return one shell-free Apptainer argv for a payload command.
 
         Without ``mounts`` the whole ``run_dir`` is mounted read-write (the
-        baseline-eval / legacy path). With ``mounts`` the executor's file world
-        is constructed instead: an empty ``scaffold`` dir is mounted at
-        ``/work`` and only the declared rw/ro subpaths (relative to ``cwd``,
-        the candidate worktree) appear under it — everything else is absent.
-        ``--containall`` + ``--no-mount cwd,home,hostfs`` prevent the host
-        worktree from leaking into the container."""
+        baseline-eval / legacy path). With ``mounts`` the lane's file world is
+        constructed instead: the whole candidate worktree (``cwd``) is mounted
+        at ``/work`` READ-ONLY (everything visible + runnable), and each
+        declared writable path (``mounts.rw``, relative to the worktree) is
+        overlaid ``:rw`` on top. So the agent sees the entire repo and can
+        build/test, but writes outside the editable set fail with EROFS at the
+        filesystem — the ro/rw split is enforced by the mount, not a gate.
+        ``mounts.external_ro`` (absolute host dirs like /cvmfs) are mounted
+        ``:ro`` as-is. Both lanes use this path; they differ only in the
+        ``MountMap`` (shared derivation) and the role-specific ``extra_binds``
+        (raw ``src:dst:mode`` strings the caller assembles, e.g. the proposer's
+        ``/repo``/``/scratch``/history). ``work_cwd`` overrides the in-container
+        cwd (default ``/work``; the proposer passes ``/scratch`` for
+        scratch-cwd commands). ``--containall`` + ``--no-mount cwd,home,hostfs``
+        prevent the host worktree from leaking into the container."""
         argv = [self.executable, "exec", "--cleanenv", "--no-eval"]
         # --userns (default) avoids needing setuid on shared HPC nodes; set
         # SIMPLELOOP_APPTAINER_USERNS=0 to fall back to setuid.
@@ -208,32 +224,35 @@ class ApptainerRuntime:
             argv.extend(["--bind", f"{self.run_dir}:{self.run_dir}:rw"])
             cwd_arg = str(Path(cwd).expanduser().resolve())
         else:
-            if scaffold is None:
-                raise ValueError("executor scaffold is required")
             if home is None:
-                raise ValueError("executor home is required")
+                raise ValueError("agent home is required")
             worktree = Path(cwd).expanduser().resolve()
-            scaffold_dir = Path(scaffold).expanduser().resolve()
             home_dir = Path(home).expanduser().resolve()
             argv += ["--containall", "--no-mount", "cwd,home,hostfs"]
-            argv.extend([
-                "--bind", f"{home_dir}:{self.executor_home}:rw",
-            ])
-            # Empty scaffold -> /work: the container root of the executor's
-            # world. Only the bound subpaths appear under it.
-            argv.extend(["--bind", f"{scaffold_dir}:/work:rw"])
+            if not network:
+                # Fully offline (matches the historical proposer research
+                # boundary). --containall already implies --net; --network none
+                # removes all interfaces.
+                argv += ["--net", "--network", "none"]
+            argv.extend(["--bind", f"{home_dir}:{self.executor_home}:rw"])
+            # The whole worktree is the agent's /work, read-only: everything is
+            # visible and runnable, nothing writable yet. No project names here
+            # — the writable subset is pure data from the MountMap.
+            argv.extend(["--bind", f"{worktree}:/work:ro"])
             for path in mounts.external_ro:
                 external = Path(path).expanduser().resolve()
                 argv.extend(["--bind", f"{external}:{external}:ro"])
+            # Overlay each declared writable subpath :rw on top of the ro base.
+            # Apptainer resolves the more-specific mount for its subtree, so a
+            # write under /work/<rw> succeeds while a write anywhere else under
+            # /work hits EROFS. A subpath that doesn't exist yet (e.g. a
+            # build-output dir) is created so the bind source exists.
             for rel in mounts.rw:
-                src = _prepare_bind_source(worktree, rel, writable=True)
-                if src is not None:
-                    argv.extend(["--bind", f"{src}:/work/{rel}:rw"])
-            for rel in mounts.ro:
-                src = _prepare_bind_source(worktree, rel, writable=False)
-                if src is not None:
-                    argv.extend(["--bind", f"{src}:/work/{rel}:ro"])
-            cwd_arg = "/work"
+                src = _prepare_rw_source(worktree, rel)
+                argv.extend(["--bind", f"{src}:/work/{rel}:rw"])
+            cwd_arg = work_cwd
+        for spec in extra_binds:
+            argv.extend(["--bind", spec])
         argv.extend(["--cwd", cwd_arg, str(self.image)])
         argv.extend(str(item) for item in payload)
         return argv
@@ -257,70 +276,23 @@ class ApptainerRuntime:
             env[f"APPTAINERENV_{key}"] = str(value)
         return env
 
-    def research_exec_argv(
-        self,
-        payload: Sequence[str],
-        *,
-        workspace: str | Path,
-        repo: str | Path,
-        history: str | Path | None,
-        scratch: str | Path,
-        cwd: str,
-    ) -> list[str]:
-        """Build the offline Proposer research boundary.
+    def research_subprocess_env(self, home: str | Path | None = None) -> dict[str, str]:
+        """Minimal launcher env for the offline research container.
 
-        ``workspace`` is the lane's writable git worktree (base_sha tree
-        materialized, history reachable read-only through the worktree's shared
-        object store). It is bind-mounted read-write at ``/workspace`` so the
-        proposer can write scratch code, compile, and run toy experiments.
-        ``/repo`` stays read-only, which structurally prevents the proposer
-        from committing (creating artifacts is the candidate's job, not the
-        proposer's). ``history`` is the run directory whose ``history.jsonl``
-        and ``rounds/`` are bind-mounted read-only for the Cognitive element;
-        pass ``None`` for the history-blind Generator so no past-experiment
-        files enter its world (the boundary is the mount, not a prompt)."""
-        if cwd not in {"workspace", "scratch"}:
-            raise ValueError("research cwd must be 'workspace' or 'scratch'")
-        argv = [
-            self.executable,
-            "exec",
-            "--cleanenv",
-            "--no-eval",
-            "--containall",
-            "--net",
-            "--network",
-            "none",
-        ]
-        if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
-            argv.append("--userns")
-        if history is not None:
-            evidence = Path(history).resolve()
-            history_file = evidence / "history.jsonl"
-            rounds = evidence / "rounds"
-            if history_file.is_file():
-                argv.extend([
-                    "--bind", f"{history_file}:/history.jsonl:ro",
-                ])
-            if rounds.is_dir():
-                argv.extend(["--bind", f"{rounds}:/rounds:ro"])
-        argv.extend([
-            "--bind", f"{Path(workspace).resolve()}:/workspace:rw",
-            "--bind", f"{Path(repo).resolve()}:/repo:ro",
-            "--bind", f"{Path(scratch).resolve()}:/scratch:rw",
-            "--cwd", f"/{cwd}", str(self.image),
-        ])
-        argv.extend(str(item) for item in payload)
-        return argv
-
-    def research_subprocess_env(self) -> dict[str, str]:
-        """Allow only launcher basics; never expose credentials or proxies."""
+        Allows only basics (never credentials/proxies). When ``home`` is given
+        (the container home path bound for the agent), set both HOME and
+        APPTAINERENV_HOME so in-container processes resolve the bound home."""
         allowed = {
             "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "LD_LIBRARY_PATH",
         }
-        return {
+        env = {
             key: value for key, value in os.environ.items()
             if key in allowed
         }
+        if home is not None:
+            env["HOME"] = str(home)
+            env["APPTAINERENV_HOME"] = str(home)
+        return env
 
     def preflight(self) -> None:
         """Verify host paths and required tools inside the configured image."""
@@ -371,13 +343,10 @@ class ApptainerRuntime:
         worktree_path = Path(worktree).expanduser().resolve()
         with tempfile.TemporaryDirectory(prefix="simpleloop-exec-preflight-") as root:
             root_path = Path(root)
-            scaffold = root_path / "work"
             home = root_path / "home"
-            scaffold.mkdir()
             home.mkdir(mode=0o700)
             specs = [
                 *(f"rw:{path}" for path in mounts.rw),
-                *(f"ro:{path}" for path in mounts.ro),
                 *(f"external:{path}" for path in mounts.external_ro),
             ]
             argv = self.exec_argv(
@@ -388,7 +357,6 @@ class ApptainerRuntime:
                 ],
                 cwd=worktree_path,
                 mounts=mounts,
-                scaffold=scaffold,
                 home=home,
             )
             sentinel = worktree_path / ".simpleloop-preflight-hidden"
@@ -396,7 +364,10 @@ class ApptainerRuntime:
                 raise RuntimePreflightError(
                     f"reserved preflight path already exists: {sentinel}"
                 )
-            sentinel.write_text("must stay hidden\n", encoding="utf-8")
+            # The worktree root is mounted ro at /work, so this sentinel must be
+            # VISIBLE at /work/... but unwritable (EROFS) — the script asserts
+            # exactly that, proving the ro/rw split is mount-enforced.
+            sentinel.write_text("must be visible but unwritable\n", encoding="utf-8")
             try:
                 completed = subprocess.run(
                     argv,

@@ -38,7 +38,7 @@ def _write_config(tmp_path: Path, loop_block: dict | None = None) -> Path:
     cfg = {
         "kind": "task",
         "task": {"goal": "go faster"},
-        "safety": {"editable_paths": ["src/**"], "frozen_paths": []},
+        "safety": {"editable_paths": ["src/**"]},
         "loop": {"max_rounds": 3, **(loop_block or {})},
         "runtime": {"image": "runtime.sif"},
         "source": {"path": str(repo), "baseline_ref": "HEAD"},
@@ -100,9 +100,11 @@ def test_default_omilrec_tasks_define_outcomes_not_research_methods(
         assert prescribed not in goal
     assert "OMILRECV2/src" in raw["safety"]["editable_paths"]
     assert "OMILRECV2/CMakeLists.txt" in raw["safety"]["editable_paths"]
-    # frozen_paths is gone — protection is now via the mount map (paths not in
-    # editable/read_only are absent from the executor container).
+    # frozen_paths AND read_only_paths are both gone — the read-only world is
+    # the whole worktree minus editable, enforced by the mount (ro base + :rw
+    # overlay for editable), not by an explicit frozen list.
     assert "frozen_paths" not in raw["safety"]
+    assert "read_only_paths" not in raw["safety"]
 
 
 def test_runtime_architecture_has_no_judger_module_or_packaged_prompt():
@@ -386,7 +388,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
               "gates": [{"key": "CORRECTNESS"}]}
     ctx = RunContext(
         cfg={
-            "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
+            "goal": "g", "editable_paths": ["src/**"],
             "eval_commands": ["eval"], "max_workers": 1, "metrics": schema,
         },
         workspace=workspace, executor_agent=object(),
@@ -424,7 +426,7 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
 
     ctx = RunContext(
         cfg={
-            "goal": "g", "editable_paths": ["src/**"], "frozen_paths": [],
+            "goal": "g", "editable_paths": ["src/**"],
             "eval_commands": [], "max_workers": 1, "metrics": _SCHEMA,
         },
         workspace=FakeWorkspace(), executor_agent=object(),
@@ -544,7 +546,7 @@ def test_next_proposals_creates_lane_workspaces_and_passes_them(tmp_path):
     ctx = RunContext(
         cfg={
             "goal": "faster", "editable_paths": ["src/**"],
-            "frozen_paths": [], "candidates_per_round": 1,
+            "candidates_per_round": 1,
         },
         run_dir=tmp_path,
         workspace=FakeWorkspace(),
@@ -586,7 +588,7 @@ def test_next_proposals_removes_lane_workspaces_when_proposer_fails(tmp_path):
             raise ValueError("bad proposal")
 
     ctx = RunContext(
-        cfg={"goal": "faster", "editable_paths": [], "frozen_paths": [],
+        cfg={"goal": "faster", "editable_paths": [],
              "candidates_per_round": 1},
         run_dir=tmp_path, workspace=FakeWorkspace(),
         store=type("Store", (), {"history": lambda self: []})(),
@@ -637,7 +639,6 @@ def _run_loop_integration(
     cfg = {
         "goal": "go faster",
         "editable_paths": ["src/**"],
-        "frozen_paths": [],
         "max_rounds": max_rounds,
         "candidates_per_round": 1,
         "max_workers": 1,
@@ -648,7 +649,7 @@ def _run_loop_integration(
         "eval_commands": [],
         "runtime_image": tmp_path / "runtime.sif",
         "runtime_binds": [],
-        "executor_read_only_binds": [tmp_path / "external-data"],
+        "read_only_binds": [tmp_path / "external-data"],
         "roles": {
             "researcher": {
                 "model": "gpt-5.5", "base_url": "https://example.invalid",
@@ -856,7 +857,6 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
     cfg = {
         "goal": "go faster",
         "editable_paths": ["src/**"],
-        "frozen_paths": [],
         "max_rounds": 1,
         "candidates_per_round": 3,
         "max_workers": 3,

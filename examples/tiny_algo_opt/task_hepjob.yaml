@@ -7,14 +7,11 @@ task:
     suite and scripts/check_drift.py must still pass. Edit only tinyalgo source.
 
 safety:
+  # The writable world: the tinyalgo source dir. Everything else (tests,
+  # scripts, benchmarks, docs) is mounted read-only AUTOMATICALLY — visible
+  # and runnable; edits outside this set fail with EROFS.
   editable_paths:
-    - "tinyalgo/**/*.py"
-  frozen_paths:
-    - "tests/**"
-    - "scripts/**"
-    - "benchmarks/**"
-    - "README.md"
-    - "pyproject.toml"
+    - tinyalgo
 
 loop:
   max_rounds: 3

@@ -6,6 +6,7 @@ import traceback
 import pytest
 
 from simpleloop.memory import MemoryService
+from simpleloop.container.runtime import MountMap
 from simpleloop.memory.models import ExistingFindingTarget, NewFindingTarget
 from simpleloop.roles import proposer as proposer_mod
 from simpleloop.roles.hypothesis import HypothesisCard
@@ -105,6 +106,7 @@ def _branch_args(tmp_path, *, frozen=None):
     (source / "src" / "foo.cc").write_text("// target\n", encoding="utf-8")
     return {"goal": "make it faster", "editable": ["src/**"],
             "frozen": frozen if frozen is not None else ["tests/**"],
+            "world_mount": MountMap(),
             "memory_service": MemoryService(
                 run_dir=run_dir, metrics_schema=_METRICS_SCHEMA),
             "base_sha": "abc123", "source_path": source, "repo_path": repo,
@@ -144,7 +146,7 @@ def _agent(model, *, max_steps=12, observer=None):
     '{"action":"search_findings"}',
     '{"action":"inspect_finding"}',
     '{"action":"list_findings","state":"bogus"}',
-    '{"action":"run_research_command","command":"","cwd":"workspace"}',
+    '{"action":"run_research_command","command":"","cwd":"work"}',
     '{"action":"run_research_command","command":"true","cwd":"host"}',
 ])
 def test_action_parser_rejects_malformed_contract(text):
@@ -155,7 +157,7 @@ def test_action_parser_rejects_malformed_contract(text):
 def test_action_parser_normalizes_cwd_and_proposals():
     command = _parse_action(
         '{"action":"run_research_command","command":"rg cache"}', 1)
-    assert command["cwd"] == "workspace"
+    assert command["cwd"] == "work"
     submit = _parse_action(
         '{"action":"submit_proposals","proposals":[{"instruction":"  Try A  ",'
         '"research_target":{"mode":"new","question":"is A the fix?"},'
@@ -376,7 +378,7 @@ def test_block_succeeds_with_valid_source_ref(tmp_path, monkeypatch):
     monkeypatch.setattr(proposer_mod, "ResearchTools", FakeTools)
     model = FakeModel([
         _reply({"action": "run_research_command", "command": "grep x src/",
-                "cwd": "workspace"}),
+                "cwd": "work"}),
         _reply(_block(explanation="the getter is absent")),
     ])
     result = _agent(model).research_batch(

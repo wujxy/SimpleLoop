@@ -1,6 +1,7 @@
-"""Executor mount-world construction: ``exec_argv(mounts=...)`` builds a
-container that exposes ONLY the declared rw/ro subpaths under /work and leaves
-everything else absent. No project names are hardcoded in the runtime — the
+"""Executor mount-world construction: ``exec_argv(mounts=...)`` mounts the
+whole candidate worktree read-only at /work and overlays each declared editable
+path read-write on top. Everything is visible + runnable; writes outside the
+editable set hit EROFS. No project names are hardcoded in the runtime — the
 mount map is pure data filled from config."""
 from __future__ import annotations
 
@@ -18,51 +19,51 @@ def _runtime(tmp_path: Path, binds=()) -> ApptainerRuntime:
     return ApptainerRuntime(image=image, binds=binds, run_dir=tmp_path)
 
 
-def test_exec_argv_with_mounts_builds_subset_world(tmp_path: Path):
+def test_exec_argv_with_mounts_overlays_editable_on_read_only_worktree(tmp_path: Path):
     wt = tmp_path / "wt"
     (wt / "src").mkdir(parents=True)
     (wt / "src" / "a.cc").write_text("x")
     (wt / "tests").mkdir(parents=True)
-    (wt / "tests" / "t.cc").write_text("secret")
-    # 'build' does NOT exist yet — the runtime must pre-create it (bind source
-    # must exist).
-    scaffold = tmp_path / "scaffold"
-    scaffold.mkdir()
+    (wt / "tests" / "t.cc").write_text("read me")
+    (wt / "CMakeLists.txt").write_text("project(x)")
+    # 'build' does NOT exist yet — the runtime must pre-create it (the rw
+    # overlay bind source must exist, and the eval writes build outputs there).
     home = tmp_path / "home"
     home.mkdir()
-    bind_dep = tmp_path / "dep"
+    bind_dep = tmp_path / "dep"        # a runtime.binds entry (evaluator dep)
     bind_dep.mkdir()
-    external = tmp_path / "external"
+    external = tmp_path / "external"   # an external_ro (e.g. /cvmfs data)
     external.mkdir()
     rt = _runtime(tmp_path, binds=[bind_dep])
 
     argv = rt.exec_argv(
         ["claude", "-p"], cwd=wt,
         mounts=MountMap(
-            rw=("src", "build"), ro=("tests",),
+            rw=("src", "build"),
             external_ro=(str(external),),
         ),
-        scaffold=scaffold, home=home,
+        home=home,
     )
 
     # container is contained + host worktree/cwd/home/hostfs do NOT leak in
     assert "--containall" in argv
     assert argv[argv.index("--no-mount") + 1] == "cwd,home,hostfs"
     assert f"{home}:{rt.executor_home}:rw" in argv
-    # scaffold -> /work (the container root of the constructed world)
-    assert f"{scaffold}:/work:rw" in argv
-    # declared rw subpaths mounted rw, ro subpaths mounted ro — under /work
+    # the WHOLE worktree is the read-only /work base (everything visible)
+    assert f"{wt}:/work:ro" in argv
+    # declared editable subpaths overlaid :rw on top of the ro base
     assert f"{wt / 'src'}:/work/src:rw" in argv
     assert f"{wt / 'build'}:/work/build:rw" in argv
-    assert f"{wt / 'tests'}:/work/tests:ro" in argv
-    # evaluator binds do not leak; explicitly declared Executor deps are ro.
-    assert f"{bind_dep}:{bind_dep}" not in argv
+    # external_ro mounted :ro as-is; runtime.binds (evaluator deps) do NOT leak
     assert f"{external}:{external}:ro" in argv
+    assert f"{bind_dep}:{bind_dep}" not in argv
     # cwd is the constructed /work, not the host worktree
     assert argv[argv.index("--cwd") + 1] == "/work"
     # the run_dir wholesale mount is NOT present (no leak)
     assert f"{tmp_path}:{tmp_path}:rw" not in argv
-    # the missing build dir was pre-created so the bind source exists
+    # no empty-scaffold /work mount anymore — the worktree itself is /work
+    assert not any(a.endswith(":/work:rw") for a in argv)
+    # the missing build dir was pre-created so the overlay bind source exists
     assert (wt / "build").is_dir()
 
 
@@ -77,41 +78,29 @@ def test_exec_argv_without_mounts_is_legacy_whole_run_dir(tmp_path: Path):
     assert argv[argv.index("--cwd") + 1] == str(wt.resolve())
 
 
-def test_read_only_mount_missing_is_skipped_not_fatal(tmp_path: Path, capsys):
+def test_mount_world_creates_missing_editable_dir(tmp_path: Path):
+    """A writable editable path that doesn't exist yet (e.g. a build-output dir
+    in a fresh worktree) is created so the :rw overlay bind source exists."""
     wt = tmp_path / "wt"
     (wt / "src").mkdir(parents=True)
-    scaffold = tmp_path / "scaffold"
-    scaffold.mkdir()
     home = tmp_path / "home"
     home.mkdir()
     rt = _runtime(tmp_path)
-    # 'stale' ro path does not exist in the worktree → warned + skipped, not raised
-    argv = rt.exec_argv(
+    rt.exec_argv(
         ["claude", "-p"], cwd=wt,
-        mounts=MountMap(rw=("src",), ro=("stale",)),
-        scaffold=scaffold, home=home,
+        mounts=MountMap(rw=("src", "build", "TEMP")),
+        home=home,
     )
-    assert "/work/stale" not in argv
-    assert "/work/src:rw" in " ".join(argv)
-    out = capsys.readouterr().out
-    assert "read-only mount 'stale'" in out
+    assert (wt / "build").is_dir()
+    assert (wt / "TEMP").is_dir()
 
 
-@pytest.mark.parametrize("missing", ["scaffold", "home"])
-def test_mount_world_requires_private_directories(tmp_path: Path, missing: str):
+def test_mount_world_requires_home(tmp_path: Path):
     wt = tmp_path / "wt"
     (wt / "src").mkdir(parents=True)
-    scaffold = None if missing == "scaffold" else tmp_path / "scaffold"
-    home = None if missing == "home" else tmp_path / "home"
-    if scaffold is not None:
-        scaffold.mkdir()
-    if home is not None:
-        home.mkdir()
-
-    with pytest.raises(ValueError, match=missing):
+    with pytest.raises(ValueError, match="home"):
         _runtime(tmp_path).exec_argv(
-            ["true"], cwd=wt, mounts=MountMap(rw=("src",)),
-            scaffold=scaffold, home=home,
+            ["true"], cwd=wt, mounts=MountMap(rw=("src",)), home=None,
         )
 
 
@@ -126,16 +115,16 @@ def test_executor_preflight_uses_production_mount_world(
 ):
     wt = tmp_path / "wt"
     (wt / "src").mkdir(parents=True)
-    hidden = wt / "protected"
-    hidden.mkdir()
-    evaluator = tmp_path / "evaluator"
+    (wt / "protected").mkdir()           # a non-editable path (ro via the base)
+    evaluator = tmp_path / "evaluator"   # a runtime.binds entry
     evaluator.mkdir()
-    external = tmp_path / "external"
+    external = tmp_path / "external"     # an external_ro
     external.mkdir()
     rt = _runtime(tmp_path, binds=[evaluator])
     captured = {}
 
     def fake_run(argv, **kwargs):
+        # the harness writes the sentinel at the worktree root before the run
         assert (wt / ".simpleloop-preflight-hidden").is_file()
         captured["argv"] = argv
         captured["env"] = kwargs["env"]
@@ -150,9 +139,15 @@ def test_executor_preflight_uses_production_mount_world(
 
     joined = " ".join(captured["argv"])
     assert "--no-mount cwd,home,hostfs" in joined
+    # whole worktree is the ro /work base; editable overlaid rw; external ro
+    assert f"{wt}:/work:ro" in joined
+    assert f"{wt / 'src'}:/work/src:rw" in joined
     assert f"{external}:{external}:ro" in joined
+    # runtime.binds (evaluator) and the empty scaffold do NOT appear
     assert str(evaluator) not in joined
+    assert "/work:rw" not in joined
     assert captured["env"]["APPTAINERENV_HOME"] == str(rt.executor_home)
+    # sentinel cleaned up after the run
     assert not (wt / ".simpleloop-preflight-hidden").exists()
 
 
@@ -172,12 +167,52 @@ def test_executor_preflight_reports_capability_failure(tmp_path: Path, monkeypat
 
 
 @pytest.mark.parametrize("raw,expected", [
+    # a trailing /** (legacy editable-glob form) is still stripped to its dir
     ("src/**", "src"),
     ("src/**/", "src"),
+    # real dir/file paths are passed through unchanged
     ("src", "src"),
     ("a/b", "a/b"),
     ("CMakeLists.txt", "CMakeLists.txt"),
+    ("build", "build"),
 ])
-def test_normalize_mount_path_strips_legacy_glob(raw, expected):
+def test_normalize_mount_path_strips_legacy_trailing_glob(raw, expected):
     from simpleloop.config import _normalize_mount_path
     assert _normalize_mount_path(raw) == expected
+
+
+@pytest.mark.parametrize("glob_path", [
+    "src/**/*.cc",     # mid-path glob — used to create a literal '**' dir
+    "src/**/*.h",
+    "src/*.cc",
+    "src/cache[a-z]",
+])
+def test_editable_paths_rejects_glob_patterns(tmp_path: Path, glob_path: str):
+    """Glob characters in editable_paths are rejected at config load — the
+    writable world must be real dirs/files a bind can target."""
+    from simpleloop import config as config_mod
+    raw = _base_task(tmp_path)
+    raw["safety"]["editable_paths"] = [glob_path]
+    path = tmp_path / "task.yaml"
+    path.write_text(__import__("yaml").safe_dump(raw), encoding="utf-8")
+    with pytest.raises(config_mod.ConfigError, match="glob pattern not supported"):
+        config_mod.load(path)
+
+
+def _base_task(tmp_path: Path) -> dict:
+    """Minimal valid task dict for config-load tests."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "src").mkdir(parents=True)
+    image = tmp_path / "image.sif"
+    image.write_text("dummy")
+    return {
+        "kind": "task",
+        "task": {"goal": "faster"},
+        "safety": {"editable_paths": ["src"]},
+        "loop": {"max_rounds": 1},
+        "source": {"path": str(repo)},
+        "runtime": {"image": str(image)},
+        "eval": {"commands": ["true"], "metrics": {
+            "objective": {"key": "SPEED_MS", "lower_is_better": True}}},
+    }

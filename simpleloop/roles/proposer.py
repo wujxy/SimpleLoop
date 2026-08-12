@@ -171,10 +171,11 @@ _PROTOCOL_BLOCK = """Control actions (you are done only when you submit or block
 """
 
 _RUNTIME_BOUNDARIES = """Runtime boundaries:
-- /workspace is your writable lab: the accepted source tree, materialized
-  read-write. Read it, write scratch code, compile, run toy experiments to
-  understand the code and the task. It is disposable — nothing you write here
-  becomes an artifact.
+- /work is your writable lab: the accepted source tree's editable paths,
+  materialized read-write. Read it, write scratch code, compile, run toy
+  experiments to understand the code and the task. It is disposable — nothing
+  you write here becomes an artifact. Other source files (tests, build files)
+  are visible read-only.
 - /repo is the read-only Git repository. Use `git show <sha>`, `git diff`,
   `git log` to inspect any prior experiment's source (the history is shared).
   You CANNOT commit, branch, or reset — creating artifacts is the candidate's
@@ -351,11 +352,11 @@ def _parse_action(text: str, candidates_per_round: int) -> dict:
     if name == "run_research_command":
         _require_keys(action, {"action", "command"}, {"cwd"})
         command = action["command"]
-        cwd = action.get("cwd", "workspace")
+        cwd = action.get("cwd", "work")
         if not isinstance(command, str) or not command.strip():
             raise ProposerError("research command must be non-empty")
-        if cwd not in {"workspace", "scratch"}:
-            raise ProposerError("research cwd must be workspace or scratch")
+        if cwd not in {"work", "scratch"}:
+            raise ProposerError("research cwd must be work or scratch")
         return {"action": name, "command": command, "cwd": cwd}
     if name == "inspect_episode":
         _require_keys(action, {"action", "ref"})
@@ -609,6 +610,7 @@ class ProposerAgent(ResearchAgent):
         goal: str,
         editable: list[str],
         frozen: list[str],
+        world_mount,
         memory_service,
         base_sha: str,
         source_path: Path,
@@ -738,13 +740,18 @@ class ProposerAgent(ResearchAgent):
         all_proposals: list[ResearchProposal] = []
         has_selected = False
 
-        with TemporaryDirectory(prefix="simpleloop-batch-") as scratch:
+        with TemporaryDirectory(prefix="simpleloop-batch-") as scratch, \
+                TemporaryDirectory(prefix="simpleloop-session-") as session_root:
+            home = Path(session_root) / "home"
+            home.mkdir(mode=0o700)
             tools = ResearchTools(
                 runtime=self.runtime,
                 workspace=source_path,
                 repo=repo_path,
                 history_dir=run_dir,
                 scratch=Path(scratch),
+                world_mount=world_mount,
+                home=home,
                 memory_service=memory_service,
                 command_timeout_seconds=self.command_timeout_seconds,
                 command_output_cap_chars=self.command_output_cap_chars,

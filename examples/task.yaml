@@ -28,18 +28,13 @@ task:
     code and the arithmetic constraint.
 
 safety:
-  # editable_paths  (required): glob list of files the executor MAY change.
+  # The writable world: the source dir either lane MAY change + the build-output
+  # dir the eval writes. Everything else (tests, scripts, CMakeLists, docs, ...)
+  # is mounted read-only AUTOMATICALLY — visible and runnable; edits outside
+  # this set fail with EROFS. The mount IS the ro/rw boundary.
   editable_paths:
-    - "src/**/*.cc"
-    - "src/**/*.h"
-  # frozen_paths (optional, default []): the gate rejects any edit here.
-  # Put tests, scripts, build files, reference/baseline data, and docs here.
-  frozen_paths:
-    - "tests/**"
-    - "scripts/**"
-    - "benchmarks/**"
-    - "CMakeLists.txt"
-    - "pyproject.toml"
+    - src
+    - build
 
 loop:
   max_rounds: 10                 # required, positive int

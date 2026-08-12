@@ -107,10 +107,10 @@ def test_omilrec_local_executor_binds_are_narrow_and_read_only():
         EXAMPLES / "omilrec-v100-opt" / "task_hints_local.yaml",
     )
 
-    assert cfg["executor_read_only_binds"] == ["/cvmfs", "/data/juno"]
+    assert cfg["read_only_binds"] == ["/cvmfs", "/data/juno"]
     assert not any(
         "omilrec_opt" in path
-        for path in cfg["executor_read_only_binds"]
+        for path in cfg["read_only_binds"]
     )
 
 

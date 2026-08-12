@@ -28,7 +28,6 @@ safety:
     - build-asan
     - InstallArea
     - TEMP
-  read_only_paths: []
 
 loop:
   max_rounds: 100
@@ -55,7 +54,7 @@ runtime:
     - /cvmfs
     - /data/juno
     - /datafs/users/wujxy/agent-sci/omilrec_opt
-  executor_read_only_binds:
+  read_only_binds:
     - /cvmfs
     - /data/juno
 

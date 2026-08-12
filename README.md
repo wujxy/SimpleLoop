@@ -55,7 +55,7 @@ task:
     implementation is the starting artifact, not a constraint on a solution.
 safety:
   editable_paths: ["src/**", "CMakeLists.txt"]
-  frozen_paths: ["tests/**", "scripts/**", "references/**"]
+  read_only_paths: ["tests/**", "scripts/**", "references/**"]
 loop:
   max_rounds: 10
   candidates_per_round: 1

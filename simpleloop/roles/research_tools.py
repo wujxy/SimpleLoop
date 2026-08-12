@@ -2,7 +2,8 @@
 
 Two families of tools:
   - ``ResearchCommandRunner`` runs a bounded shell command in a sandboxed
-    Apptainer boundary (workspace read-write, repo read-only for git history,
+    Apptainer boundary (the whole worktree mounted ``/work`` read-only, the
+    editable paths overlaid read-write — plus repo read-only for git history,
     scratch writable, no network).
   - ``ScientificMemoryTools`` dispatches the Proposer's memory operations to
     ``MemoryService``.
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
 
+from ..container.runtime import MountMap
 from ..processes import CHILD_PROCESSES
 
 
@@ -36,11 +38,11 @@ RESEARCH_TOOL_SPECS = (
         action="run_research_command",
         schema=(
             '{"action":"run_research_command","command":"...",'
-            '"cwd":"workspace|scratch"}'
+            '"cwd":"work|scratch"}'
         ),
         description=(
-            "Run a bounded shell command in your writable lab (/workspace) or "
-            "scratch (/scratch). /workspace is the accepted source tree "
+            "Run a bounded shell command in your writable lab (/work) or "
+            "scratch (/scratch). /work is the accepted source tree "
             "materialized read-write: read it, write scratch code, compile, "
             "run toys to understand the code. Git history (any prior "
             "experiment SHA) is readable via /repo; you cannot commit."
@@ -131,6 +133,8 @@ class ResearchCommandRunner:
         repo: Path,
         history_dir: Path | None,
         scratch: Path,
+        world_mount: MountMap,
+        home: Path,
         timeout_seconds: int,
         output_cap_chars: int,
     ):
@@ -139,6 +143,8 @@ class ResearchCommandRunner:
         self.repo = Path(repo)
         self.history_dir = Path(history_dir) if history_dir is not None else None
         self.scratch = Path(scratch)
+        self.world_mount = world_mount
+        self.home = Path(home)
         self.timeout_seconds = timeout_seconds
         self.output_cap_chars = output_cap_chars
 
@@ -146,35 +152,49 @@ class ResearchCommandRunner:
         self,
         command: str,
         *,
-        cwd: str = "workspace",
+        cwd: str = "work",
         timeout_seconds: float | None = None,
     ) -> dict:
         if not isinstance(command, str) or not command.strip():
             raise ValueError("research command must be non-empty")
-        if cwd not in {"workspace", "scratch"}:
-            raise ValueError("research cwd must be 'workspace' or 'scratch'")
+        if cwd not in {"work", "scratch"}:
+            raise ValueError("research cwd must be 'work' or 'scratch'")
         git_dir = self._worktree_git_dir()
         payload = [
             "env",
             f"GIT_DIR={git_dir}",
             "GIT_COMMON_DIR=/repo/.git",
-            "GIT_WORK_TREE=/workspace",
+            "GIT_WORK_TREE=/work",
             "bash",
             "-lc",
             command,
         ]
-        argv = self.runtime.research_exec_argv(
+        extra_binds = [
+            f"{self.repo.resolve()}:/repo:ro",
+            f"{self.scratch.resolve()}:/scratch:rw",
+        ]
+        if self.history_dir is not None:
+            history_file = self.history_dir / "history.jsonl"
+            rounds = self.history_dir / "rounds"
+            if history_file.is_file():
+                extra_binds.append(f"{history_file}:/history.jsonl:ro")
+            if rounds.is_dir():
+                extra_binds.append(f"{rounds}:/rounds:ro")
+        argv = self.runtime.exec_argv(
             payload,
-            workspace=self.workspace,
-            repo=self.repo,
-            history=self.history_dir,
-            scratch=self.scratch,
-            cwd=cwd,
+            cwd=self.workspace,
+            mounts=self.world_mount,
+            home=self.home,
+            extra_binds=extra_binds,
+            work_cwd="/scratch" if cwd == "scratch" else "/work",
+            network=False,
         )
         process = subprocess.Popen(
             argv,
             cwd=str(self.runtime.run_dir),
-            env=self.runtime.research_subprocess_env(),
+            env=self.runtime.research_subprocess_env(
+                home=self.runtime.executor_home
+            ),
             shell=False,
             text=True,
             stdout=subprocess.PIPE,
@@ -300,6 +320,8 @@ class ResearchTools:
         repo: Path,
         history_dir: Path | None,
         scratch: Path,
+        world_mount: MountMap,
+        home: Path,
         memory_service,
         command_timeout_seconds: int,
         command_output_cap_chars: int,
@@ -314,6 +336,8 @@ class ResearchTools:
             repo=repo,
             history_dir=history_dir,
             scratch=scratch,
+            world_mount=world_mount,
+            home=home,
             timeout_seconds=command_timeout_seconds,
             output_cap_chars=command_output_cap_chars,
         )

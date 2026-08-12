@@ -16,10 +16,10 @@ class RecordingRuntime:
         self.sandbox = None
 
     def exec_argv(
-        self, payload, *, cwd, mounts=None, scaffold=None, home=None,
+        self, payload, *, cwd, mounts=None, home=None,
     ):
         if mounts is not None:
-            self.sandbox = (Path(scaffold), Path(home))
+            self.sandbox = Path(home)
         self.calls.append((list(payload), Path(cwd)))
         return ["apptainer", "exec", "image.sif", *payload]
 
@@ -162,8 +162,7 @@ def test_executor_agent_owns_private_work_and_home(monkeypatch, tmp_path: Path):
 
     assert agent.run_text("edit", cwd=tmp_path, label="executor") == "ok"
 
-    work, home = runtime.sandbox
-    assert work.name == "work"
+    home = runtime.sandbox
     assert home.name == "home"
-    assert not work.parent.exists()
+    assert not home.parent.exists()
     assert runtime.overrides["HOME"] == str(runtime.executor_home)

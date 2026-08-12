@@ -3,13 +3,16 @@
 Minimal schema:
   kind: task
   task.goal: str                      (required)
-  safety.editable_paths: [path]      (required; dirs/files relative to the worktree root, mounted read-write
-                                      into the executor container — the executor's writable world. Trailing
-                                      /** is tolerated and stripped. Everything not listed here or in
-                                      read_only_paths is absent from the executor container.)
-  safety.read_only_paths: [path]     (optional, default []; dirs/files mounted read-only into the executor
-                                      container — the build needs to read them but they are not optimization
-                                      targets)
+  safety.editable_paths: [path]      (required; the WRITABLE world — real dirs/files relative to the worktree
+                                      root, mounted read-write into both lane containers. This is the only
+                                      thing the proposer may edit AND the executor may change, so list the
+                                      source under optimization PLUS any build-output dirs the eval writes
+                                      (e.g. build, TEMP). A trailing /** is tolerated and stripped to its dir
+                                      (src/** -> src); any other glob char (* ? [) is rejected — list real
+                                      paths. Everything NOT listed here is mounted read-only automatically:
+                                      the whole worktree is visible and runnable, only the editable subset is
+                                      writable. The writable/editable distinction is enforced by the mount
+                                      (EROFS outside editable), not by a post-hoc gate.)
   loop.max_rounds: int                (required)
   loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
   loop.agent_max_output_tokens: int  (optional, default 64000; per claude call output ceiling)
@@ -22,7 +25,7 @@ Minimal schema:
   runtime.image: path                (required; readable SIF image)
   runtime.definition: path           (optional; defaults beside image with .def suffix)
   runtime.binds: [absolute dir]      (optional, default [])
-  runtime.executor_read_only_binds: [absolute dir] (optional, default []; Executor-only, always read-only)
+  runtime.read_only_binds: [absolute dir] (optional, default []; absolute dirs mounted read-only into BOTH lane containers — data/env deps like /cvmfs the build or eval needs)
   eval.commands: [str]                (required non-empty; harness-run after each commit)
   eval.metrics: {objective, gates}    (required; the key=value lines the harness parses)
   eval.timeout_seconds: int           (optional, default 600; per eval command budget)
@@ -162,10 +165,17 @@ def _resolve(
 
     task = _need(raw, "task", dict)
     safety = _need(raw, "safety", dict)
+    _safety_unknown = set(safety) - {"editable_paths"}
+    if _safety_unknown:
+        raise ConfigError(
+            f"safety: unknown key(s): {sorted(_safety_unknown)} "
+            "(only editable_paths is supported — everything not listed is "
+            "mounted read-only automatically)"
+        )
     loop = _need(raw, "loop", dict)
     source = _need(raw, "source", dict)
     (runtime_image, runtime_definition, runtime_binds,
-     executor_read_only_binds) = _resolve_runtime(
+     read_only_binds) = _resolve_runtime(
         raw.get("runtime"),
         path,
         require_ready=require_ready,
@@ -185,12 +195,20 @@ def _resolve(
     if not isinstance(editable, list) or not editable:
         raise ConfigError(
             "safety.editable_paths: required non-empty list of worktree-relative "
-            "paths (dirs/files mounted read-write into the executor container)")
+            "paths (the writable world — mounted read-write into both lane "
+            "containers; everything else is mounted read-only automatically)")
     editable = [_normalize_mount_path(str(p)) for p in editable]
-    read_only = safety.get("read_only_paths", [])
-    if not isinstance(read_only, list):
-        raise ConfigError("safety.read_only_paths: must be a list of paths")
-    read_only = [_normalize_mount_path(str(p)) for p in read_only]
+    # editable_paths is the writable world, overlaid :rw on a whole-worktree :ro
+    # base — so entries must be real dirs/files a bind can target. A trailing
+    # /** (legacy form) was stripped to its dir above; reject anything that still
+    # carries a glob char (e.g. src/**/*.cc), which used to create a literal '**'
+    # directory instead of mounting the source.
+    for p in editable:
+        if any(ch in p for ch in ("*", "?", "[")):
+            raise ConfigError(
+                f"safety.editable_paths: glob pattern not supported ({p!r}); "
+                "list real directory/file paths (the writable world). Everything "
+                "not listed is mounted read-only automatically.")
 
     max_rounds = loop.get("max_rounds")
     if not isinstance(max_rounds, int) or max_rounds < 1:
@@ -270,7 +288,6 @@ def _resolve(
         "goal": str(goal),
         "hints": [str(h) for h in hints] if hints else [],
         "editable_paths": [str(p) for p in editable],
-        "read_only_paths": [str(p) for p in read_only],
         "max_rounds": int(max_rounds),
         "agent_timeout_seconds": int(agent_timeout),
         "agent_max_output_tokens": int(agent_max_output_tokens),
@@ -281,7 +298,7 @@ def _resolve(
         "runtime_image": runtime_image,
         "runtime_definition": runtime_definition,
         "runtime_binds": runtime_binds,
-        "executor_read_only_binds": executor_read_only_binds,
+        "read_only_binds": read_only_binds,
         "eval_commands": eval_commands,
         "eval_timeout_seconds": int(eval_timeout),
         "eval_output_cap_chars": int(eval_output_cap),
@@ -402,7 +419,7 @@ def _resolve_runtime(
     if not isinstance(raw, dict):
         raise ConfigError("runtime: required and must be an object")
     unknown = set(raw) - {
-        "image", "definition", "binds", "executor_read_only_binds",
+        "image", "definition", "binds", "read_only_binds",
     }
     if unknown:
         raise ConfigError(f"runtime: unknown key(s): {sorted(unknown)}")
@@ -429,11 +446,11 @@ def _resolve_runtime(
             raise ConfigError(f"runtime.image: not readable: {image}")
 
     binds = _resolve_bind_dirs(raw.get("binds", []), "runtime.binds")
-    executor_binds = _resolve_bind_dirs(
-        raw.get("executor_read_only_binds", []),
-        "runtime.executor_read_only_binds",
+    read_only_binds = _resolve_bind_dirs(
+        raw.get("read_only_binds", []),
+        "runtime.read_only_binds",
     )
-    return str(image), str(definition), binds, executor_binds
+    return str(image), str(definition), binds, read_only_binds
 
 
 def _resolve_bind_dirs(raw_binds: object, field: str) -> list[str]:

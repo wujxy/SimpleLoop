@@ -67,9 +67,8 @@ def test_build_deps_passes_external_read_only_binds_to_executor(tmp_path: Path):
     cfg = {
         "runtime_image": tmp_path / "runtime.sif",
         "runtime_binds": [tmp_path / "evaluation-data"],
-        "executor_read_only_binds": [tmp_path / "executor-data"],
+        "read_only_binds": [tmp_path / "executor-data"],
         "editable_paths": ["src"],
-        "read_only_paths": ["CMakeLists.txt"],
         "repo_path": tmp_path / "repo",
         "baseline_ref": "HEAD",
     }

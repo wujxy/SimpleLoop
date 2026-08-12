@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..container.runtime import MountMap
 from .model import ChatModel
 from .hypothesis import HypothesisCard
 from .generator import GeneratorAgent
@@ -131,6 +132,7 @@ class ProposerOrchestrator:
         goal: str,
         editable: list[str],
         frozen: list[str],
+        world_mount: MountMap,
         memory_service,
         base_sha: str,
         workspaces: list[Path],
@@ -186,6 +188,7 @@ class ProposerOrchestrator:
                 lane,
                 gen_context=gen_context,
                 goal=goal, editable=editable, frozen=frozen,
+                world_mount=world_mount,
                 memory_service=memory_service, base_sha=base_sha,
                 source_path=workspaces[0], repo_path=repo_path,
                 run_dir=run_dir, current_round=current_round,
@@ -238,6 +241,7 @@ class ProposerOrchestrator:
 
     def _run_one_lane(
         self, lane: LaneState, *, gen_context, goal, editable, frozen,
+        world_mount: MountMap,
         memory_service, base_sha, source_path, repo_path, run_dir,
         current_round, gate_block, prompt_dir, hints, explore, max_steps,
         select_quota=1,
@@ -262,6 +266,7 @@ class ProposerOrchestrator:
             assigned_ops=lane.assigned_ops, max_steps=gen_steps,
             hypotheses_per_lane=_HYPOTHESES_PER_LANE,
             ideas_per_lens=_IDEAS_PER_LENS,
+            world_mount=world_mount,
         )
         if not gen_result.cards:
             return LaneResult(
@@ -302,6 +307,7 @@ class ProposerOrchestrator:
                 assigned_ops=lane.assigned_ops, max_steps=gen_steps,
                 hypotheses_per_lane=_HYPOTHESES_PER_LANE,
                 ideas_per_lens=_IDEAS_PER_LENS,
+                world_mount=world_mount,
             )
             new_cards = regen_result.cards
             for nc in new_cards:
@@ -332,6 +338,7 @@ class ProposerOrchestrator:
                 hypotheses=cards,
                 select_quota=select_quota,
                 goal=goal, editable=editable, frozen=frozen,
+                world_mount=world_mount,
                 memory_service=memory_service, base_sha=base_sha,
                 source_path=source_path, repo_path=repo_path,
                 run_dir=run_dir, current_round=current_round,
@@ -373,6 +380,7 @@ class ProposerOrchestrator:
         self, *, lane_id: int, assigned_ops: tuple[str, ...] | list[str],
         workspace: Path, base_sha: str,
         goal: str, editable: list[str], frozen: list[str],
+        world_mount: MountMap,
         memory_service, repo_path: Path, run_dir: Path,
         current_round: int, gate_block: str, prompt_dir: Path | None,
         hints: list[str] | None = None,
@@ -403,6 +411,7 @@ class ProposerOrchestrator:
             lane,
             gen_context=gen_context,
             goal=goal, editable=editable, frozen=frozen,
+            world_mount=world_mount,
             memory_service=memory_service, base_sha=base_sha,
             source_path=workspace, repo_path=repo_path,
             run_dir=run_dir, current_round=current_round,

@@ -91,10 +91,12 @@ Before touching files, pin down with the user, in one short written note:
   bit-identical diff, a tolerance band). Each becomes an `eval.metrics.gates`
   entry with its own `KEY=` line. A candidate that fails a gate is never
   selected, even if its objective is best.
-- **Editable vs frozen** — which source may the executor change? Note the gate
-  is a **whitelist**: a diff path outside `editable_paths` rejects the round
-  even if it isn't in `frozen_paths`. `frozen_paths` adds an explicit "never
-  touch" list on top (tests, references, build config, benchmarks).
+- **Editable vs read-only** — which source may either lane change? `editable_paths`
+  is the shared writable world (a **whitelist**: only these paths are mounted
+  read-write, and they are the only thing a proposal may touch). `read_only_paths`
+  is the read world (mounted read-only into both lanes — tests, references, build
+  config, benchmarks); the proposer surveys it, neither lane may edit it. The
+  mount IS the constraint — there is no after-the-fact diff gate.
 - **Runtime environment** — what must exist inside the container for build +
   eval to run? (compilers, Python packages, system libs, external data trees).
   This decides which Apptainer definition to build and which host directories
@@ -123,30 +125,31 @@ clone, then makes a worktree per candidate. Requirements:
   regenerate or touch it. (tiny_algo_opt's is the hardcoded `BASELINE` table
   in `scripts/check_drift.py`; omilrec's is a reference ROOT file.)
 
-### 1.3 Editable / frozen discipline
+### 1.3 Editable / read-only discipline
 
 ```yaml
 safety:
   editable_paths:
-    - "src/**/*.cc"      # the executor may ONLY change these (whitelist)
+    - "src/**/*.cc"      # either lane may ONLY change these (the writable world)
     - "src/**/*.h"
-  frozen_paths:
-    - "tests/**"         # touching these rejects the round outright
+  read_only_paths:
+    - "tests/**"         # mounted read-only into both lanes; not editable
     - "scripts/**"
     - "reference/**"
     - "benchmarks/**"
     - "CMakeLists.txt"
 ```
 
-The diff gate is hard and deterministic: any changed path that matches a
-frozen glob, or fails to match an editable glob, voids the whole candidate (no
-commit, no score) and the judger is told why. Put everything the executor
-shouldn't touch in `frozen_paths` — tests, references, build files, benchmark
-and eval scripts, docs. A classic onboarding bug: the eval/benchmark script
-writes its output (a CSV, a log) into the worktree, the executor's
-self-verification run leaves that file modified, and the gate rejects the real
-source edit — freeze those output dirs or make the script write outside the
-tree.
+The mount is hard and deterministic: only `editable_paths` are writable, and
+anything not in `editable_paths` or `read_only_paths` is **absent** from the
+container entirely. There is no after-the-fact diff gate — the mount IS the
+constraint. Put everything neither lane should edit in `read_only_paths` —
+tests, references, build files, benchmark and eval scripts, docs. List the full
+frozen set so the proposer's view of the tree is complete. A classic onboarding
+bug: the eval/benchmark script writes its output (a CSV, a log) into the
+worktree, the executor's self-verification run leaves that file modified, and
+the harness commits it alongside the real edit — list those output dirs as
+read-only or make the script write outside the tree.
 
 ### 1.4 The runtime image (mandatory)
 
@@ -192,7 +195,7 @@ task:
 
 safety:
   editable_paths: ["src/**/*.cc", "src/**/*.h"]   # required, non-empty
-  frozen_paths:  ["tests/**", "scripts/**", "CMakeLists.txt"]
+  read_only_paths: ["tests/**", "scripts/**", "CMakeLists.txt"]
 
 loop:
   max_rounds: 20                # required

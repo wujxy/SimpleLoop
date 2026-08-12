@@ -64,7 +64,7 @@ def _submit_hypothesis(card=None):
 
 def _run_research(cmd="ls OMILRECV2/src/"):
     return json.dumps({"action": "run_research_command", "command": cmd,
-                        "cwd": "workspace"})
+                        "cwd": "work"})
 
 
 def _emit_lever_map():
@@ -101,10 +101,12 @@ def _agent(model, monkeypatch=None):
 
 
 def _paths(tmp_path):
+    from simpleloop.container.runtime import MountMap
     return dict(
         source_path=tmp_path / "source",
         repo_path=tmp_path / "repo",
         run_dir=tmp_path / "run",
+        world_mount=MountMap(),
     )
 
 
@@ -123,7 +125,7 @@ class TestParseAction:
         action = _parse_generator_action(_run_research("grep -rn 'FCN' src/"))
         assert action["action"] == "run_research_command"
         assert action["command"] == "grep -rn 'FCN' src/"
-        assert action["cwd"] == "workspace"
+        assert action["cwd"] == "work"
 
     def test_parses_emit_lever_map(self):
         action = _parse_generator_action(_emit_lever_map())

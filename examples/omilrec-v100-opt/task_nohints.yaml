@@ -13,22 +13,19 @@ task:
     implementation.
 
 safety:
+  # The writable world: source under optimization + gitignored build-output
+  # dirs the eval writes. Everything else (tests, scripts, baseline,
+  # reference, CMakeLists, docs, ...) is mounted read-only AUTOMATICALLY —
+  # visible and runnable; edits outside this set fail with EROFS.
   editable_paths:
-    - "OMILRECV2/src/**/*.cc"
-    - "OMILRECV2/src/**/*.h"
-  frozen_paths:
-    - "tests/**"
-    - "scripts/**"
-    - "baseline/**"
-    - "benchmarks/**"
-    - "reference/**"
-    - "CMakeLists.txt"
-    - "OMILRECV2/CMakeLists.txt"
-    - "pyproject.toml"
-    - "docs/**"
-    - "CLAUDE.md"
-    - "README.md"
-    - ".gitignore"
+    - OMILRECV2/src
+    - OMILRECV2/python
+    - CMakeLists.txt
+    - OMILRECV2/CMakeLists.txt
+    - build
+    - build-asan
+    - InstallArea
+    - TEMP
 
 loop:
   max_rounds: 20

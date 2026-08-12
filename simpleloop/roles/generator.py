@@ -194,11 +194,11 @@ def _parse_generator_action(text: str) -> dict:
 
     if name == "run_research_command":
         command = action.get("command")
-        cwd = action.get("cwd", "workspace")
+        cwd = action.get("cwd", "work")
         if not isinstance(command, str) or not command.strip():
             raise GeneratorError("research command must be non-empty")
-        if cwd not in {"workspace", "scratch"}:
-            raise GeneratorError("research cwd must be workspace or scratch")
+        if cwd not in {"work", "scratch"}:
+            raise GeneratorError("research cwd must be work or scratch")
         return {"action": name, "command": command, "cwd": cwd}
 
     if name == "emit_lever_map":
@@ -224,12 +224,13 @@ _GEN_PROTOCOL = """Runtime contract (immutable):
 Return exactly one JSON object per response, with no prose outside it.
 
 Research tools (use freely to survey the subject matter):
-- {"action":"run_research_command","command":"...","cwd":"workspace|scratch"}
+- {"action":"run_research_command","command":"...","cwd":"work|scratch"}
   Run a bounded shell command (ls, grep, head, wc, git log, etc.) in your
-  writable lab (/workspace) or scratch (/scratch). /workspace is the accepted
-  source tree, materialized read-write: survey it, and write scratch code or
-  build small probes when that helps you understand the structure. Git history
-  (any prior experiment SHA) is readable via /repo; you cannot commit.
+  writable lab (/work) or scratch (/scratch). /work is the accepted source
+  tree's editable paths, materialized read-write: survey it, and write scratch
+  code or build small probes when that helps you understand the structure.
+  Git history (any prior experiment SHA) is readable via /repo; you cannot
+  commit.
 
 Lever map synthesis:
 - {"action":"emit_lever_map",
@@ -248,7 +249,7 @@ Hypothesis emit (you are done when you submit):
   You are responsible for whether the hypothesis is grounded in your map.
 
 Runtime boundaries:
-- /workspace is your writable lab (accepted source, read-write); /repo is the
+- /work is your writable lab (accepted source, read-write); /repo is the
   read-only Git repository; /scratch is temporary writable.
 - You cannot commit (artifacts are the candidate's job). You cannot see
   history, experiments, findings, or prior outcomes.
@@ -343,6 +344,7 @@ class GeneratorAgent(ResearchAgent):
         source_path: Path,
         repo_path: Path,
         run_dir: Path,
+        world_mount,
         prompt_dir: str | Path | None = None,
         assigned_ops: tuple[str, ...] | None = None,
         max_steps: int | None = None,
@@ -383,7 +385,7 @@ class GeneratorAgent(ResearchAgent):
             }
         return self._tool_loop(
             messages, system_prompt, source_path, repo_path, run_dir,
-            max_steps or self.max_steps,
+            world_mount, max_steps or self.max_steps,
             hypotheses_per_lane=hypotheses_per_lane,
             assigned_ops=assigned_ops,
         )
@@ -397,6 +399,7 @@ class GeneratorAgent(ResearchAgent):
         source_path: Path,
         repo_path: Path,
         run_dir: Path,
+        world_mount,
         prompt_dir: str | Path | None = None,
         assigned_ops: tuple[str, ...] | None = None,
         max_steps: int | None = None,
@@ -423,7 +426,7 @@ class GeneratorAgent(ResearchAgent):
         messages.append({"role": "user", "content": feedback_text})
         return self._tool_loop(
             messages, system_prompt, source_path, repo_path, run_dir,
-            max_steps or self.max_steps,
+            world_mount, max_steps or self.max_steps,
             hypotheses_per_lane=hypotheses_per_lane,
             assigned_ops=assigned_ops,
         )
@@ -431,7 +434,7 @@ class GeneratorAgent(ResearchAgent):
     def _tool_loop(
         self, messages: list, system_prompt: str,
         source_path: Path, repo_path: Path, run_dir: Path,
-        steps_budget: int,
+        world_mount, steps_budget: int,
         hypotheses_per_lane: int = 1,
         assigned_ops: tuple[str, ...] | None = None,
     ) -> GenerationResult:
@@ -461,13 +464,18 @@ class GeneratorAgent(ResearchAgent):
 
         print(f"[generator] started max_steps={steps_budget} "
               f"hypotheses_per_lane={hypotheses_per_lane}", flush=True)
-        with TemporaryDirectory(prefix="simpleloop-gen-") as scratch:
+        with TemporaryDirectory(prefix="simpleloop-gen-") as scratch, \
+                TemporaryDirectory(prefix="simpleloop-gen-session-") as session_root:
+            home = Path(session_root) / "home"
+            home.mkdir(mode=0o700)
             tools = ResearchTools(
                 runtime=self.runtime,
                 workspace=source_path,
                 repo=repo_path,
                 history_dir=None,  # no history mounts — history-blind by boundary, not prompt
                 scratch=Path(scratch),
+                world_mount=world_mount,
+                home=home,
                 memory_service=None,  # no history tools
                 command_timeout_seconds=self.command_timeout_seconds,
                 command_output_cap_chars=self.command_output_cap_chars,
