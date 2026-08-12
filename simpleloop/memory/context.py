@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import json
 
-from ..explore.models import ExploreReport
-from ..explore.render import render_explore_for_startup
-
 
 def build_generation_context(
     *,
@@ -60,13 +57,8 @@ def build_startup_pack(
     recent_rounds: int = 2,
     tool_cheatsheet: str = "",
     recent_abstentions: list[dict] | None = None,
-    explore: ExploreReport | None = None,
 ) -> str:
-    """Return the plain-text user-turn content the Proposer wakes up with.
-
-    ``explore`` is the precomputed search-health report (rendered into the
-    "Explore health" block). When ``None``, no health block is emitted.
-    """
+    """Return the plain-text user-turn content the Proposer wakes up with."""
     hints_block = ""
     if hints:
         bullets = "\n".join(f"  - {h}" for h in hints)
@@ -76,7 +68,6 @@ def build_startup_pack(
         )
     dashboard = _render_dashboard(experiments, recent_rounds=recent_rounds)
     abstentions_block = _render_abstentions(recent_abstentions)
-    explore_block = render_explore_for_startup(explore)
     frontier_text = _render_frontier(frontier)
     tools_block = (
         f"\nMemory tools available (see the Runtime contract for schemas):\n"
@@ -96,7 +87,7 @@ and runnable, but edits outside the editable set fail at the filesystem.
 
 Recent factual dashboard (last {recent_rounds} round(s), authoritative harness output):
 {dashboard}
-{abstentions_block}{explore_block}
+{abstentions_block}
 Research frontier (open questions and search coverage — derived, not a summary):
 {frontier_text}
 {tools_block}

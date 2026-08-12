@@ -37,7 +37,12 @@ def test_hepai_uses_nonstreaming_chat_completion_and_timeout():
         timeout_seconds=12.5,
     )
 
-    assert completions.kwargs == {
+    # timeout is now the deadline-derived remaining budget (≤ the input, since
+    # transient-retry eats into it), so it floats just below 12.5; check it
+    # apart from the exact-equality kwargs.
+    kwargs = dict(completions.kwargs)
+    timeout = kwargs.pop("timeout")
+    assert kwargs == {
         "model": "gpt-5.5",
         "messages": [
             {"role": "system", "content": "scientist"},
@@ -45,8 +50,8 @@ def test_hepai_uses_nonstreaming_chat_completion_and_timeout():
         ],
         "stream": False,
         "response_format": {"type": "json_object"},
-        "timeout": 12.5,
     }
+    assert timeout == pytest.approx(12.5, abs=0.5)
     assert reply.text == (
         '{"action":"submit_proposals","proposals":["p"]}'
     )
@@ -88,7 +93,9 @@ def test_zhipu_uses_nonstreaming_chat_completion_and_timeout():
         timeout_seconds=12.5,
     )
 
-    assert completions.kwargs == {
+    kwargs = dict(completions.kwargs)
+    timeout = kwargs.pop("timeout")
+    assert kwargs == {
         "model": "glm-5.2",
         "messages": [
             {"role": "system", "content": "scientist"},
@@ -96,8 +103,8 @@ def test_zhipu_uses_nonstreaming_chat_completion_and_timeout():
         ],
         "stream": False,
         "response_format": {"type": "json_object"},
-        "timeout": 12.5,
     }
+    assert timeout == pytest.approx(12.5, abs=0.5)
     assert reply.text == (
         '{"action":"submit_proposals","proposals":["p"]}'
     )

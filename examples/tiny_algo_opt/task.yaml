@@ -19,9 +19,6 @@ loop:
   candidates_per_round: 2
   max_workers: 2
 
-self_improvement:
-  interval_rounds: 6
-
 roles:
   researcher:
     api: hepai

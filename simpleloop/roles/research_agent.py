@@ -21,8 +21,6 @@ from tempfile import TemporaryDirectory
 
 from .model import ChatModel
 from ..container.runtime import ApptainerRuntime
-from ..explore.models import ExploreReport
-from ..explore.render import render_explore_for_state_header
 
 
 class AgentError(RuntimeError):
@@ -55,11 +53,6 @@ _MAX_PROTOCOL_REPAIRS = 2
 
 def _bump(state: WorkingState, name: str) -> None:
     state.counts[name] = state.counts.get(name, 0) + 1
-
-
-def _truncate(text: str, limit: int) -> str:
-    text = " ".join(str(text).split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _fingerprint(action: dict) -> str:
@@ -141,28 +134,6 @@ def _source_path_exists(relpath: str, source_root: Path) -> bool:
     return False
 
 
-def _render_state_header(
-    state: WorkingState, explore: ExploreReport | None,
-) -> str:
-    """Compact position, injected so the agent keeps its goal in view."""
-    lines = ["Working state (your current position):"]
-    lines.append(
-        f"  source_reads={state.counts.get('source_read', 0)}  "
-        f"tool_calls={state.counts.get('tool', 0)}  "
-        f"located={'yes' if state.located else 'no'}"
-    )
-    if state.candidate_directions:
-        lines.append(
-            f"  hypothesis: {_truncate(state.candidate_directions, 160)}")
-    if state.current_information_goal:
-        lines.append(
-            f"  current_goal: {_truncate(state.current_information_goal, 120)}")
-    explore_block = render_explore_for_state_header(explore)
-    if explore_block:
-        lines.append(explore_block)
-    return "\n".join(lines)
-
-
 def _build_telemetry(
     state: WorkingState, *, steps: int, outcome: str,
     reason_kind: str | None = None, enrichment_partial: bool = False,
@@ -182,7 +153,6 @@ def _build_telemetry(
 def _build_trace(
     state: WorkingState, *, round_id: int, outcome: str,
     reason_kind: str | None = None, evidence_refs: tuple[str, ...] = (),
-    explore: ExploreReport | None = None,
 ) -> dict:
     return {
         "round": round_id,

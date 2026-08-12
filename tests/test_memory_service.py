@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.explore import analyze_explore_from_schema
 from simpleloop.memory import MemoryService
 from simpleloop.memory.models import (
     ExistingFindingTarget,
@@ -183,53 +182,6 @@ def test_startup_pack_omits_abstention_block_when_none(tmp_path: Path):
         candidates_per_round=1, hints=None, current_round=1,
     )
     assert "abstention" not in pack.lower()
-
-
-def test_startup_pack_surfaces_deliberation_signals(tmp_path: Path):
-    """A finding with repeated eligible-neutral attempts surfaces as a
-    mechanism_challenge policy signal in the startup pack (facts and policy
-    kept distinct, never framed as a scientific conclusion)."""
-    svc = MemoryService(tmp_path, metrics_schema=METRICS)
-    fid = svc.resolve_targets(
-        [ResearchProposal(
-            instruction="x",
-            research_target=NewFindingTarget(question="Is QPDF the cost?"),
-        )],
-        round_id=0,
-    )[0]
-
-    def _chain(round_id, sha, parent, objective, sel=False):
-        return {
-            "round": round_id, "parent_sha": parent,
-            "candidates": [{
-                "candidate": 0, "experiment_id": f"r{round_id}c0",
-                "finding_id": fid, "proposal": "p", "parent_sha": parent,
-                "sha": sha, "status": "COMPLETED",
-                "metrics": {"SPEED_MS": objective}, "changed_paths": ["src/a.cc"],
-                "gates": {}, "gate_passed": True, "eligible": True,
-                "selected": sel,
-            }],
-        }
-
-    _write_history(
-        tmp_path,
-        _chain(0, "s0", "root", 90.0, sel=True),
-        _chain(1, "s1", "s0", 90.0),   # neutral vs s0
-        _chain(2, "s2", "s1", 90.0),   # neutral vs s1
-    )
-    explore = analyze_explore_from_schema(
-        svc.load_findings(), svc.load_experiments(),
-        current_round=3, metrics_schema=METRICS,
-    )
-    pack = svc.build_startup_pack(
-        goal="fast", editable=["src/"], frozen=["tests/"],
-        base_sha="abc", gate_block="- physics: pass",
-        candidates_per_round=1, hints=None, current_round=3,
-        explore=explore,
-    )
-    assert "Explore health" in pack
-    assert "mechanism_challenge" in pack
-    assert "NOT" in pack and "verdicts" in pack  # the non-verdict disclaimer
 
 
 def test_search_experiments_returns_buckets(tmp_path: Path):

@@ -144,18 +144,3 @@ that factual history and can inspect the repository and diffs itself.
 
 The path gate is an early safety stage, not a competing acceptance system.
 Final admission is the conjunction of all Harness gates.
-
-## Development-time prompt self-improvement
-
-```yaml
-self_improvement:
-  interval_rounds: 10
-```
-
-This keeps the outer loop: it pauses the artifact loop between fixed segments,
-lets a Meta Optimizer edit `proposer.md`, `executor.md`, and the evolvable part
-of `meta_optimizer.md`, validates the prompt set, snapshots accepted changes,
-then continues. Each run has its own v000 lineage. Historical four-prompt
-snapshots remain auditable; restored active sets are migrated to the current
-three-prompt system. Harness, Goal, Gates, evaluator facts, and task source are
-not prompt-evolution targets in this version.

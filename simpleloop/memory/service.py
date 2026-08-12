@@ -12,7 +12,6 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from ..explore import ExploreReport
 from ..harness.memory import read_history, resolve_episode
 from .context import build_startup_pack, build_generation_context
 from .experiment_index import (
@@ -95,7 +94,6 @@ class MemoryService:
         hints: list[str] | None,
         current_round: int,
         recent_rounds: int = 2,
-        explore: ExploreReport | None = None,
     ) -> str:
         history = read_history(self.history_path)
         experiments = build_experiments(history)
@@ -131,7 +129,6 @@ class MemoryService:
             recent_rounds=recent_rounds,
             tool_cheatsheet=MEMORY_TOOL_CHEATSHEET,
             recent_abstentions=abstentions,
-            explore=explore,
         )
 
     def build_generation_context(

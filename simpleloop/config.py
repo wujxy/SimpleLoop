@@ -56,7 +56,6 @@ Minimal schema:
   execution.hepjob.disappearance_grace_seconds: int (optional, default 120)
   execution.hepjob.python_executable: str  (optional, default the frontend's sys.executable)
   execution.hepjob.submit_cmd/query_cmd/remove_cmd: str  (optional condor_* overrides)
-  self_improvement.interval_rounds: int     (optional; block presence enables)
   source.path: path                   (required; the repo to optimize)
   source.baseline_ref: str            (optional, default HEAD)
 
@@ -75,7 +74,7 @@ import yaml
 
 TASK_TOP_KEYS = {
     "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution",
-    "self_improvement", "roles",
+    "roles",
 }
 
 _RESEARCHER_DEFAULTS = {
@@ -291,11 +290,6 @@ def _resolve(
     metrics = _resolve_metrics(eval_block["metrics"])
 
     execution_backend, hepjob = _resolve_execution(raw.get("execution"))
-    self_improvement = (
-        _resolve_self_improvement(raw["self_improvement"])
-        if "self_improvement" in raw
-        else None
-    )
     roles = _resolve_roles(raw.get("roles"))
 
     return {
@@ -326,7 +320,6 @@ def _resolve(
         "repo_path": str(repo),
         "baseline_ref": baseline_ref,
         "config_dir": str(path.parent),
-        "self_improvement": self_improvement,
         "roles": roles,
     }
 
@@ -408,22 +401,6 @@ def _resolve_executor(raw: object) -> dict:
                 f"roles.executor.{key}: must be a non-empty string"
             )
     return result
-
-
-def _resolve_self_improvement(raw: object) -> dict:
-    if not isinstance(raw, dict):
-        raise ConfigError("self_improvement: must be an object")
-    unknown = set(raw) - {"interval_rounds"}
-    if unknown:
-        raise ConfigError(
-            f"self_improvement: unknown key(s): {sorted(unknown)}"
-        )
-    interval = raw.get("interval_rounds", 10)
-    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
-        raise ConfigError(
-            "self_improvement.interval_rounds: must be a positive integer"
-        )
-    return {"interval_rounds": interval}
 
 
 def _resolve_runtime(
