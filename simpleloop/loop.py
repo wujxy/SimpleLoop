@@ -33,6 +33,7 @@ from .reporting.telemetry import RunTelemetry
 from .container.runtime import ApptainerRuntime, world_mount_map
 from .harness.workspace import Workspace
 from .processes import run_signal_handlers
+from .self_repo import SelfRepo
 
 
 class BaselineAcceptanceError(RuntimeError):
@@ -86,6 +87,7 @@ class RunContext:
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
     execution_backend: object | None = None
+    self_repo: SelfRepo | None = None
 
     @property
     def metrics_schema(self) -> dict | None:
@@ -237,6 +239,12 @@ def _run_locked(cfg: dict, run_dir_path: Path,
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
     ctx.workspace.setup()
+
+    # S3a: snapshot the proposer source into run_dir/self/repo (S0) on a fresh run,
+    # or resume the existing self life-history on --continue. The worker subprocess
+    # resolves `import proposer` to this snapshot (see proposer_lane_worker).
+    ctx.self_repo = SelfRepo(run_dir_path)
+    ctx.self_repo.setup(resume=continue_run)
     preflight_id = "executor-preflight"
     preflight_worktree = ctx.workspace.add_worktree(
         preflight_id, ctx.workspace.baseline_sha(),

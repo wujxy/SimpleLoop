@@ -8,8 +8,9 @@ own research memory (findings/experiments/retrieval). The Host owns only the
 evaluator, gates, and the authoritative task ledger (``history.jsonl``), which
 this package reads.
 
-S2b(i): logically separated (this top-level package still imports a small
-shared-infrastructure subset of ``simpleloop`` — container.runtime,
-processes, harness.memory — which S2b(ii) will vendor to make the package
-fully standalone).
+Fully standalone: zero ``simpleloop`` imports. The shared infrastructure it
+once depended on (container.runtime, processes, harness.memory) is vendored
+into this package as ``runtime.py``, ``child_processes.py``, and
+``memory/history.py`` — so a snapshot of ``proposer/`` into
+``run_dir/self/repo/`` is self-sufficient and is what the run executes.
 """

@@ -24,12 +24,41 @@ import dataclasses
 import json
 import os
 import socket
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from . import config as config_mod
 from .candidate_worker import write_result
+
+
+def _redirect_self_repo() -> None:
+    """S3a: if a run-local self-repo exists at <run_dir>/self/repo, prepend it so
+    ``import proposer`` (the imports below) resolves to the snapshotted self instead of
+    the installed package. Derives ``run_dir`` from the ``--manifest`` arg, which both
+    execution backends already pass and which carries ``run_dir``.
+
+    This MUST run before the first ``from proposer...`` import below, so it is invoked
+    at module import time (ahead of ``main()``). It is fully defensive: any failure or
+    an absent self-repo falls through to the installed ``proposer/`` — the historical
+    behavior — so old run-dirs and manifest-less invocations are unaffected.
+    """
+    try:
+        i = sys.argv.index("--manifest")
+        manifest = json.loads(Path(sys.argv[i + 1]).read_text(encoding="utf-8"))
+    except (ValueError, IndexError, OSError, json.JSONDecodeError):
+        return
+    run_dir = manifest.get("run_dir") if isinstance(manifest, dict) else None
+    if not run_dir:
+        return
+    self_repo = Path(run_dir).resolve() / "self" / "repo"
+    if self_repo.is_dir():
+        sys.path.insert(0, str(self_repo))
+
+
+_redirect_self_repo()
+
 from proposer.runtime import ApptainerRuntime, world_mount_map
 from .harness import views
 from .harness.workspace import Workspace
