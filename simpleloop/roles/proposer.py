@@ -113,7 +113,7 @@ _TAIL_TURNS = 8
 
 # Prompt-version stamp recorded in meta.json so a prompt change is observable
 # per Scientist across rounds.
-SCIENTIST_PROMPT_VERSION = "scientist-v1"
+SCIENTIST_PROMPT_VERSION = "scientist-v2"
 
 
 # --- Live-context compaction (Option A: deterministic shedding) -----------
@@ -136,7 +136,8 @@ SCIENTIST_PROMPT_VERSION = "scientist-v1"
 # This compacts ONLY the live ``messages`` sent to the model. The immutable
 # session.jsonl archive is appended to in full (every observation, every world
 # event) and is never mutated — the Scientist's complete lived history stays
-# auditable and is what tail_turns() reads on the next resume.
+# auditable. (tail_turns() reads this archive, but is no longer used by the
+# default cross-round resume; it is retained for audit and explicit recovery.)
 
 @dataclass(frozen=True)
 class ContextPolicy:
@@ -389,10 +390,22 @@ _BUDGET_NUDGE = (
 
 _SUSPEND_PROMPT = (
     "Your research is being paused while the directions you submitted are "
-    "executed as experiments. Leave a continuation note for your resumed self: "
-    "what you currently understand, what you believe and why, what evidence "
-    "changed your view, and what you were about to pursue. Write it in the "
-    "first person, as your own running account. Return one JSON object:\n"
+    "executed as experiments. Leave a continuation note for your resumed self "
+    "— first person, as your own running account. Capture what would let you "
+    "re-enter this investigation after the world may have changed:\n"
+    "\n"
+    "  - what you currently understand about the problem, and why you believe "
+    "it;\n"
+    "  - the specific code regions, mechanisms, or measurements your current "
+    "view rests on — so you can re-check them against the world that exists "
+    "when you resume, not rely on this note as fact;\n"
+    "  - what remains unresolved or uncertain;\n"
+    "  - what you expected the experiments you just submitted to teach you, "
+    "and what outcome would strengthen or weaken your current view.\n"
+    "\n"
+    "This is autobiographical memory, not an established account of the "
+    "present or future world, and not a plan your future self must follow. You "
+    "may revise or reject any of it when you resume. Return one JSON object:\n"
     '  {"notebook": "<your continuation note>"}'
 )
 
@@ -456,11 +469,16 @@ def _fmt_metrics(metrics: dict) -> str:
 
 
 def _build_world_event(memory_service, current_round: int, base_sha: str) -> str | None:
-    """The two-part resume event.
+    """The resume world-transition event.
 
-    SELF  — the directions YOU submitted were executed; here is what happened
-            (authoritative harness results, facts not interpretations).
-    PROJECT — how the project's incumbent/world moved.
+    Reconnects what the Scientist asked reality to try with what reality
+    returned, then states the world that now exists. Authoritative harness
+    facts only — no interpretation ("this direction is exhausted", etc.); the
+    Scientist produces the meaning.
+
+    Three outcomes are distinguished so the Scientist's world model is not
+    fed a falsehood: a candidate that passed the gates but did not beat the
+    incumbent is NOT reported as "no candidate cleared the gates".
 
     Single-lane: every experiment from last round is this Scientist's. True
     per-Scientist attribution (filtering by scientist_id once multiple lanes
@@ -474,29 +492,67 @@ def _build_world_event(memory_service, current_round: int, base_sha: str) -> str
     if not last:
         return None
     last.sort(key=lambda e: (e.round, e.candidate))
+
+    # The parent these candidates were built on is the world the Scientist was
+    # studying last round (single-lane: all share one parent).
+    prev_sha = last[0].parent_sha or "—"
+
     lines = [
         "Your research is resuming. While you were paused, the directions you "
-        "submitted were executed as experiments. Their outcomes (authoritative "
-        "harness results — these are facts, not your interpretations):",
+        "submitted were executed as experiments, and the research world may "
+        "have changed. The following are authoritative harness facts, not your "
+        "interpretations.",
+        "",
+        f"Previous accepted revision: {prev_sha[:10]}",
+        "",
+        "What you asked to try, and what happened:",
+        "",
     ]
     for e in last:
-        gate = "pass" if e.gate_passed else "fail"
-        sel = " selected" if e.selected else ""
-        finding = e.finding_id or "-"
+        if e.selected:
+            outcome = "SELECTED_AS_NEW_INCUMBENT"
+        elif e.gate_passed:
+            outcome = "PASSED_GATES_NOT_IMPROVED"
+        else:
+            outcome = "FAILED_GATES"
+        candidate = e.candidate_sha[:10] if e.candidate_sha else "—"
+        paths = ", ".join(e.changed_paths) if e.changed_paths else "—"
+        lines.append(f"  {e.experiment_id}")
+        lines.append(f"    Your direction: {e.proposal or '—'}")
         lines.append(
-            f"  {e.experiment_id}  finding={finding}  status={e.status}  "
-            f"gate={gate}{sel}  {_fmt_metrics(e.metrics)}"
+            f"    parent revision: {e.parent_sha[:10]}   "
+            f"candidate: {candidate}"
         )
+        lines.append(f"    changed paths: {paths}")
+        lines.append(
+            f"    gate: {'PASSED' if e.gate_passed else 'FAILED'}   "
+            f"{_fmt_metrics(e.metrics)}"
+        )
+        lines.append(f"    outcome: {outcome}")
+        lines.append("")
+
+    lines.append(f"Current accepted revision: {base_sha[:10]}")
+    lines.append("")
+
     selected = [e for e in last if e.selected]
+    any_passed = any(e.gate_passed for e in last)
     if selected:
         lines.append(
-            "Project state: the harness selected one of the above as the new "
-            f"accepted revision. The incumbent is now {base_sha[:10]}."
+            "The harness selected one of the above as the new accepted "
+            f"revision ({prev_sha[:10]} → {base_sha[:10]}). Your earlier "
+            "observations were made on the previous revision and may no longer "
+            "describe the current code."
+        )
+    elif any_passed:
+        lines.append(
+            "Candidate(s) passed the gates but none improved the incumbent, so "
+            f"the accepted revision is unchanged ({base_sha[:10]}). The world "
+            "has not changed."
         )
     else:
         lines.append(
-            "Project state: no candidate cleared the gates this round, so the "
-            f"accepted revision is unchanged ({base_sha[:10]})."
+            "No candidate passed the gates; the accepted revision is unchanged "
+            f"({base_sha[:10]})."
         )
     return "\n".join(lines)
 
@@ -867,7 +923,15 @@ class ScientistAgent(ResearchAgent):
             print("[scientist] cold start — first round of this Scientist",
                   flush=True)
         else:
-            messages = list(session.tail_turns(_TAIL_TURNS))
+            # Cross-round continuity is identity + autobiographical notebook +
+            # world transition only. The previous round's raw trajectory is NOT
+            # re-injected: it is lived history about a world that may no longer
+            # exist, and carrying it hot would let the old world dominate the
+            # resumed Scientist's attention. The notebook (rewritten each
+            # suspension) carries the distilled understanding; the immutable
+            # session.jsonl remains the audit archive (tail_turns() is retained
+            # for that, not for default resume).
+            messages: list[dict] = []
             world_event = _build_world_event(
                 memory_service, current_round, base_sha,
             )
@@ -881,15 +945,14 @@ class ScientistAgent(ResearchAgent):
             messages.append({"role": "user", "content": world_event})
             # Archive the world event into the Scientist's lived history — it is
             # something this Scientist was told (observed), so the immutable
-            # archive must record it. tail_turns() still excludes it on a later
-            # resume (it is an orphan user, superseded by the notebook + the
-            # next world event); archiving and re-injection are separate.
+            # archive must record it.
             session.append_message(
                 "user", world_event, round_id=current_round,
             )
             print(
                 f"[scientist] resume — scientist_id={session.scientist_id[:8]} "
-                f"tail={len(messages) // 2} turn-blocks",
+                f"cold context (raw tail not re-injected); world-transition "
+                f"injected",
                 flush=True,
             )
 
