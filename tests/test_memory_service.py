@@ -91,7 +91,7 @@ def test_resolve_existing_target_requires_known_finding(tmp_path: Path):
         )
 
 
-def test_link_completed_experiments_updates_finding(tmp_path: Path):
+def test_commit_proposals_records_refs_and_derives_stats(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
     proposals = [
         ResearchProposal(
@@ -99,40 +99,65 @@ def test_link_completed_experiments_updates_finding(tmp_path: Path):
             research_target=NewFindingTarget(question="Q?"),
         ),
     ]
-    fid = svc.resolve_targets(proposals, round_id=0)[0]
-    _write_history(tmp_path, _round(0, _cand(0, fid=fid, objective=95.0)))
-    svc.link_completed_experiments(round_id=0, candidates=[
-        _cand(0, fid=fid, objective=95.0),
-    ])
-    updated = svc.finding_store.load_all()[fid]
-    assert updated.state == "active"
-    assert updated.experiment_refs == ("r0c0",)
-    assert updated.stats["attempts"] == 1
-    assert updated.stats["eligible"] == 1
-    assert updated.stats["best_objective"] == 95.0
-    assert updated.last_touched_round == 0
+    # commit at emit: records the predicted ref r0c0 (intent); no outcomes yet.
+    [fid] = svc.commit_proposals(round_id=0, proposals=proposals)
+    committed = svc.finding_store.load_all()[fid]
+    assert committed.state == "active"
+    assert committed.experiment_refs == ("r0c0",)
+    assert committed.last_touched_round == 0
+    # Before history records: the ref is predicted-not-yet-run -> zero stats.
+    pre = svc.inspect_finding(fid)["stats"]
+    assert pre == {"attempts": 0, "eligible": 0, "selected": 0,
+                   "best_objective": None}
+    # After history records the outcome: derived stats join it (read-only).
+    _write_history(tmp_path, _round(0, _cand(0, fid=fid, objective=95.0,
+                                             sel=True)))
+    derived = svc.inspect_finding(fid)["stats"]
+    assert derived["attempts"] == 1
+    assert derived["eligible"] == 1
+    assert derived["selected"] == 1
+    assert derived["best_objective"] == 95.0
 
 
-def test_link_updates_best_objective_direction(tmp_path: Path):
+def test_commit_proposals_scrub_is_idempotent_on_retry(tmp_path: Path):
+    """A retried proposer lane must not leave two findings (or double refs)
+    claiming the same slot — commit_proposals scrubs the round's slot refs
+    first, so the last commit wins and _derive_stats does not double-count."""
     svc = MemoryService(tmp_path, metrics_schema=METRICS)
-    fid = svc.resolve_targets(
-        [ResearchProposal(
-            instruction="x",
-            research_target=NewFindingTarget(question="Q?"),
-        )],
-        round_id=0,
-    )[0]
-    svc.link_completed_experiments(round_id=0, candidates=[
-        _cand(0, fid=fid, objective=110.0),
-    ])
-    svc.link_completed_experiments(round_id=1, candidates=[
-        _cand(0, fid=fid, objective=90.0),
-    ])
-    updated = svc.finding_store.load_all()[fid]
-    # lower_is_better=True: best is min.
-    assert updated.stats["best_objective"] == 90.0
-    assert updated.last_touched_round == 1
-    assert updated.experiment_refs == ("r0c0",)  # dedup on repeated id
+    proposals = [ResearchProposal(
+        instruction="x", research_target=NewFindingTarget(question="Q?"))]
+    # First (crashed) commit allocates F-001 with r0c0.
+    svc.commit_proposals(round_id=0, proposals=proposals)
+    # Retry: commit again for the same round/slot. Scrub clears r0c0 from
+    # F-001 first, then resolve allocates F-002 (NewFindingTarget doesn't
+    # dedup on question), and records r0c0 on F-002.
+    [fid2] = svc.commit_proposals(round_id=0, proposals=proposals)
+    findings = svc.finding_store.load_all()
+    assert fid2 == "F-002"
+    # F-001's r0c0 was scrubbed; only F-002 claims it -> no double-count.
+    assert "r0c0" not in findings["F-001"].experiment_refs
+    assert findings["F-002"].experiment_refs == ("r0c0",)
+
+
+def test_derive_stats_best_objective_direction(tmp_path: Path):
+    svc = MemoryService(tmp_path, metrics_schema=METRICS)
+    fid = svc.commit_proposals(round_id=0, proposals=[ResearchProposal(
+        instruction="x", research_target=NewFindingTarget(question="Q?"))])[0]
+    # Same finding continued into round 1 -> two refs r0c0, r1c0.
+    svc.commit_proposals(round_id=1, proposals=[ResearchProposal(
+        instruction="y",
+        research_target=ExistingFindingTarget(finding_id=fid))])
+    # Two outcomes joined; lower_is_better -> best is min(110, 90) = 90.
+    c1 = _cand(0, fid=fid, objective=90.0, sel=True)
+    c1["experiment_id"] = "r1c0"
+    _write_history(
+        tmp_path,
+        _round(0, _cand(0, fid=fid, objective=110.0, sel=True)),
+        _round(1, c1),
+    )
+    derived = svc.inspect_finding(fid)["stats"]
+    assert derived["attempts"] == 2
+    assert derived["best_objective"] == 90.0  # lower_is_better -> min
 
 
 def test_startup_pack_has_no_notebook_or_annotation_language(tmp_path: Path):
@@ -205,17 +230,14 @@ def test_search_experiments_returns_buckets(tmp_path: Path):
 
 def test_list_findings_effective_state_reflects_dormancy(tmp_path: Path):
     svc = MemoryService(tmp_path, metrics_schema=METRICS, dormancy_rounds=1)
-    fid = svc.resolve_targets(
-        [ResearchProposal(
+    fid = svc.commit_proposals(
+        round_id=0,
+        proposals=[ResearchProposal(
             instruction="x",
             research_target=NewFindingTarget(question="Q"),
         )],
-        round_id=0,
     )[0]
-    # Set it active
-    svc.link_completed_experiments(round_id=0, candidates=[
-        _cand(0, fid=fid, objective=100.0),
-    ])
+    # commit_proposals set it active (last_touched_round=0).
     active = svc.list_findings(state="active", current_round=1)
     assert active and active[0]["id"] == fid
     dormant = svc.list_findings(state="dormant", current_round=5)

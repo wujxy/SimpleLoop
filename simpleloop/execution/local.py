@@ -48,12 +48,10 @@ class LocalBackend(ExecutionBackend):
 
     def run_candidates(self, *, proposals: list[str], round_id: int,
                        parent_sha: str, journal=None,
-                       finding_ids: list[str | None] | None = None
                        ) -> list[dict]:
         from .. import loop as loop_mod
         return loop_mod._run_candidates(
             self.ctx, proposals, round_id, parent_sha,
-            finding_ids=finding_ids,
         )
 
     def run_proposer_lanes(self, *, round_id: int, base_sha: str):

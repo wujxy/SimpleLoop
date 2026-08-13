@@ -52,6 +52,7 @@ from .research_agent import (
     _fingerprint,
     _register_evidence,
     _source_path_exists,
+    _stamp,
 )
 from .scientist_session import ScientistSession
 from .runtime import ApptainerRuntime
@@ -361,8 +362,7 @@ _RUNTIME_BOUNDARIES = """Runtime boundaries:
   `git log` to inspect any prior experiment's source (the history is shared).
   You CANNOT commit, branch, or reset — creating artifacts is the executor's
   job, and the read-only /repo structurally prevents it.
-- /history.jsonl and /rounds are persisted run evidence when present;
-  /scratch is temporary writable space.
+- /scratch is temporary writable space.
 - Anything you measure in your lab (a toy build, a probe) is for YOUR
   understanding only. It is never a merit fact: whether a change is faster or
   correct is the Harness's verdict, not yours. You may predict, judge, and bet
@@ -471,10 +471,12 @@ def _fmt_metrics(metrics: dict) -> str:
 def _build_world_event(memory_service, current_round: int, base_sha: str) -> str | None:
     """The resume world-transition event.
 
-    Reconnects what the Scientist asked reality to try with what reality
-    returned, then states the world that now exists. Authoritative harness
-    facts only — no interpretation ("this direction is exhausted", etc.); the
-    Scientist produces the meaning.
+    Reports the OUTCOMES of last round's experiments (what reality returned)
+    and states the world that now exists. The directions themselves are NOT
+    echoed here — they live in the Scientist's notebook, and one experiment's
+    detail is available via inspect_episode. Authoritative harness facts only
+    — no interpretation ("this direction is exhausted", etc.); the Scientist
+    produces the meaning.
 
     Three outcomes are distinguished so the Scientist's world model is not
     fed a falsehood: a candidate that passed the gates but did not beat the
@@ -500,12 +502,13 @@ def _build_world_event(memory_service, current_round: int, base_sha: str) -> str
     lines = [
         "Your research is resuming. While you were paused, the directions you "
         "submitted were executed as experiments, and the research world may "
-        "have changed. The following are authoritative harness facts, not your "
-        "interpretations.",
+        "have changed. The following are authoritative harness facts about the "
+        "OUTCOMES — what you asked is in your own notebook; if you need the "
+        "detail of one experiment, inspect it deliberately.",
         "",
         f"Previous accepted revision: {prev_sha[:10]}",
         "",
-        "What you asked to try, and what happened:",
+        "Outcomes from your last round's experiments:",
         "",
     ]
     for e in last:
@@ -518,7 +521,6 @@ def _build_world_event(memory_service, current_round: int, base_sha: str) -> str
         candidate = e.candidate_sha[:10] if e.candidate_sha else "—"
         paths = ", ".join(e.changed_paths) if e.changed_paths else "—"
         lines.append(f"  {e.experiment_id}")
-        lines.append(f"    Your direction: {e.proposal or '—'}")
         lines.append(
             f"    parent revision: {e.parent_sha[:10]}   "
             f"candidate: {candidate}"
@@ -746,9 +748,12 @@ def _dispatch(action: dict, proposal_slots: int) -> dict:
         if filters:
             unknown = set(filters) - allowed_filters
             if unknown:
-                raise ProposerError(
-                    f"search_experiments.filters has unknown keys: {sorted(unknown)}"
-                )
+                # Tolerate unknown filter keys (the model often conflates
+                # list_findings' `state` into search_experiments.filters).
+                # Drop them rather than burn a protocol-repair round-trip on a
+                # harmless extra key — a meaningful filter set still applies.
+                filters = {k: v for k, v in filters.items()
+                           if k in allowed_filters}
         limit = action.get("limit", 10)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ProposerError(
@@ -923,15 +928,28 @@ class ScientistAgent(ResearchAgent):
             print("[scientist] cold start — first round of this Scientist",
                   flush=True)
         else:
-            # Cross-round continuity is identity + autobiographical notebook +
-            # world transition only. The previous round's raw trajectory is NOT
+            # Cross-round continuity = coverage map + autobiographical notebook
+            # + world-transition outcomes. The coverage map orients the
+            # Scientist to what is already covered (so it does not re-mine
+            # ground); the world event reports last round's OUTCOMES (not the
+            # direction texts); the notebook carries its own running
+            # understanding. The previous round's raw trajectory is NOT
             # re-injected: it is lived history about a world that may no longer
             # exist, and carrying it hot would let the old world dominate the
-            # resumed Scientist's attention. The notebook (rewritten each
-            # suspension) carries the distilled understanding; the immutable
-            # session.jsonl remains the audit archive (tail_turns() is retained
-            # for that, not for default resume).
+            # resumed Scientist's attention.
             messages: list[dict] = []
+            if memory_service is not None:
+                try:
+                    coverage = memory_service.build_coverage_pack(
+                        current_round=current_round)
+                    if coverage:
+                        messages.append(
+                            {"role": "user", "content": coverage})
+                except Exception as exc:
+                    print(
+                        f"[scientist] coverage pack build failed: {exc}",
+                        flush=True,
+                    )
             world_event = _build_world_event(
                 memory_service, current_round, base_sha,
             )
@@ -945,14 +963,15 @@ class ScientistAgent(ResearchAgent):
             messages.append({"role": "user", "content": world_event})
             # Archive the world event into the Scientist's lived history — it is
             # something this Scientist was told (observed), so the immutable
-            # archive must record it.
+            # archive must record it. (The coverage map is ephemeral —
+            # recomputed each round — so it is not archived.)
             session.append_message(
                 "user", world_event, round_id=current_round,
             )
             print(
                 f"[scientist] resume — scientist_id={session.scientist_id[:8]} "
-                f"cold context (raw tail not re-injected); world-transition "
-                f"injected",
+                f"cold context (raw tail not re-injected); coverage map + "
+                f"world-transition injected",
                 flush=True,
             )
 
@@ -991,7 +1010,8 @@ class ScientistAgent(ResearchAgent):
             self._maybe_compact(messages, [], state)
             for _step_num in range(steps_budget):
                 step = _step_num + 1
-                print(f"[scientist step {step}/{steps_budget}] thinking",
+                print(f"[{_stamp()}] [scientist step {step}/{steps_budget}] "
+                      f"thinking",
                       flush=True)
                 if (not reminded and budget_reminder_step > 0
                         and step >= budget_reminder_step):
@@ -1059,7 +1079,7 @@ class ScientistAgent(ResearchAgent):
                 session.append_message("user", obs_envelope,
                                        round_id=current_round)
                 print(
-                    f"[scientist step {step}/{steps_budget}] "
+                    f"[{_stamp()}] [scientist step {step}/{steps_budget}] "
                     f"{name} ok={observation.get('ok')}",
                     flush=True,
                 )

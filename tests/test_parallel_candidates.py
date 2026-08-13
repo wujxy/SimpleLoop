@@ -764,24 +764,23 @@ def _run_loop_integration(
             pass
 
         def run_candidates(self, *, proposals: list[str], round_id: int,
-                           parent_sha: str, journal=None,
-                           finding_ids=None) -> list[dict]:
+                           parent_sha: str, journal=None) -> list[dict]:
             assert proposals == ["test another sparse gather"]
-            # The inflight journal carries structured proposal metadata,
-            # NOT annotations.
+            # The inflight journal carries structured proposal metadata, NOT
+            # annotations. finding_id is no longer threaded through the
+            # execution layer — the proposer owns the finding lifecycle
+            # internally (commit_proposals), and the Kernel ledger carries no
+            # finding semantics.
             assert "annotations" not in journal.meta
             assert journal.meta["proposals"] == [
                 {"instruction": "test another sparse gather",
-                 "finding_id": "F-001",
                  "evidence_refs": [],
                  "material_difference": None},
             ]
-            assert finding_ids == ["F-001"]
             return fake_run_candidates()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,
-                         parent_sha: str, journal=None,
-                         finding_ids=None) -> list[dict]:
+                         parent_sha: str, journal=None) -> list[dict]:
             return []
 
     executed = []
@@ -791,7 +790,6 @@ def _run_loop_integration(
         return [{
             "candidate": 0,
             "experiment_id": "r1c0",
-            "finding_id": "F-001",
             "proposal": "test another sparse gather",
             "parent_sha": "seed-sha",
             "sha": None,
@@ -827,7 +825,7 @@ def _run_loop_integration(
     return run_dir, executed
 
 
-def test_run_records_experiment_and_finding_but_no_notes(
+def test_run_records_experiment_no_finding_in_kernel(
     monkeypatch, tmp_path,
 ):
     run_dir, _ = _run_loop_integration(
@@ -838,13 +836,13 @@ def test_run_records_experiment_and_finding_but_no_notes(
     store = Store(run_dir, metrics_schema=_SCHEMA)
     rounds = store.history()
     r1_candidate = rounds[-1]["candidates"][0]
-    # New candidate schema: no `note`; experiment_id and finding_id are set.
+    # Candidate schema: no `note`, experiment_id is set, and the Kernel ledger
+    # carries NO finding_id (S2c: finding↔experiment attribution is the
+    # proposer's own concern, re-derived at read time — never stored in
+    # history.jsonl).
     assert "note" not in r1_candidate
     assert r1_candidate["experiment_id"] == "r1c0"
-    assert r1_candidate["finding_id"] == "F-001"
-    # The Findings archive gained an entry (state=active after linking).
-    findings_path = run_dir / "memory" / "findings.jsonl"
-    assert findings_path.is_file()
+    assert "finding_id" not in r1_candidate
 
 
 def test_segment_progress_reports_global_total_and_next_optimizer(

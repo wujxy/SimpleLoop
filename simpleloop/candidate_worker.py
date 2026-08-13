@@ -50,7 +50,6 @@ class CandidateSpec:
     candidate_id: int
     parent_sha: str
     proposal: str
-    finding_id: str | None = None
     run_dir: str = ""
     worktree_path: str = ""
     result_dir: str = ""
@@ -63,7 +62,6 @@ class CandidateSpec:
             "candidate_id": self.candidate_id,
             "parent_sha": self.parent_sha,
             "proposal": self.proposal,
-            "finding_id": self.finding_id,
             "run_dir": self.run_dir,
             "worktree_path": self.worktree_path,
             "result_dir": self.result_dir,
@@ -73,17 +71,15 @@ class CandidateSpec:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CandidateSpec":
-        unknown = set(data) - set(cls.__dataclass_fields__)
-        if unknown:
-            raise ValueError(
-                f"unknown candidate manifest fields: {sorted(unknown)}"
-            )
+        # Tolerate unknown fields (e.g. legacy ``finding_id`` from manifests
+        # written before S2c) so --continue across the version boundary does
+        # not crash. Manifests are machine-generated, so strict checking buys
+        # little.
         return cls(
             round_id=int(data["round_id"]),
             candidate_id=int(data["candidate_id"]),
             parent_sha=str(data["parent_sha"]),
             proposal=str(data["proposal"]),
-            finding_id=data.get("finding_id"),
             run_dir=str(data.get("run_dir") or ""),
             worktree_path=str(data.get("worktree_path") or ""),
             result_dir=str(data.get("result_dir") or ""),
@@ -310,7 +306,6 @@ def _candidate_result(
     return {
         "candidate": spec.candidate_id,
         "experiment_id": f"r{spec.round_id}c{spec.candidate_id}",
-        "finding_id": spec.finding_id,
         "proposal": spec.proposal,
         "parent_sha": spec.parent_sha,
         "sha": result.sha,
@@ -357,7 +352,6 @@ def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> d
     return {
         "candidate": spec.candidate_id,
         "experiment_id": f"r{spec.round_id}c{spec.candidate_id}",
-        "finding_id": spec.finding_id,
         "proposal": spec.proposal,
         "parent_sha": spec.parent_sha,
         "sha": spec.parent_sha,
@@ -385,7 +379,6 @@ def candidate_failure(candidate_id: int, spec: CandidateSpec,
     return {
         "candidate": candidate_id,
         "experiment_id": f"r{spec.round_id}c{candidate_id}",
-        "finding_id": spec.finding_id,
         "proposal": spec.proposal,
         "parent_sha": parent_sha,
         "sha": sha,

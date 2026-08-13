@@ -80,12 +80,14 @@ def test_build_deps_passes_external_read_only_binds_to_executor(tmp_path: Path):
     )
 
 
-def test_spec_rejects_unknown_manifest_fields(tmp_path: Path):
+def test_spec_tolerates_unknown_manifest_fields(tmp_path: Path):
     data = _spec(tmp_path).to_dict()
-    data["decision"] = "old semantic field"
-
-    with pytest.raises(ValueError, match="unknown candidate manifest fields"):
-        CandidateSpec.from_dict(data)
+    data["decision"] = "legacy semantic field"
+    # from_dict ignores unknown fields so --continue across the S2c version
+    # boundary (legacy manifests written before S2c carry `finding_id`) does
+    # not crash; manifests are machine-generated.
+    spec = CandidateSpec.from_dict(data)
+    assert spec.round_id == data["round_id"]
 
 
 def test_run_candidate_completed(tmp_path: Path, monkeypatch):

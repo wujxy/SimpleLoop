@@ -49,6 +49,12 @@ class WorkingState:
 _MAX_PROTOCOL_REPAIRS = 2
 
 
+def _stamp() -> str:
+    """Wall-clock tag for step logs, so per-step latency (model call vs probe
+    vs repair churn) is visible end-to-end."""
+    return time.strftime("%H:%M:%S")
+
+
 # --- Shared helpers --------------------------------------------------------
 
 def _bump(state: WorkingState, name: str) -> None:
@@ -277,7 +283,7 @@ class ResearchAgent:
                 reason = self._protocol_reason(exc)
                 state.protocol_repairs += 1
                 print(
-                    f"[agent step {step_label}/{budget}] "
+                    f"[{_stamp()}] [agent step {step_label}/{budget}] "
                     f"protocol repair {repair + 1}/{_MAX_PROTOCOL_REPAIRS} "
                     f"reason={reason}",
                     flush=True,
@@ -303,7 +309,7 @@ class ResearchAgent:
                     ) from None
                 state.protocol_repairs += 1
                 print(
-                    f"[agent step {step_label}/{budget}] "
+                    f"[{_stamp()}] [agent step {step_label}/{budget}] "
                     f"protocol repair {repair + 1}/{_MAX_PROTOCOL_REPAIRS} "
                     f"reason={guard}",
                     flush=True,
@@ -318,7 +324,7 @@ class ResearchAgent:
                 ])
                 continue
             print(
-                f"[agent step {step_label}/{budget}] "
+                f"[{_stamp()}] [agent step {step_label}/{budget}] "
                 f"{_action_summary(action)}",
                 flush=True,
             )

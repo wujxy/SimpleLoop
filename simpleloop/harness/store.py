@@ -71,8 +71,11 @@ class Store:
                           telemetry: dict | None = None) -> None:
         """Record a self-loop generation with multiple candidate attempts.
 
-        Every candidate row carries a stable ``experiment_id`` (``r<N>c<M>``)
-        and, when the proposal declared a research target, its ``finding_id``.
+        Every candidate row carries a stable ``experiment_id`` (``r<N>c<M>``).
+        finding↔experiment attribution is NOT stored here — the Kernel ledger
+        carries no finding semantics; the proposer re-derives attribution at
+        read time by joining its own findings.jsonl refs against these
+        experiment_ids (join-from-history, contract §2.5).
         ``abstention`` (``reason`` + optional ``blocking_unknown``) marks a
         zero-candidate round the Proposer deliberately abstained from.
         ``deliberation_telemetry`` records behavioral facts only (steps, action
@@ -86,7 +89,6 @@ class Store:
             normalized.append({
                 "candidate": candidate_id,
                 "experiment_id": experiment_id,
-                "finding_id": c.get("finding_id"),
                 "proposal": c.get("proposal") or "",
                 "parent_sha": c.get("parent_sha") or parent_sha,
                 "sha": c.get("sha"),

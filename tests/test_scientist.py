@@ -101,7 +101,7 @@ def test_scientist_id_persisted_on_creation_not_at_round_end(tmp_path):
     sess = ScientistSession.load_or_create(
         tmp_path, 0, prompt_version="scientist-v1")
     # NO save_meta call — simulate a kill before round end.
-    meta_path = tmp_path / "scientists" / "lane-0" / "meta.json"
+    meta_path = tmp_path / "proposer" / "meta.json"
     assert meta_path.exists(), "meta.json must be written at creation"
     persisted = json.loads(meta_path.read_text())
     assert persisted["scientist_id"] == sess.scientist_id
@@ -177,6 +177,12 @@ class _FakeMem:
 
     def load_experiments(self):
         return self._exps
+
+    def build_coverage_pack(self, *, current_round, recent_rounds=2):
+        # The real MemoryService renders a coverage map at wake-up; the fake
+        # returns none (these tests assert on the world event / trajectory,
+        # not the coverage pack).
+        return ""
 
 
 def test_world_event_none_when_no_prior_round():
@@ -294,7 +300,7 @@ def test_research_cold_start_submits_and_persists(tmp_path, monkeypatch):
     assert len(result.proposals) == 1
     assert not result.abstained
     # trajectory archived (2 tool turns: 2 assistant + 2 user obs)
-    archived = (tmp_path / "scientists" / "lane-0" / "session.jsonl").read_text()
+    archived = (tmp_path / "proposer" / "session.jsonl").read_text()
     assert archived.count("rg a") >= 1 and archived.count("rg b") >= 1
     # notebook written at suspension
     assert "continuing my investigation" in session.notebook
@@ -428,7 +434,7 @@ def test_research_resume_injects_world_event(tmp_path, monkeypatch):
     assert "round 0 note" in captured["system"]  # notebook carried into system
     assert result.abstained  # submitted 0 this round
     # Regression: the world event is also archived as lived history
-    archive = (tmp_path / "scientists" / "lane-0" / "session.jsonl").read_text()
+    archive = (tmp_path / "proposer" / "session.jsonl").read_text()
     assert "directions you submitted were executed" in archive
 
 
@@ -601,7 +607,7 @@ def test_research_loop_compacts_live_but_keeps_full_archive(
     # compaction fired during the round
     assert result.deliberation_telemetry.get("compactions", 0) >= 1
     # ...but the archive recorded ALL 8 tool observations + the submit reply
-    archive = (tmp_path / "scientists" / "lane-0" / "session.jsonl").read_text()
+    archive = (tmp_path / "proposer" / "session.jsonl").read_text()
     for i in range(8):
         assert f"rg cmd{i}" in archive, (
             f"observation {i} missing from archive despite compaction")

@@ -174,7 +174,10 @@ def _render_frontier(frontier: dict) -> str:
                 f"last_touched=r{entry['last_touched_round']}  "
                 f"mechanisms=[{mech}]  code_regions=[{regions}]"
             )
-            lines.append(f"      Q: {entry['question']}")
+            # The finding's QUESTION text is deliberately NOT shown here — it
+            # is the Scientist's own open research question, and surfacing it
+            # in the coverage map anchors the proposer to keep drilling the
+            # same questions. Use inspect_finding to recall one deliberately.
     else:
         lines.append("  active_findings: (none)")
     lines.append(
@@ -194,3 +197,29 @@ def _render_frontier(frontier: dict) -> str:
         for mech, count in mechanisms.items():
             lines.append(f"    {mech}: {count}")
     return "\n".join(lines)
+
+
+def build_coverage_pack(
+    *,
+    experiments,
+    frontier: dict,
+    recent_rounds: int = 2,
+    recent_abstentions: list[dict] | None = None,
+) -> str:
+    """The lean per-round COVERAGE MAP injected at wake-up: recent outcome
+    dashboard + research frontier (coverage) + recent abstentions. Goal /
+    world / gates / tools live in the standing system prompt, so they are NOT
+    repeated here. Carries no direction text — only coverage and outcomes
+    (read it as "what is already covered", never as a direction menu)."""
+    dashboard = _render_dashboard(experiments, recent_rounds=recent_rounds)
+    abstentions_block = _render_abstentions(recent_abstentions)
+    frontier_text = _render_frontier(frontier)
+    return (
+        "Coverage map — where effort has already been spent (read as WHAT IS "
+        "COVERED, not as a menu of directions to reuse):\n"
+        f"\nRecent outcomes (last {recent_rounds} round(s), authoritative "
+        f"harness output):\n{dashboard}\n"
+        f"{abstentions_block}"
+        f"Research frontier (open questions and coverage — derived):\n"
+        f"{frontier_text}\n"
+    )

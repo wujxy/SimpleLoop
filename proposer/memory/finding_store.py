@@ -1,9 +1,11 @@
 """Append-only Finding Archive.
 
-Findings live at ``<run_dir>/memory/findings.jsonl``. Every mutation (create,
-link experiments, update stats, change state) appends a new full record; the
-current state of finding ``F-NNN`` is the last record with that id. This
-mirrors ``history.jsonl``'s audit-friendly semantics — nothing is ever silently
+Findings live at ``<run_dir>/proposer/findings.jsonl`` (the proposer-owned
+Autobiography location; legacy run-dirs keep ``<run_dir>/memory/findings.jsonl``
+— see ``_resolve_findings_path``). Every mutation (create, commit a round's
+experiment refs, change state) appends a new full record; the current state of
+finding ``F-NNN`` is the last record with that id. This mirrors
+``history.jsonl``'s audit-friendly semantics — nothing is ever silently
 rewritten, and a crashed writer leaves at most one truncated last line
 (recoverable by ignoring the tail).
 """
@@ -24,7 +26,22 @@ class FindingStore:
 
     def __init__(self, run_dir: Path):
         self.run_dir = Path(run_dir)
-        self.path = self.run_dir / "memory" / "findings.jsonl"
+        self.path = self._resolve_findings_path(self.run_dir)
+
+    @staticmethod
+    def _resolve_findings_path(run_dir: Path) -> Path:
+        """Resolve the findings path ONCE at construction; reads and appends
+        then use the same path so an append-only archive never splits across
+        two directories. Prefer the new proposer-owned location; fall back to
+        the legacy ``memory/`` location for pre-S2c run-dirs (so --continue
+        keeps its findings). A fresh run writes the new location."""
+        new = run_dir / "proposer" / "findings.jsonl"
+        legacy = run_dir / "memory" / "findings.jsonl"
+        if new.is_file():
+            return new
+        if legacy.is_file():
+            return legacy
+        return new
 
     # --- Reads ------------------------------------------------------------
 

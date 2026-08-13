@@ -16,6 +16,7 @@ def compute_frontier(
     current_round: int,
     dormancy_rounds: int,
     editable_prefixes: tuple[str, ...] = (),
+    experiments_by_id: dict[str, Experiment] | None = None,
 ) -> dict:
     """Return {active_findings, dormant_count, archived_count,
     experiment_count, coverage{code_regions, mechanisms}}.
@@ -26,6 +27,11 @@ def compute_frontier(
     - ``coverage.code_regions``: experiment count per editable prefix
       (falls back to top-2-segment buckets when no prefixes are supplied).
     - ``coverage.mechanisms``: finding-count per mechanism tag.
+
+    ``attempts`` is the count of a finding's experiment_refs that have
+    actually landed in history (run + recorded). When no
+    ``experiments_by_id`` is supplied (e.g. unit tests), it falls back to
+    ``len(experiment_refs)`` (predicted attempts, including not-yet-run).
     """
     active: list[dict] = []
     dormant = 0
@@ -37,10 +43,15 @@ def compute_frontier(
             dormancy_rounds=dormancy_rounds,
         )
         if state == "active":
+            refs = finding.experiment_refs
+            if experiments_by_id is not None:
+                attempts = sum(1 for r in refs if r in experiments_by_id)
+            else:
+                attempts = len(refs)
             active.append({
                 "id": finding.id,
                 "question": finding.question,
-                "attempts": len(finding.experiment_refs),
+                "attempts": attempts,
                 "last_touched_round": finding.last_touched_round,
                 "mechanisms": list(finding.mechanisms),
                 "code_regions": list(finding.code_regions),

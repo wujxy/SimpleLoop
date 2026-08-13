@@ -10,10 +10,11 @@ search_experiments / inspect_episode``). Never mutates the Experiment Ledger.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 from .history import read_history, resolve_episode
-from .context import build_startup_pack, build_generation_context
+from .context import build_startup_pack, build_generation_context, build_coverage_pack
 from .experiment_index import (
     Experiment,
     build_experiments,
@@ -65,8 +66,66 @@ class MemoryService:
     # --- Public reads used by Loop / Proposer -----------------------------
 
     def load_experiments(self) -> list[Experiment]:
+        """Project history into Experiment records, then patch each
+        ``finding_id`` from the reverse-join of the findings' experiment_refs
+        (the proposer-owned association). history.jsonl no longer carries
+        finding_id; the association lives in findings.jsonl and is re-derived
+        here each read (join-from-history, contract §2.5)."""
         history = read_history(self.history_path)
-        return build_experiments(history)
+        experiments = build_experiments(history)
+        fmap = self._experiment_finding_map()
+        if fmap:
+            experiments = [
+                replace(e, finding_id=fmap.get(e.experiment_id, e.finding_id))
+                for e in experiments
+            ]
+        return experiments
+
+    def _experiment_finding_map(self) -> dict[str, str]:
+        """Invert every finding's ``experiment_refs`` into
+        ``{experiment_id: finding_id}``. First writer wins on collision (a ref
+        claimed by two findings — e.g. a botched retry — is attributed to the
+        first)."""
+        out: dict[str, str] = {}
+        for fid, finding in self.finding_store.load_all().items():
+            for ref in finding.experiment_refs:
+                out.setdefault(ref, fid)
+        return out
+
+    def _experiments_by_id(self) -> dict[str, Experiment]:
+        return {e.experiment_id: e for e in self.load_experiments()}
+
+    @staticmethod
+    def _derive_stats(
+        finding: Finding, experiments_by_id: dict[str, Experiment],
+        obj_key: str | None, lower_is_better: bool,
+    ) -> dict:
+        """Join finding.experiment_refs -> history outcomes (read-only).
+        Refs predicted at emit but not yet in history (round not recorded,
+        crashed, or abstained) are skipped — they are not attempts yet."""
+        attempts = eligible = selected = 0
+        best: float | None = None
+        for ref in finding.experiment_refs:
+            exp = experiments_by_id.get(ref)
+            if exp is None:
+                continue
+            attempts += 1
+            if exp.eligible:
+                eligible += 1
+            if exp.selected:
+                selected += 1
+            if obj_key and exp.eligible:
+                m = (exp.metrics or {}).get(obj_key)
+                if (isinstance(m, (int, float)) and not isinstance(m, bool)
+                        and math.isfinite(m)):
+                    best = m if best is None else (
+                        min(best, m) if lower_is_better else max(best, m))
+        return {
+            "attempts": attempts,
+            "eligible": eligible,
+            "selected": selected,
+            "best_objective": best,
+        }
 
     def load_findings(self) -> dict[str, Finding]:
         return self.finding_store.load_all()
@@ -74,12 +133,14 @@ class MemoryService:
     def compute_frontier(
         self, *, current_round: int, editable_prefixes: tuple[str, ...] = (),
     ) -> dict:
+        experiments = self.load_experiments()
         return compute_frontier(
             self.load_findings(),
-            self.load_experiments(),
+            experiments,
             current_round=current_round,
             dormancy_rounds=self.dormancy_rounds,
             editable_prefixes=editable_prefixes,
+            experiments_by_id={e.experiment_id: e for e in experiments},
         )
 
     def build_startup_pack(
@@ -104,6 +165,7 @@ class MemoryService:
             current_round=current_round,
             dormancy_rounds=self.dormancy_rounds,
             editable_prefixes=tuple(editable or ()),
+            experiments_by_id={e.experiment_id: e for e in experiments},
         )
         abstentions = [
             {
@@ -129,6 +191,39 @@ class MemoryService:
             recent_rounds=recent_rounds,
             tool_cheatsheet=MEMORY_TOOL_CHEATSHEET,
             recent_abstentions=abstentions,
+        )
+
+    def build_coverage_pack(
+        self, *, current_round: int, recent_rounds: int = 2,
+    ) -> str:
+        """The lean per-round COVERAGE MAP for the Scientist's wake-up:
+        outcomes dashboard + research frontier + recent abstentions. No goal /
+        world / gates / tools (those live in the standing system prompt) and no
+        direction text — only coverage + outcomes."""
+        history = read_history(self.history_path)
+        experiments = self.load_experiments()  # reverse-join patched
+        findings = self.load_findings()
+        frontier = compute_frontier(
+            findings, experiments,
+            current_round=current_round,
+            dormancy_rounds=self.dormancy_rounds,
+            editable_prefixes=(),
+            experiments_by_id={e.experiment_id: e for e in experiments},
+        )
+        abstentions = [
+            {
+                "round": record.get("round", 0),
+                "reason": (record.get("abstention") or {}).get("reason"),
+                "blocking_unknown": (record.get("abstention") or {}).get(
+                    "blocking_unknown"
+                ),
+            }
+            for record in history
+            if isinstance(record, dict) and record.get("abstention")
+        ][-recent_rounds:]
+        return build_coverage_pack(
+            experiments=experiments, frontier=frontier,
+            recent_rounds=recent_rounds, recent_abstentions=abstentions,
         )
 
     def build_generation_context(
@@ -197,66 +292,64 @@ class MemoryService:
                 )
         return resolved
 
-    def link_completed_experiments(
-        self,
-        *,
-        round_id: int,
-        candidates: list[dict],
-    ) -> None:
-        """After the Store persists a round, walk its candidates and update
-        each involved Finding's experiment_refs / stats / last_touched_round.
-        A candidate with no ``finding_id`` is skipped (nothing to link)."""
-        if not candidates:
-            return
-        findings = self.finding_store.load_all()
-        obj = (self.metrics_schema or {}).get("objective") or {}
-        obj_key = obj.get("key")
-        lower_is_better = bool(obj.get("lower_is_better"))
-        by_finding: dict[str, list[dict]] = {}
-        for cand in candidates:
-            fid = cand.get("finding_id")
-            if not fid:
-                continue
-            by_finding.setdefault(fid, []).append(cand)
-        for fid, cands in by_finding.items():
-            base = findings.get(fid)
-            if base is None:
-                raise ValueError(
-                    f"cannot link experiments to unknown finding {fid!r}"
-                )
-            new_refs = list(base.experiment_refs)
-            for cand in cands:
-                ref = cand.get("experiment_id") or (
-                    f"r{round_id}c{cand.get('candidate', 0)}"
-                )
-                if ref not in new_refs:
-                    new_refs.append(ref)
-            stats = dict(base.stats or {})
-            stats["attempts"] = stats.get("attempts", 0) + len(cands)
-            stats["eligible"] = stats.get("eligible", 0) + sum(
-                1 for c in cands if c.get("eligible")
-            )
-            stats["selected"] = stats.get("selected", 0) + sum(
-                1 for c in cands if c.get("selected")
-            )
-            if obj_key:
-                stats["best_objective"] = _combine_best(
-                    stats.get("best_objective"),
-                    cands, obj_key, lower_is_better,
-                )
-            updated = Finding(
-                id=base.id,
-                question=base.question,
-                mechanisms=base.mechanisms,
-                code_regions=base.code_regions,
-                state="active",
-                created_round=base.created_round,
-                last_touched_round=round_id,
-                experiment_refs=tuple(new_refs),
-                parent_finding_id=base.parent_finding_id,
-                stats=stats,
-            )
-            self.finding_store.append(updated)
+    def commit_proposals(
+        self, *, round_id: int, proposals: list[ResearchProposal],
+    ) -> list[str | None]:
+        """The proposer owns its finding lifecycle. For one round's proposals:
+        scrub any stale same-round refs (retry idempotency), resolve each
+        proposal's research target (allocate/dedup findings), then record the
+        predicted experiment ref ``r{round}c{slot}`` on each finding.
+
+        This records the proposer's INTENT (which finding each slot targets);
+        outcomes are never stored here — they are re-derived from history at
+        read time (join-from-history, contract §2.5). The slot index equals the
+        candidate index in history (the loop builds candidates in proposal
+        order), so the predicted ref matches the experiment_id history records.
+
+        A findings.jsonl IO error is swallowed (mirrors _safe_save_meta): the
+        Scientist's notes must not fail the round.
+        """
+        n = len(proposals)
+        try:
+            slot_refs = {f"r{round_id}c{i}" for i in range(n)}
+
+            # 1. Scrub: remove this round's slot refs from every finding, so a
+            #    retried proposer lane does not leave two findings both claiming
+            #    r{R}c{i} (which would double-count the outcome in _derive_stats).
+            #    The last successful commit for a round wins.
+            for fid, finding in self.finding_store.load_all().items():
+                if any(r in slot_refs for r in finding.experiment_refs):
+                    self.finding_store.append(replace(
+                        finding,
+                        experiment_refs=tuple(
+                            r for r in finding.experiment_refs
+                            if r not in slot_refs),
+                    ))
+
+            # 2. Resolve targets (allocate new findings / validate existing).
+            finding_ids = self.resolve_targets(proposals, round_id=round_id)
+            findings = self.finding_store.load_all()
+
+            # 3. Record each slot's predicted ref on its finding.
+            for i, fid in enumerate(finding_ids):
+                if fid is None:
+                    continue
+                base = findings.get(fid)
+                if base is None:
+                    continue
+                ref = f"r{round_id}c{i}"
+                if ref in base.experiment_refs:
+                    continue
+                self.finding_store.append(replace(
+                    base,
+                    experiment_refs=base.experiment_refs + (ref,),
+                    last_touched_round=round_id,
+                    state="active" if base.state == "open" else base.state,
+                ))
+            return finding_ids
+        except OSError as exc:
+            print(f"[memory] commit_proposals IO failed: {exc}", flush=True)
+            return [None] * n
 
     # --- Memory tools exposed to the Proposer -----------------------------
 
@@ -269,6 +362,10 @@ class MemoryService:
     ) -> list[dict]:
         limit = max(1, min(int(limit), 20))
         findings = self.finding_store.load_all()
+        experiments_by_id = self._experiments_by_id()
+        obj = (self.metrics_schema or {}).get("objective") or {}
+        obj_key = obj.get("key")
+        lower_is_better = bool(obj.get("lower_is_better"))
         out: list[dict] = []
         for finding in findings.values():
             eff_state = (
@@ -280,6 +377,15 @@ class MemoryService:
                 continue
             entry = finding.to_dict()
             entry["state"] = eff_state
+            # Coverage stats are re-derived from history each read; the stored
+            # finding.stats is never authoritative (contract §2.5).
+            entry["stats"] = self._derive_stats(
+                finding, experiments_by_id, obj_key, lower_is_better)
+            # The question text is the Scientist's own open research question;
+            # exposing it in the bulk list anchors the proposer to keep
+            # drilling the same questions. Drop it here (inspect_finding
+            # returns it for deliberate single-item recall).
+            entry.pop("question", None)
             out.append(entry)
         out.sort(
             key=lambda entry: (-int(entry.get("last_touched_round", 0)),
@@ -302,7 +408,12 @@ class MemoryService:
         finding = self.finding_store.get(finding_id)
         if finding is None:
             raise ValueError(f"unknown finding: {finding_id}")
-        return finding.to_dict()
+        obj = (self.metrics_schema or {}).get("objective") or {}
+        entry = finding.to_dict()
+        entry["stats"] = self._derive_stats(
+            finding, self._experiments_by_id(),
+            obj.get("key"), bool(obj.get("lower_is_better")))
+        return entry
 
     def search_experiments(
         self,
@@ -312,23 +423,25 @@ class MemoryService:
         limit: int = 10,
         buckets: bool = True,
     ) -> dict | list[dict]:
-        """When ``buckets`` is True (default), return the design-doc §6.3
-        three-bucket view: {relevant, contrasting, diverse}. Otherwise return
-        a flat top-K list."""
+        """Coverage view over history: locate what ground is already covered
+        (and where the gaps are) — NOT a search for directions. Each hit is a
+        coverage row (experiment_id, outcome, region, metrics, finding) with
+        NO proposal or eval text; those are inspect_episode's job, one
+        experiment at a time. ``buckets=True`` (default) returns
+        {relevant, contrasting, diverse}; contrasting/diverse point at
+        differently-outcomed or uncovered regions (legitimate gap-finding)."""
         limit = max(1, min(int(limit), 50))
         experiments = filter_experiments(
             self.load_experiments(), **(filters or {}),
         )
         if not buckets:
-            hits = []
             from .retrieval import rank_experiments
-            for exp, score in rank_experiments(
-                experiments, query=query, limit=limit,
-            ):
-                entry = exp.to_dict()
-                entry["score"] = round(float(score), 4)
-                hits.append(entry)
-            return hits
+            return [
+                self._coverage_row(exp, score)
+                for exp, score in rank_experiments(
+                    experiments, query=query, limit=limit,
+                )
+            ]
         # Split ``limit`` across the three buckets while preserving intent.
         rel = max(1, (limit + 2) // 3 + (limit % 3 != 0))
         con = max(1, limit // 3)
@@ -338,12 +451,30 @@ class MemoryService:
             relevant=rel, contrasting=con, diverse=div,
         )
         return {
-            name: [
-                {**exp.to_dict(), "score": round(float(score), 4)}
-                for exp, score in hits
-            ]
+            name: [self._coverage_row(exp, score) for exp, score in hits]
             for name, hits in buckets_result.items()
         }
+
+    @staticmethod
+    def _coverage_row(exp, score=None) -> dict:
+        """A coverage-only projection of one experiment: NO proposal text and
+        NO eval_block (those carry direction semantics and are reserved for
+        deliberate single-experiment inspection via inspect_episode)."""
+        row = {
+            "experiment_id": exp.experiment_id,
+            "round": exp.round,
+            "candidate": exp.candidate,
+            "status": exp.status,
+            "gate_passed": exp.gate_passed,
+            "eligible": exp.eligible,
+            "selected": exp.selected,
+            "metrics": dict(exp.metrics),
+            "changed_paths": list(exp.changed_paths),
+            "finding_id": exp.finding_id,
+        }
+        if score is not None:
+            row["score"] = round(float(score), 4)
+        return row
 
     def inspect_episode(self, ref: str) -> dict:
         history = read_history(self.history_path)
@@ -363,25 +494,3 @@ class MemoryService:
         if current_round - finding.last_touched_round > self.dormancy_rounds:
             return "dormant"
         return "active"
-
-
-def _combine_best(
-    current: float | None,
-    candidates: list[dict],
-    key: str,
-    lower_is_better: bool,
-) -> float | None:
-    values: list[float] = []
-    if isinstance(current, (int, float)) and not isinstance(current, bool):
-        if math.isfinite(current):
-            values.append(float(current))
-    for cand in candidates:
-        if not cand.get("eligible"):
-            continue
-        metric = (cand.get("metrics") or {}).get(key)
-        if isinstance(metric, (int, float)) and not isinstance(metric, bool):
-            if math.isfinite(metric):
-                values.append(float(metric))
-    if not values:
-        return current
-    return min(values) if lower_is_better else max(values)

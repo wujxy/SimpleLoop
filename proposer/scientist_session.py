@@ -1,6 +1,9 @@
 """Persistent Scientist session — the continuity layer for one Scientist.
 
-Three stores under ``run_dir/scientists/lane-<N>/``:
+Three stores under ``run_dir/proposer/`` (the proposer-owned Autobiography
+location; legacy run-dirs keep ``run_dir/scientists/lane-<N>/`` — see
+``_resolve_session_dir``). Single-lane v0 collapses lane-0 into
+``run_dir/proposer/``.
 
   - ``session.jsonl`` — append-only archive of every conversation message this
     Scientist ever produced or observed (assistant replies, tool observations,
@@ -32,6 +35,21 @@ from pathlib import Path
 
 def _new_scientist_id() -> str:
     return uuid.uuid4().hex
+
+
+def _resolve_session_dir(run_dir: Path, lane_id: int) -> Path:
+    """Resolve the session dir ONCE at construction; session_path/notebook_path/
+    meta_path all derive from it, so the append-only archive stays coherent.
+    Prefer the new proposer-owned location; fall back to the legacy
+    ``scientists/lane-<N>/`` for pre-S2c run-dirs (so --continue keeps its
+    trajectory). A fresh run uses the new location."""
+    new = Path(run_dir) / "proposer"
+    legacy = Path(run_dir) / "scientists" / f"lane-{int(lane_id)}"
+    if new.is_dir():
+        return new
+    if legacy.is_dir():
+        return legacy
+    return new
 
 
 @dataclass
@@ -72,7 +90,7 @@ class ScientistSession:
     ) -> "ScientistSession":
         """Load an existing resident Scientist for this lane, or initialize a
         fresh one (new scientist_id, empty notebook, empty trajectory)."""
-        session_dir = Path(run_dir) / "scientists" / f"lane-{int(lane_id)}"
+        session_dir = _resolve_session_dir(run_dir, lane_id)
         session_dir.mkdir(parents=True, exist_ok=True)
 
         meta: dict = {}

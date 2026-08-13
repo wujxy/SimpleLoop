@@ -139,12 +139,12 @@ def test_session_persists_across_rounds_same_persona(monkeypatch, tmp_path):
 
     # meta.json persisted with the last round + the round-1 notebook survived
     meta = json.loads(
-        (tmp_path / "scientists" / "lane-0" / "meta.json").read_text())
+        (tmp_path / "proposer" / "meta.json").read_text())
     assert meta["last_round"] == 1
     assert meta["scientist_id"] == seen[0][1]
-    notebook = (tmp_path / "scientists" / "lane-0" / "notebook.md").read_text()
+    notebook = (tmp_path / "proposer" / "notebook.md").read_text()
     assert "round 1" in notebook
     # round-0 trajectory is in the immutable archive
-    archive = (tmp_path / "scientists" / "lane-0"
+    archive = (tmp_path / "proposer"
                / "session.jsonl").read_text()
     assert "round0-marker" in archive

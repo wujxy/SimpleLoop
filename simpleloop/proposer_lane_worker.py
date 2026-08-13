@@ -76,11 +76,8 @@ class ProposerLaneSpec:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProposerLaneSpec":
-        unknown = set(data) - set(cls.__dataclass_fields__)
-        if unknown:
-            raise ValueError(
-                f"unknown proposer-lane manifest fields: {sorted(unknown)}"
-            )
+        # Tolerate unknown fields so a --continue across the S2c version
+        # boundary does not crash on manifests written by older code.
         return cls(
             lane_id=int(data["lane_id"]),
             round_id=int(data["round_id"]),

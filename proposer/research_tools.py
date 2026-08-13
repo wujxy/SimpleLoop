@@ -52,9 +52,12 @@ RESEARCH_TOOL_SPECS = (
         action="inspect_episode",
         schema='{"action":"inspect_episode","ref":"r<round>c<candidate>"}',
         description=(
-            "Resolve one candidate experiment by ref (e.g. r0c1). Returns "
-            "proposal, status, gates, metrics, eval output, parent/candidate "
-            "shas, and its finding_id. Pair with run_research_command + "
+            "Resolve ONE candidate experiment by ref (e.g. r0c1) in full "
+            "detail — proposal, status, gates, metrics, eval output, "
+            "parent/candidate shas, and its finding_id. This is the "
+            "deliberate, one-at-a-time way to understand a specific past "
+            "outcome; it is the only channel that returns a proposal's text. "
+            "Pair with run_research_command + "
             "'git diff parent_sha..candidate_sha' to see the code change."
         ),
     ),
@@ -65,11 +68,14 @@ RESEARCH_TOOL_SPECS = (
             'archived|all","limit":1-20}'
         ),
         description=(
-            "List Findings (research question containers) by operational "
-            "state. Returns id, question, mechanisms, code_regions, "
-            "experiment_refs, and stats. Read the stats as a count of effort "
-            "already spent on each question (what is covered), not as a "
-            "recommendation of which direction is promising."
+            "List Findings (your open research questions) by operational "
+            "state — a COVERAGE map, not a direction menu. Returns id, "
+            "mechanisms, code_regions, and derived stats (effort already "
+            "spent). The question text is NOT included (surfacing it would "
+            "anchor you to keep drilling the same questions); use "
+            "inspect_finding to recall one question deliberately. Read the "
+            "stats as what is covered, not as a recommendation of what to do "
+            "next."
         ),
     ),
     ResearchToolSpec(
@@ -101,14 +107,18 @@ RESEARCH_TOOL_SPECS = (
             '"limit":1-50,"buckets":true|false}'
         ),
         description=(
-            "Retrieve prior experiments to check whether a direction you are "
-            "considering is already covered ground — not to find a direction. "
-            "Default buckets=true returns {relevant, contrasting, diverse}; "
-            "buckets=false returns a flat top-K list. Filters stack as AND. "
-            "Each hit includes finding_id (if any) so you can chain into "
-            "inspect_finding. Read the metrics and gates as facts; do not read "
-            "a hit's score or similarity as a recommendation to pursue or "
-            "continue."
+            "A COVERAGE query over past experiments — use it to check whether "
+            "ground you are considering is already covered, and to see where "
+            "the gaps (uncovered regions) are. Returns coverage rows only "
+            "(experiment_id, outcome, changed region, metrics, finding_id) — "
+            "NO proposal or eval text, because this is not a direction "
+            "retriever. Default buckets=true returns {relevant, contrasting, "
+            "diverse}; the contrasting/diverse buckets point at un- or "
+            "differently-explored regions. To understand one experiment's "
+            "actual change and result in detail, inspect_episode it "
+            "deliberately. Filters stack as AND. Read the metrics and gates as "
+            "facts; never read a hit's score or similarity as a reason to "
+            "pursue or continue a direction."
         ),
     ),
 )
@@ -181,13 +191,14 @@ class ResearchCommandRunner:
             f"{self.repo.resolve()}:/repo:ro",
             f"{self.scratch.resolve()}:/scratch:rw",
         ]
-        if self.history_dir is not None:
-            history_file = self.history_dir / "history.jsonl"
-            rounds = self.history_dir / "rounds"
-            if history_file.is_file():
-                extra_binds.append(f"{history_file}:/history.jsonl:ro")
-            if rounds.is_dir():
-                extra_binds.append(f"{rounds}:/rounds:ro")
+        # NOTE: /history.jsonl and /rounds are intentionally NOT mounted into
+        # the shell sandbox. The experiment ledger is the Scientist's coverage
+        # map, not an idea mine: bulk shell access to every past proposal text
+        # + eval would make history-mining trivial (the charter forbids it, but
+        # prose cannot restrain a grep). History access is routed through the
+        # framed memory tools (inspect_episode / search_experiments), which
+        # return coverage or single-experiment detail on demand. The
+        # ``history_dir`` param is retained for call-site compatibility.
         argv = self.runtime.exec_argv(
             payload,
             cwd=self.workspace,

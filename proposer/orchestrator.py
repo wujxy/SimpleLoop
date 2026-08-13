@@ -53,6 +53,23 @@ def _safe_save_meta(
         print(f"[orchestrator] session save_meta failed: {exc}", flush=True)
 
 
+def _commit_proposals_safe(memory_service, round_id: int, result) -> None:
+    """Record the round's proposal→finding intent (refs) into the proposer's
+    own findings archive. The proposer owns finding allocation + association;
+    outcomes are never written here (derived at read time). No-op on abstain
+    or when there is no memory_service (static/test paths)."""
+    if memory_service is None:
+        return
+    if getattr(result, "abstained", False) or not result.proposals:
+        return
+    try:
+        memory_service.commit_proposals(
+            round_id=round_id, proposals=result.proposals,
+        )
+    except Exception as exc:  # findings IO must not fail the round
+        print(f"[orchestrator] commit_proposals failed: {exc}", flush=True)
+
+
 class ProposerOrchestrator:
     """The Loop's proposer entry point. Owns the Scientist session lifecycle."""
 
@@ -230,6 +247,7 @@ class ProposerOrchestrator:
                 lane_id=lane_id, outcome="error", abstain_reason=str(exc),
                 deliberation_telemetry={"tool_calls": 0},
             )
+        _commit_proposals_safe(memory_service, current_round, result)
         _safe_save_meta(session, current_round, base_sha)
         outcome = "abstain" if result.abstained else "submit"
         return LaneResult(

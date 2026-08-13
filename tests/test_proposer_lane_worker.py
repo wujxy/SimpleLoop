@@ -37,10 +37,12 @@ def test_proposer_lane_spec_roundtrip():
     assert rebuilt == spec
 
 
-def test_proposer_lane_spec_rejects_unknown_fields():
-    with pytest.raises(ValueError, match="unknown proposer-lane manifest"):
-        ProposerLaneSpec.from_dict({"lane_id": 0, "round_id": 0, "base_sha": "x",
-                                    "surprise": 1})
+def test_proposer_lane_spec_tolerates_unknown_fields():
+    # from_dict ignores unknown fields so a --continue across the S2c version
+    # boundary does not crash on manifests written by older code.
+    spec = ProposerLaneSpec.from_dict({"lane_id": 0, "round_id": 0,
+                                       "base_sha": "x", "surprise": 1})
+    assert spec.lane_id == 0
 
 
 # --- proposal serialization inverse ---------------------------------------
