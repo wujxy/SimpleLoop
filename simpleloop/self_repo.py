@@ -14,9 +14,12 @@ Three physical layers (contract §2.4 / RSI impl-design §1):
     run_dir/self/repo/        Body — the snapshotted proposer source, independent git history
     run_dir/self/reviews.jsonl (S3c, not created here)
 
-S3a implements only the lifecycle (snapshot S0 + state + fresh/continue). Later slices
-grow this module: S3b viability ``--check``, S3c mode switch + commitment, S3d
-``transition`` (self-executor → candidate SHA → adopt, advancing ``active_self_sha``).
+S3a implements the lifecycle (snapshot S0 + state + fresh/continue). S3b adds the
+viability authority: ``check_viability`` spawns ``proposer_lane_worker --check`` on a
+candidate self to prove it can still boot/load-continuity/produce-output offline (RSI
+§19: viability is immediate). Later slices grow this module further: S3c mode switch +
+commitment, S3d ``transition`` (self-executor → candidate → viability → adopt, advancing
+``active_self_sha``).
 
 This module is Host/Kernel code: it must never be importable from the ``proposer``
 package, and never modified by a self-change. It deliberately does NOT import
@@ -27,6 +30,8 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +41,13 @@ from pathlib import Path
 _SCHEMA_VERSION = 1
 _DEFAULT_MODE = "task"
 _DEFAULT_NEXT_REVIEW = None  # null until the first self-review sets a commitment (S3c)
+
+# The single proposer-CLI contract version the Host speaks. The proposer declares its
+# own side as ``proposer.CONTRACT_VERSION``; viability (``check_viability``) asserts
+# they match. Changing this is a Kernel change (contract §11), not a self-modification.
+EXPECTED_CONTRACT_VERSION = "proposer-cli-v0"
+# Hard ceiling for the offline viability subprocess (it never calls the model).
+_VIABILITY_TIMEOUT_SECONDS = 120
 
 
 def _stamp() -> str:
@@ -169,3 +181,61 @@ class SelfRepo:
                 f"self-repo git {' '.join(args)} failed: "
                 f"{completed.stderr.strip()}")
         return completed.stdout.strip()
+
+
+# ---- viability authority (S3b) -----------------------------------------
+# Not yet wired into adoption — S3d's transition authority will call this on a
+# self-executor candidate before advancing active_self_sha. Built + verified in
+# isolation here.
+
+
+@dataclass(frozen=True)
+class ViabilityResult:
+    """Outcome of a viability check on a candidate self-repo.
+
+    ``viable`` is the single boolean the adoption authority cares about; ``stderr``
+    carries the worker's ``[check] FAIL: …`` lines (or an import-time traceback for a
+    boot failure) for diagnostics.
+    """
+
+    viable: bool
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+def check_viability(candidate_repo: str | Path, run_dir: str | Path) -> ViabilityResult:
+    """Spawn ``proposer_lane_worker --check`` on a candidate self-repo and return its
+    verdict. The worker redirects ``import proposer`` to ``candidate_repo`` (via
+    ``--self-repo``) and runs the offline assertions (boot / contract version /
+    continuity load / protocol produce). Exit 0 = viable; non-zero = broken self.
+
+    Offline + deterministic by construction: the check subprocess never calls the
+    model (it only exercises import + continuity read + data-model construction), so
+    no network is needed. ``run_dir`` supplies the incumbent continuity the candidate
+    must still be able to read.
+    """
+    argv = [
+        sys.executable, "-m", "simpleloop.proposer_lane_worker",
+        "--check",
+        "--self-repo", str(candidate_repo),
+        "--run-dir", str(run_dir),
+        "--contract-version", EXPECTED_CONTRACT_VERSION,
+    ]
+    try:
+        proc = subprocess.run(
+            argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, timeout=_VIABILITY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return ViabilityResult(
+            viable=False, exit_code=-1, stdout="",
+            stderr=f"viability check timed out after {_VIABILITY_TIMEOUT_SECONDS}s: "
+                   f"{exc}",
+        )
+    return ViabilityResult(
+        viable=proc.returncode == 0,
+        exit_code=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+    )

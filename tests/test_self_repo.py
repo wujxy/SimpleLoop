@@ -1,9 +1,11 @@
-"""S3a unit tests: run-local self-repo lifecycle + worker redirect.
+"""S3a/S3b tests: run-local self-repo lifecycle + worker redirect + viability check.
 
-Covers the SelfRepo snapshot/state machine and the proposer_lane_worker
-``_redirect_self_repo`` bootstrap. The end-to-end falsification test (edit the
-snapshot, see it take effect in a real round) is a manual/round-driven check,
-not reproducible here without the model API.
+Covers the SelfRepo snapshot/state machine, the proposer_lane_worker
+``_redirect_self_repo`` bootstrap, and the S3b viability ``--check`` (healthy self
+passes; deliberately broken candidates fail at boot / contract / continuity /
+protocol-produce). The end-to-end falsification test (edit the snapshot, see it take
+effect in a real round) is a manual/round-driven check, not reproducible here without
+the model API.
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.self_repo import SelfRepo
+from simpleloop.self_repo import SelfRepo, ViabilityResult, check_viability
 from simpleloop.proposer_lane_worker import _redirect_self_repo
 
 
@@ -189,3 +191,106 @@ def _git(repo: Path, *args: str) -> str:
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout.strip()
+
+
+# === S3b: viability --check ===============================================
+#
+# Each test snapshots a fresh self-repo into its own tmp_path/self/repo, optionally
+# mutates one proposer source file (a deliberate break), then runs the offline
+# viability subprocess. check_viability spawns a real worker process (no model), so
+# these are integration tests.
+
+
+def _candidate(run_dir: Path) -> Path:
+    """Snapshot a healthy self-repo and return its repo root (the --self-repo target)."""
+    sr = SelfRepo(run_dir)
+    sr.setup(resume=False)
+    return sr.repo
+
+
+def _append(repo: Path, relpath: str, text: str) -> None:
+    """Append text to a file under the snapshotted proposer package (a deliberate break)."""
+    target = repo / "proposer" / relpath
+    target.write_text(target.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def test_viability_healthy_self_passes(tmp_path: Path):
+    repo = _candidate(tmp_path)
+    res = check_viability(repo, tmp_path)
+    assert res.viable is True
+    assert res.exit_code == 0
+    assert "[check] OK" in res.stdout
+
+
+def test_viability_fails_on_syntax_error_boot(tmp_path: Path):
+    repo = _candidate(tmp_path)
+    # an unparseable module -> proposer.scientist fails to import -> the worker dies
+    # at module load (boot), before _run_check runs.
+    _append(repo, "scientist.py", "\n!!! unparseable syntax error !!!\n")
+    res = check_viability(repo, tmp_path)
+    assert res.viable is False
+    assert res.exit_code != 0
+
+
+def test_viability_fails_on_wrong_contract_version(tmp_path: Path):
+    repo = _candidate(tmp_path)
+    _append(repo, "__init__.py", '\nCONTRACT_VERSION = "proposer-cli-v1"\n')
+    res = check_viability(repo, tmp_path)
+    assert res.viable is False
+    assert res.exit_code != 0
+    assert "contract" in res.stderr.lower()
+
+
+def test_viability_fails_on_broken_continuity_reader(tmp_path: Path):
+    repo = _candidate(tmp_path)
+    # import succeeds, but load_or_create raises when called -> the continuity
+    # assertion (not boot) catches it.
+    _append(repo, "scientist_session.py",
+            "\n\ndef _broken_load(cls, *a, **k):\n"
+            "    raise RuntimeError('continuity reader broken')\n"
+            "ScientistSession.load_or_create = classmethod(_broken_load)\n")
+    res = check_viability(repo, tmp_path)
+    assert res.viable is False
+    assert res.exit_code != 0
+    assert "continuity" in res.stderr.lower()
+
+
+def test_viability_fails_on_broken_protocol_produce(tmp_path: Path):
+    repo = _candidate(tmp_path)
+    # import succeeds, but ResearchProposal construction raises -> the protocol-produce
+    # assertion (not boot) catches it. (Frozen dataclasses allow __init__ reassignment;
+    # frozen only blocks attribute *set* on instances.)
+    _append(repo, "memory/models.py",
+            "\n\ndef _broken_init(self, *a, **k):\n"
+            "    raise RuntimeError('protocol produce broken: cannot construct')\n"
+            "ResearchProposal.__init__ = _broken_init\n")
+    res = check_viability(repo, tmp_path)
+    assert res.viable is False
+    assert res.exit_code != 0
+    assert "protocol produce" in res.stderr.lower()
+
+
+def test_viability_never_mutates_the_run_it_checks(tmp_path: Path):
+    """The continuity load runs on a TEMP COPY — a viability check must not write to
+    the run_dir it is evaluating."""
+    repo = _candidate(tmp_path)
+    prop_dir = tmp_path / "proposer"
+    prop_dir.mkdir()
+    session = prop_dir / "session.jsonl"
+    notebook = prop_dir / "notebook.md"
+    meta = prop_dir / "meta.json"
+    session.write_text('{"role":"user","content":"seed"}\n', encoding="utf-8")
+    notebook.write_text("# my notebook\n", encoding="utf-8")
+    meta.write_text(json.dumps({"scientist_id": "abc"}), encoding="utf-8")
+    before = {p: p.read_text(encoding="utf-8")
+              for p in (session, notebook, meta)}
+
+    res = check_viability(repo, tmp_path)
+    assert res.viable is True
+
+    after = {p: p.read_text(encoding="utf-8") for p in (session, notebook, meta)}
+    assert before == after  # run_dir/proposer/ untouched
+    # and no new files appeared in run_dir/proposer (e.g. no meta.json rewrite)
+    assert sorted(p.name for p in prop_dir.iterdir()) == ["meta.json", "notebook.md",
+                                                          "session.jsonl"]
+
