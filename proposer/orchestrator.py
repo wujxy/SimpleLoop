@@ -18,9 +18,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..container.runtime import ApptainerRuntime, MountMap
+from .runtime import ApptainerRuntime, MountMap
 from .model import ChatModel
-from .proposer import (
+from .scientist import (
     ContextPolicy,
     ProposerError,
     ProposerResult,

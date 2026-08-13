@@ -14,20 +14,20 @@ from pathlib import Path
 import yaml
 
 from .roles.agent import Agent
-from .roles import model as model_mod
+from proposer import model as model_mod
 from . import candidate_worker
 from . import config as config_mod
 from .execution import build_backend
 from .execution.base import InfraRoundError, RoundJournal
 from .harness import evals
-from .memory import (
+from proposer.memory import (
     ExistingFindingTarget,
     MemoryService,
     NewFindingTarget,
     ResearchProposal,
 )
 from .reporting import plot as plot_mod
-from .roles import proposer as proposer_mod
+from proposer import scientist as proposer_mod
 from .harness import views
 from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
@@ -83,7 +83,6 @@ class RunContext:
     workspace: Workspace | None = None
     store: Store | None = None
     telemetry: RunTelemetry | None = None
-    proposer_agent: "ProposerOrchestrator | None" = None
     executor_agent: Agent | None = None
     prompt_dir: Path | None = None
     gate_lines: str = ""
@@ -237,7 +236,6 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         run_dir_path,
         resume=continue_run,
         prompt_dir=prompt_dir,
-        enable_researcher=static_proposals is None,
     )
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
@@ -472,11 +470,10 @@ def _build_context(
     *,
     resume: bool,
     prompt_dir: Path | None = None,
-    enable_researcher: bool = True,
 ) -> RunContext:
-    """Construct the run's fixed fixtures: runtime, two agents, workspace,
-    role-scoped agents (each restricted to the tools its role needs), workspace,
-    store, and telemetry."""
+    """Construct the run's fixed fixtures: runtime, executor agent, workspace,
+    store, and telemetry. The proposer runs as a subprocess
+    (simpleloop.proposer_lane_worker), not as an in-context agent."""
     telemetry = RunTelemetry(run_dir_path, resume=resume)
     runtime = ApptainerRuntime(
         image=cfg["runtime_image"],
@@ -492,22 +489,6 @@ def _build_context(
     timeout = cfg.get("agent_timeout_seconds", 3600)
     max_output_tokens = cfg.get("agent_max_output_tokens", 64000)
     roles = cfg["roles"]
-    proposer_agent = None
-    if enable_researcher:
-        researcher = roles["researcher"]
-        from .roles.orchestrator import ProposerOrchestrator
-        from .roles.proposer import ContextPolicy
-        proposer_agent = ProposerOrchestrator(
-            model=model_mod.build_chat_model(researcher),
-            runtime=runtime,
-            timeout_seconds=timeout,
-            command_timeout_seconds=researcher["command_timeout_seconds"],
-            command_output_cap_chars=researcher[
-                "command_output_cap_chars"
-            ],
-            usage_observer=telemetry.record_usage,
-            context_policy=ContextPolicy.from_config(cfg.get("context")),
-        )
     executor = roles["executor"]
     executor_agent = Agent(runtime=runtime, command="claude",
                            timeout_seconds=timeout,
@@ -533,7 +514,7 @@ def _build_context(
     gate_lines = views.gate_block(cfg.get("metrics"))
     ctx = RunContext(
         cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
-        store=store, telemetry=telemetry, proposer_agent=proposer_agent,
+        store=store, telemetry=telemetry,
         executor_agent=executor_agent,
         prompt_dir=prompt_dir, gate_lines=gate_lines,
         memory_service=memory_service,

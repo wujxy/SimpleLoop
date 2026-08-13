@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from simpleloop.execution import proposer_lanes
 from simpleloop.execution.hepjob import HEPJobBackend, _Job
-from simpleloop.memory.models import (
+from proposer.memory.models import (
     ExistingFindingTarget, NewFindingTarget, ResearchProposal,
 )
 from simpleloop.proposer_lane_worker import (
@@ -76,7 +77,7 @@ def test_failure_result_shape():
     assert "boom" in result["explanation"]
 
 
-# --- HEPJobBackend._read_lane_result --------------------------------------
+# --- lane-result validation (now lives in proposer_lanes; HEPJob delegates) --
 
 def _make_backend(tmp_path: Path) -> HEPJobBackend:
     class _Ctx:
@@ -91,7 +92,6 @@ def _make_backend(tmp_path: Path) -> HEPJobBackend:
 
 
 def test_read_lane_result_accepts_lane_shaped_result(tmp_path: Path):
-    backend = _make_backend(tmp_path)
     job = _Job(candidate_id=0, worktree_id="0",
                result_dir=tmp_path / "l0")
     job.result_dir.mkdir()
@@ -101,13 +101,13 @@ def test_read_lane_result_accepts_lane_shaped_result(tmp_path: Path):
                        "research_target": {"question": "q"},
                        "evidence_refs": [], "material_difference": None}],
     }), encoding="utf-8")
-    result = HEPJobBackend._read_lane_result(job)
+    result = proposer_lanes.read_lane_result(job.result_dir)
     assert result["outcome"] == "submit"
     assert len(result["proposals"]) == 1
 
 
 def test_read_lane_result_rejects_candidate_shaped_result(tmp_path: Path):
-    backend = _make_backend(tmp_path)  # noqa: F841 (exercise construction)
+    _make_backend(tmp_path)  # noqa: F841 (exercise HEPJob construction)
     job = _Job(candidate_id=0, worktree_id="0",
                result_dir=tmp_path / "l1")
     job.result_dir.mkdir()
@@ -118,7 +118,7 @@ def test_read_lane_result_rejects_candidate_shaped_result(tmp_path: Path):
         "eligible": False,
     }), encoding="utf-8")
     with pytest.raises(ValueError):
-        HEPJobBackend._read_lane_result(job)
+        proposer_lanes.read_lane_result(job.result_dir)
 
 
 # --- cleanup_proposer_orphans ---------------------------------------------

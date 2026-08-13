@@ -221,10 +221,6 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         def from_config(cls, _config):
             return object()
 
-    class FakeProposer:
-        def __init__(self, **kwargs):
-            observers.append(kwargs.get("usage_observer"))
-
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
             self.repo = run_dir / "repo"
@@ -273,14 +269,15 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
-    from simpleloop.roles import orchestrator as orch_mod
-    monkeypatch.setattr(orch_mod, "ProposerOrchestrator", FakeProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 
     loop_mod.run("config.yaml", run_dir)
 
-    assert len(observers) == 2
+    # Only the executor agent is wired in-process now (S2a.5a): the proposer
+    # runs as a subprocess, so its model usage arrives via usage.json and is
+    # ingested by collect_lane_results, not an in-process observer.
+    assert len(observers) == 1
     assert all(callable(observer) for observer in observers)
     state = json.loads((run_dir / "telemetry.json").read_text())
     assert state["baseline_metrics"] == {"SPEED_MS": 100.0}

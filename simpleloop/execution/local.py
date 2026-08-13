@@ -1,18 +1,50 @@
-"""LocalBackend: candidates run in frontend threads, exactly the historical
-behavior. The dispatch itself stays in loop._run_candidates (its serial and
-ThreadPool paths); this adapter only exists so loop.py can treat both
-backends uniformly. Local runs never persist in-flight state, so the journal
-is accepted and ignored. The deferred loop import avoids a module cycle
-(loop imports execution for the backend factory)."""
+"""LocalBackend: candidates run in frontend threads (the historical behavior);
+the proposer runs as a subprocess (``simpleloop.proposer_lane_worker``), the
+same worker HEPJob submits via condor — so a proposer crash no longer takes
+down the frontend and the two backends are symmetric.
+
+Candidate dispatch itself stays in loop._run_candidates (its serial and
+ThreadPool paths); this adapter only exists so loop.py can treat both backends
+uniformly. Candidate runs never persist in-flight state, so the journal is
+accepted and ignored; the proposer subprocess records its PID in
+inflight_proposer.json so cleanup_proposer_orphans can reap it after a crash.
+The deferred loop import avoids a module cycle (loop imports execution for the
+backend factory)."""
 from __future__ import annotations
 
-from ..container.runtime import world_mount_map
-from .base import ExecutionBackend
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from . import proposer_lanes as pl
+from .base import ExecutionBackend, InfraRoundError
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM the worker's whole process group, then SIGKILL if it lingers.
+    Mirrors roles/agent.py:_kill_group — the worker spawns claude + apptainer
+    grandchildren, so killing only the worker PID would orphan them."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=2)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 class LocalBackend(ExecutionBackend):
-    def __init__(self, ctx):
+    def __init__(self, ctx, *, lane_runner=None):
         self.ctx = ctx
+        # DI seam: tests inject a fake ``(spec, result_dir) -> LaneRunner`` to
+        # avoid spawning a real subprocess. Production leaves this None so
+        # run_proposer_lanes uses _popen_lane (the real worker subprocess).
+        self._lane_runner = lane_runner
 
     def run_candidates(self, *, proposals: list[str], round_id: int,
                        parent_sha: str, journal=None,
@@ -25,35 +57,121 @@ class LocalBackend(ExecutionBackend):
         )
 
     def run_proposer_lanes(self, *, round_id: int, base_sha: str):
-        """Run the single proposer lane in one disposable workspace."""
-        ctx = self.ctx
-        cfg = ctx.cfg
+        """Run the single proposer lane as a subprocess — the same
+        ``simpleloop.proposer_lane_worker`` HEPJob submits via condor — then
+        collect its ``result.json``. The Host never imports or runs proposer
+        code in-process; a proposer crash no longer takes down the frontend."""
         from ..loop import stamp
-        workspace = ctx.workspace.add_lane_workspace(0, base_sha)
+        from ..proposer_lane_worker import ProposerLaneSpec
+
+        ctx, cfg = self.ctx, self.ctx.cfg
+        run_dir = Path(ctx.run_dir)
+        lane_id = 0
+        result_dir = pl.lane_result_dir(run_dir, round_id, lane_id)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        workspace = ctx.workspace.add_lane_workspace(lane_id, base_sha)
+        spec = ProposerLaneSpec(
+            lane_id=lane_id, round_id=round_id, base_sha=base_sha,
+            run_dir=str(run_dir), workspace_path=str(workspace),
+            result_dir=str(result_dir),
+            prompt_dir=str(getattr(ctx, "prompt_dir", None) or ""),
+            proposal_slots=cfg.get("candidates_per_round", 1),
+            scientist_steps=cfg.get("scientist_steps", 200), attempt=1,
+        )
+        pl.write_lane_manifest(result_dir, spec)
         print(f"[{stamp()}] proposer round {round_id + 1}: 1 lane "
-              f"workspace @ {base_sha[:10]} (local)", flush=True)
+              f"workspace @ {base_sha[:10]} (local subprocess)", flush=True)
+        runner = self._lane_runner or self._popen_lane
         try:
-            return ctx.proposer_agent.run(
-                goal=cfg["goal"], editable=cfg["editable_paths"],
-                # frozen is now mount-enforced (EROFS outside editable); the
-                # explicit list is vestigial, kept for call-site compatibility.
-                frozen=[],
-                world_mount=world_mount_map(cfg),
-                memory_service=ctx.memory_service, base_sha=base_sha,
-                workspaces=[workspace], repo_path=ctx.workspace.repo,
-                run_dir=ctx.run_dir, current_round=round_id,
-                candidates_per_round=cfg.get("candidates_per_round", 1),
-                gate_block=ctx.gate_lines, prompt_dir=ctx.prompt_dir,
-                hints=cfg.get("hints") or None,
-                scientist_steps=cfg.get("scientist_steps", 200),
-            )
+            job = runner(spec, result_dir)
+            return pl.collect_lane_results(
+                [job], round_id=round_id,
+                telemetry=getattr(ctx, "telemetry", None))
         finally:
-            ctx.workspace.remove_lane_workspace(0)
+            pl.clear_inflight_proposer(run_dir)
+            ctx.workspace.remove_lane_workspace(lane_id)
+
+    def _popen_lane(self, spec, result_dir):
+        """Spawn ``proposer_lane_worker`` on the host, poll to completion, and
+        return a COMPLETED ``LaneJob`` (with ``result.json`` read) — or raise
+        ``InfraRoundError``.
+
+        The worker runs on the host (not inside Apptainer) because it needs
+        network for the model HTTP API; only its research probes run inside the
+        offline Apptainer container — exactly as the in-process path did. The
+        worker inherits ``os.environ`` (the frontend already holds the model
+        tokens + importable ``simpleloop``), so no job_env.sh is needed.
+
+        ``start_new_session=True`` puts the worker in its own process group so
+        ``os.killpg`` reaches its ``claude``/apptainer grandchildren on timeout.
+        """
+        from ..loop import stamp
+
+        ctx, cfg = self.ctx, self.ctx.cfg
+        manifest = str(Path(result_dir) / "manifest.json")
+        out_path, err_path = Path(result_dir) / "job.out", Path(result_dir) / "job.err"
+        argv = [sys.executable, "-m", "simpleloop.proposer_lane_worker",
+                "--manifest", manifest]
+        out = open(out_path, "w")
+        err = open(err_path, "w")
+        try:
+            proc = subprocess.Popen(
+                argv, env=os.environ.copy(), stdout=out, stderr=err,
+                start_new_session=True)
+        finally:
+            out.close()
+            err.close()
+        pl.write_inflight_proposer(
+            ctx.run_dir, spec.round_id, spec.base_sha,
+            [{"lane_id": spec.lane_id, "pid": proc.pid}])
+
+        timeout = (cfg.get("hepjob") or {}).get("run_timeout_seconds", 21600)
+        started = time.monotonic()
+        deadline = started + timeout
+        heartbeat = started + 30.0
+        while proc.poll() is None:
+            now = time.monotonic()
+            if now >= deadline:
+                _kill_group(proc)
+                raise InfraRoundError(
+                    f"proposer lane r{spec.round_id}-l{spec.lane_id} exceeded "
+                    f"run_timeout ({timeout}s)")
+            if now >= heartbeat:
+                print(f"[local-proposer] still running "
+                      f"({now - started:.0f}s in, pid={proc.pid})", flush=True)
+                heartbeat = now + 30.0
+            time.sleep(5)
+
+        rc = proc.returncode
+        if rc != 0 or not (Path(result_dir) / "_FINISHED").exists():
+            raise InfraRoundError(
+                f"proposer lane r{spec.round_id}-l{spec.lane_id} exited rc={rc} "
+                f"without _FINISHED (killed by infrastructure)")
+        print(f"[{stamp()}] proposer lane subprocess finished (rc={rc})",
+              flush=True)
+        return pl.LaneJob(
+            lane_id=spec.lane_id, result_dir=Path(result_dir),
+            state="COMPLETED", result=pl.read_lane_result(result_dir))
 
     def cleanup_proposer_orphans(self) -> None:
-        # Local lanes are frontend threads; they die with the process, so there
-        # are no orphan jobs — just clear a stale marker if one somehow exists.
-        (self.ctx.run_dir / "inflight_proposer.json").unlink(missing_ok=True)
+        """Kill any proposer-lane subprocess a crashed frontend left running
+        (recorded by PID in inflight_proposer.json), then clear the marker.
+        Mirrors HEPJobBackend's condor_rm sweep, but with process groups."""
+        path = pl.inflight_proposer_path(self.ctx.run_dir)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        for entry in (data.get("lanes") or []):
+            pid = entry.get("pid")
+            if isinstance(pid, int):
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+        pl.clear_inflight_proposer(self.ctx.run_dir)
 
     def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
         """Run the baseline eval locally on the baseline worktree.

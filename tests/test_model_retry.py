@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from simpleloop.roles import model as model_mod
-from simpleloop.roles.model import ModelError, OpenAICompatChatModel, _is_transient
+from proposer import model as model_mod
+from proposer.model import ModelError, OpenAICompatChatModel, _is_transient
 
 
 # --- fakes -----------------------------------------------------------------

@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.roles import proposer as proposer_mod
-from simpleloop.roles.proposer import (
+from proposer import scientist as proposer_mod
+from proposer.scientist import (
     ContextPolicy,
     ProposerError,
     ScientistAgent,
@@ -24,9 +24,9 @@ from simpleloop.roles.proposer import (
     _compact_live_messages,
     parse_response,
 )
-from simpleloop.roles.research_agent import WorkingState
-from simpleloop.roles.scientist_session import ScientistSession
-from simpleloop.roles.model import ModelReply
+from proposer.research_agent import WorkingState
+from proposer.scientist_session import ScientistSession
+from proposer.model import ModelReply
 
 
 # ---------------- protocol parsing ----------------

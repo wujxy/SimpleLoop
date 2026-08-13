@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.memory import MemoryService
-from simpleloop.memory.models import (
+from proposer.memory import MemoryService
+from proposer.memory.models import (
     ExistingFindingTarget,
     NewFindingTarget,
     ResearchProposal,

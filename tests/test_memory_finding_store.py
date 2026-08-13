@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.memory.finding_store import FindingStore
-from simpleloop.memory.models import Finding
+from proposer.memory.finding_store import FindingStore
+from proposer.memory.models import Finding
 
 
 def _finding(id: str = "F-001", *, state: str = "active",

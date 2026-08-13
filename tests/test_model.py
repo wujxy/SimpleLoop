@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from simpleloop.roles.model import (
+from proposer.model import (
     HepAIChatModel,
     ModelError,
     ZhipuChatModel,
@@ -142,7 +142,7 @@ def test_build_chat_model_routes_hepai_through_monkeypatchable_global():
         def from_config(cls, config):
             return cls()
 
-    import simpleloop.roles.model as model_mod
+    import proposer.model as model_mod
     monkeypatch_obj = _FakeHepAI
     original = model_mod.HepAIChatModel
     model_mod.HepAIChatModel = monkeypatch_obj

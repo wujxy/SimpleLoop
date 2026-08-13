@@ -37,15 +37,15 @@ from simpleloop.container.runtime import ApptainerRuntime, RuntimePreflightError
 from simpleloop.harness import memory
 from simpleloop.harness import views
 from simpleloop.harness.workspace import Workspace, WorkspaceError
-from simpleloop.memory import MemoryService
-from simpleloop.memory.models import (
+from proposer.memory import MemoryService
+from proposer.memory.models import (
     ExistingFindingTarget,
     NewFindingTarget,
     ResearchProposal,
 )
-from simpleloop.roles import model as model_mod
-from simpleloop.roles import proposer as proposer_mod
-from simpleloop.roles.orchestrator import ProposerOrchestrator
+from proposer import model as model_mod
+from proposer import scientist as proposer_mod
+from proposer.orchestrator import ProposerOrchestrator
 
 
 class ProposerHarnessError(RuntimeError):

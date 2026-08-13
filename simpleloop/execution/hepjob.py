@@ -39,6 +39,7 @@ from .. import candidate_worker
 from .. import proposer_lane_worker
 from ..candidate_worker import stamp
 from ..container import runtime as runtime_mod
+from . import proposer_lanes as pl
 from .base import ExecutionBackend, InfraRoundError, RoundJournal
 from ..config import _CPU_MODEL_REQUIREMENTS
 from ..loop import BaselineAcceptanceError
@@ -60,11 +61,6 @@ _JOB_RUNNING = 2
 _JOB_HELD = 5
 
 TERMINAL_STATES = ("COMPLETED", "INFRA_FAILED", "TIMEOUT")
-
-# Sidecar the worker writes next to result.json: telemetry usage records plus
-# execution audit info (backend, job id, attempt, host). Read by _collect and
-# handed to the loop, which owns telemetry accounting.
-WORKER_META_NAME = "usage.json"
 
 
 @dataclass
@@ -731,14 +727,9 @@ class HEPJobBackend(ExecutionBackend):
 
     @staticmethod
     def _read_worker_meta(job: _Job) -> dict:
-        """The worker's usage.json sidecar; missing/unreadable degrades to
-        empty (telemetry is accounting, never worth failing a candidate)."""
-        try:
-            meta = json.loads((job.result_dir / WORKER_META_NAME).read_text(
-                encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return meta if isinstance(meta, dict) else {}
+        """The worker's usage.json sidecar; delegates to the shared helper.
+        Kept (not deleted) because the candidate collect path still calls it."""
+        return pl.read_worker_meta(job.result_dir)
 
     # ==================================================================
     # Proposer-lane pipeline: each lane = one condor job running
@@ -776,30 +767,22 @@ class HEPJobBackend(ExecutionBackend):
 
     def _prepare_lane(self, lane_id: int, round_id: int, base_sha: str, *,
                       proposal_slots: int) -> _Job:
-        result_dir = (self.run_dir / "rounds" / f"r{round_id}"
-                      / "lanes" / f"l{lane_id}")
+        result_dir = pl.lane_result_dir(self.run_dir, round_id, lane_id)
         result_dir.mkdir(parents=True, exist_ok=True)
         workspace = self.ctx.workspace.add_lane_workspace(lane_id, base_sha)
         job = _Job(candidate_id=lane_id, worktree_id=str(lane_id),
                    result_dir=result_dir)
-        self._write_lane_manifest(job, round_id, base_sha, workspace,
-                                  proposal_slots=proposal_slots)
-        return job
-
-    def _write_lane_manifest(self, job: _Job, round_id: int, base_sha: str,
-                             workspace: Path, *, proposal_slots: int) -> None:
         spec = proposer_lane_worker.ProposerLaneSpec(
-            lane_id=job.candidate_id, round_id=round_id, base_sha=base_sha,
+            lane_id=lane_id, round_id=round_id, base_sha=base_sha,
             run_dir=str(self.run_dir), workspace_path=str(workspace),
-            result_dir=str(job.result_dir),
+            result_dir=str(result_dir),
             prompt_dir=str(getattr(self.ctx, "prompt_dir", None) or ""),
             proposal_slots=proposal_slots,
             scientist_steps=self.ctx.cfg.get("scientist_steps", 200),
             attempt=job.attempt,
         )
-        (job.result_dir / "manifest.json").write_text(
-            json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8")
+        pl.write_lane_manifest(result_dir, spec)
+        return job
 
     def _submit_lane(self, job: _Job) -> None:
         job_sh = job.result_dir / "job.sh"
@@ -913,7 +896,7 @@ class HEPJobBackend(ExecutionBackend):
         elif status is None:
             if (job.result_dir / "_FINISHED").exists():
                 try:
-                    job.result = self._read_lane_result(job)
+                    job.result = pl.read_lane_result(job.result_dir)
                     job.state = "COMPLETED"
                     job.note = ""
                 except ValueError as exc:
@@ -947,9 +930,7 @@ class HEPJobBackend(ExecutionBackend):
                     encoding="utf-8")))
             spec.attempt = job.attempt
             spec.workspace_path = str(workspace)
-            (job.result_dir / "manifest.json").write_text(
-                json.dumps(spec.to_dict(), ensure_ascii=False, indent=2)
-                + "\n", encoding="utf-8")
+            pl.write_lane_manifest(job.result_dir, spec)
             self._submit_lane(job)
         else:
             job.state = "INFRA_FAILED"
@@ -958,77 +939,20 @@ class HEPJobBackend(ExecutionBackend):
                   f"exhausted -> INFRA_FAILED", flush=True)
             self._write_job_json(job)
 
-    @staticmethod
-    def _read_lane_result(job: _Job) -> dict:
-        try:
-            result = json.loads(
-                (job.result_dir / "result.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"{exc}") from exc
-        if not isinstance(result, dict):
-            raise ValueError("result.json is not a proposer-lane result object")
-        # lane results carry proposals (not gates/gate_passed/eligible).
-        if (not isinstance(result.get("status"), str)
-                or not isinstance(result.get("proposals"), list)):
-            raise ValueError("result.json is not a proposer-lane result object")
-        return result
-
     def _collect_lanes(self, jobs: list[_Job], round_id: int):
-        from ..roles import proposer as proposer_mod
-        proposals = []
-        lane_traces: list[dict] = []
-        lane_telemetries: list[dict] = []
-        any_completed = False
-        telemetry = getattr(self.ctx, "telemetry", None)
+        """Remove each lane's workspace, then delegate result collection
+        (usage ingest, proposal rebuild, ProposerResult assembly) to the shared
+        helper. The shared helper duck-types the lane id so HEPJob's ``_Job``
+        (``.candidate_id``) and ``pl.LaneJob`` (``.lane_id``) both work."""
         for job in jobs:
             try:
                 self.ctx.workspace.remove_lane_workspace(job.candidate_id)
             except Exception as exc:
                 print(f"[{stamp()}] warning: could not remove lane workspace "
                       f"l{job.candidate_id}: {exc}", flush=True)
-            if job.state == "COMPLETED" and job.result is not None:
-                any_completed = True
-                res = job.result
-                meta = self._read_worker_meta(job)
-                res_usage = meta.get("usage") or []
-                if telemetry is not None:
-                    for record in res_usage:
-                        telemetry.record_usage(record)
-                lane_proposals = [
-                    proposer_lane_worker.proposal_from_dict(pd)
-                    for pd in (res.get("proposals") or [])
-                ]
-                proposals.extend(lane_proposals)
-                lane_traces.append({
-                    "lane_id": job.candidate_id,
-                    "outcome": res.get("outcome"),
-                    "n_proposals": len(lane_proposals),
-                    "reason_kind": res.get("reason_kind"),
-                })
-                lane_telemetries.append({
-                    "lane_id": job.candidate_id,
-                    "telemetry": res.get("telemetry") or {},
-                })
-                print(f"[{stamp()}] proposer lane r{round_id}"
-                      f"-l{job.candidate_id} collected "
-                      f"(outcome={res.get('outcome')}, "
-                      f"{len(lane_proposals)} proposal(s))", flush=True)
-            else:
-                print(f"[{stamp()}] proposer lane r{round_id}"
-                      f"-l{job.candidate_id} excluded ({job.state}"
-                      f"{': ' + job.note if job.note else ''})", flush=True)
-        if not any_completed:
-            raise InfraRoundError(
-                f"round {round_id}: all {len(jobs)} proposer lane job(s) "
-                "failed on infrastructure; the round was not recorded.")
-        return proposer_mod.ProposerResult(
-            proposals=proposals,
-            abstained=(len(proposals) == 0),
-            abstain_reason=("all lanes abstained/blocked/errored"
-                            if not proposals else None),
-            deliberation_telemetry={"lanes": lane_telemetries},
-            trace={"lanes": lane_traces},
-        )
+        return pl.collect_lane_results(
+            jobs, round_id=round_id,
+            telemetry=getattr(self.ctx, "telemetry", None))
 
     # ---- proposer-lane inflight orphan marker (lightweight) ----
 

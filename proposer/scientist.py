@@ -54,14 +54,14 @@ from .research_agent import (
     _source_path_exists,
 )
 from .scientist_session import ScientistSession
-from ..container.runtime import ApptainerRuntime
-from ..memory.context import build_generation_context
-from ..memory.models import (
+from .runtime import ApptainerRuntime
+from .memory.context import build_generation_context
+from .memory.models import (
     ExistingFindingTarget,
     NewFindingTarget,
     ResearchProposal,
 )
-from ..prompts import load_semantic
+from .prompts import load_semantic
 
 
 class ProposerError(AgentError):
@@ -113,7 +113,7 @@ _TAIL_TURNS = 8
 
 # Prompt-version stamp recorded in meta.json so a prompt change is observable
 # per Scientist across rounds.
-SCIENTIST_PROMPT_VERSION = "scientist-v2"
+SCIENTIST_PROMPT_VERSION = "scientist-v3"
 
 
 # --- Live-context compaction (Option A: deterministic shedding) -----------

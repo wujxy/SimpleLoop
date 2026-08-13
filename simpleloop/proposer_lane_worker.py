@@ -30,16 +30,16 @@ from pathlib import Path
 
 from . import config as config_mod
 from .candidate_worker import write_result
-from .container.runtime import ApptainerRuntime, world_mount_map
+from proposer.runtime import ApptainerRuntime, world_mount_map
 from .harness import views
 from .harness.workspace import Workspace
-from .memory import MemoryService
-from .memory.models import (
+from proposer.memory import MemoryService
+from proposer.memory.models import (
     ExistingFindingTarget, NewFindingTarget, ResearchProposal,
 )
-from .roles import model as model_mod
-from .roles.orchestrator import ProposerOrchestrator
-from .roles.proposer import ContextPolicy
+from proposer import model as model_mod
+from proposer.orchestrator import ProposerOrchestrator
+from proposer.scientist import ContextPolicy
 
 
 def stamp() -> str:

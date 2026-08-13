@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from ..harness.memory import read_history, resolve_episode
+from .history import read_history, resolve_episode
 from .context import build_startup_pack, build_generation_context
 from .experiment_index import (
     Experiment,

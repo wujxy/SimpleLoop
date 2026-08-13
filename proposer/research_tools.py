@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
 
-from ..container.runtime import MountMap
-from ..processes import CHILD_PROCESSES
+from .runtime import MountMap
+from .child_processes import CHILD_PROCESSES
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,9 @@ RESEARCH_TOOL_SPECS = (
         description=(
             "List Findings (research question containers) by operational "
             "state. Returns id, question, mechanisms, code_regions, "
-            "experiment_refs, and stats."
+            "experiment_refs, and stats. Read the stats as a count of effort "
+            "already spent on each question (what is covered), not as a "
+            "recommendation of which direction is promising."
         ),
     ),
     ResearchToolSpec(
@@ -83,8 +85,10 @@ RESEARCH_TOOL_SPECS = (
         schema='{"action":"inspect_finding","finding_id":"F-NNN"}',
         description=(
             "Return the full record for one Finding: question, scope, "
-            "operational state, experiment_refs, and derived stats. Never "
-            "contains an LLM-authored conclusion."
+            "operational state, experiment_refs, and derived stats. Treat the "
+            "stats as coverage (effort already spent), not as a verdict on "
+            "whether the direction is worth continuing. Never contains an "
+            "LLM-authored conclusion."
         ),
     ),
     ResearchToolSpec(
@@ -97,10 +101,14 @@ RESEARCH_TOOL_SPECS = (
             '"limit":1-50,"buckets":true|false}'
         ),
         description=(
-            "Retrieve prior experiments. Default buckets=true returns "
-            "{relevant, contrasting, diverse}; buckets=false returns a flat "
-            "top-K list. Filters stack as AND. Each hit includes finding_id "
-            "(if any) so you can chain into inspect_finding."
+            "Retrieve prior experiments to check whether a direction you are "
+            "considering is already covered ground — not to find a direction. "
+            "Default buckets=true returns {relevant, contrasting, diverse}; "
+            "buckets=false returns a flat top-K list. Filters stack as AND. "
+            "Each hit includes finding_id (if any) so you can chain into "
+            "inspect_finding. Read the metrics and gates as facts; do not read "
+            "a hit's score or similarity as a recommendation to pursue or "
+            "continue."
         ),
     ),
 )

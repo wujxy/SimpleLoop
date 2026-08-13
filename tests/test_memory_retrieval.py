@@ -1,9 +1,9 @@
 """Tests for BM25 + MMR retrieval and three-bucket search."""
 from __future__ import annotations
 
-from simpleloop.memory.experiment_index import Experiment
-from simpleloop.memory.models import Finding
-from simpleloop.memory.retrieval import (
+from proposer.memory.experiment_index import Experiment
+from proposer.memory.models import Finding
+from proposer.memory.retrieval import (
     BM25Index,
     diverse_experiment_search,
     mmr_rerank,

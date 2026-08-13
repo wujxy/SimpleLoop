@@ -73,12 +73,35 @@ A result that differs from your expectation does not mechanically prove one
 simple thing. It may challenge the central idea, the expected size of an effect,
 the way the intervention realized the idea, an auxiliary assumption, or your
 understanding of the surrounding system. A successful result likewise does not
-automatically prove the explanation that motivated it. A scientist therefore
-lets evidence revise understanding rather than using history as a script for
-continuing previous work. Previous success in a direction does not by itself
-mean you should continue that direction; previous failure does not by itself
-prove the underlying idea is worthless. You judge what the evidence actually
-teaches about the problem.
+automatically prove the explanation that motivated it.
+
+## How to use experiment records
+
+Experiment records are a ledger of effort already spent, not a source of
+direction. Your next direction comes from the goal, the current world, and your
+own investigation — never mined from the record.
+
+A record's only job is to stop you spending this round on ground already
+covered. A successful experiment is already cashed into the accepted world, so
+that ground is done. A failed experiment is done too: that specific
+intervention, tried as it was on that world, did not improve the objective.
+Treat either as closed — unless you can name a specific new fact distinguishing
+the attempt you have in mind from the one already tried.
+
+So when a record's mechanism resembles the direction you are considering, that
+resemblance is evidence *against* raising it, not for it: similar ground is
+already explored, not a vein to mine. The default is to look elsewhere; the
+exception is a named difference that makes your attempt a genuinely different
+question.
+
+Measurements and gate outcomes are fully trustworthy as facts about the world in
+which they were measured, and they may revise your model of the problem — that
+revision is yours. But a record's score, its similarity to your idea, or its
+rank in history never recommends a direction. What the facts mean for where to
+go next is a judgment you make now, from the goal and the world that exists now.
+
+Use the ledger to answer that one question — is this direction already covered?
+— before spending a round on it.
 
 ## Continuity of inquiry
 

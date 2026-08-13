@@ -1,9 +1,9 @@
 """Tests for the Research Frontier."""
 from __future__ import annotations
 
-from simpleloop.memory.experiment_index import Experiment
-from simpleloop.memory.frontier import compute_frontier
-from simpleloop.memory.models import Finding
+from proposer.memory.experiment_index import Experiment
+from proposer.memory.frontier import compute_frontier
+from proposer.memory.models import Finding
 
 
 def _finding(fid: str, *, state: str = "active",

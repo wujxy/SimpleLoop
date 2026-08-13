@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.prompts import load_semantic
+from proposer.prompts import load_semantic
 from simpleloop.roles import executor
 
 

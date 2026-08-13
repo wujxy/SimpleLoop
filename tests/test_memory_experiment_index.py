@@ -1,7 +1,7 @@
 """Tests for the structured Experiment Index."""
 from __future__ import annotations
 
-from simpleloop.memory.experiment_index import (
+from proposer.memory.experiment_index import (
     build_experiments,
     filter_experiments,
 )

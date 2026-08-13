@@ -65,26 +65,3 @@ def test_agent_mode_requires_researcher_before_context(monkeypatch, tmp_path):
             _config(tmp_path), tmp_path / "run", proposals=None,
             continue_run=False,
         )
-
-
-def test_static_mode_builds_context_with_researcher_disabled(
-    monkeypatch, tmp_path,
-):
-    class StopAfterBuild(Exception):
-        pass
-
-    seen = []
-
-    def fake_build(*_args, **kwargs):
-        seen.append(kwargs["enable_researcher"])
-        raise StopAfterBuild
-
-    monkeypatch.setattr(loop_mod, "_build_context", fake_build)
-
-    with pytest.raises(StopAfterBuild):
-        loop_mod._run_locked(
-            _config(tmp_path), tmp_path / "run", proposals=["p0"],
-            continue_run=False,
-        )
-
-    assert seen == [False]

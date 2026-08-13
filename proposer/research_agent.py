@@ -20,7 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .model import ChatModel
-from ..container.runtime import ApptainerRuntime
+from .runtime import ApptainerRuntime
 
 
 class AgentError(RuntimeError):

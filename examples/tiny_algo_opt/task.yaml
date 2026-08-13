@@ -15,7 +15,7 @@ safety:
     - tinyalgo
 
 loop:
-  max_rounds: 4
+  max_rounds: 1
   candidates_per_round: 2
   max_workers: 2
 

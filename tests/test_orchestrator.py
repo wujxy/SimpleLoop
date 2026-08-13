@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from simpleloop.memory.models import NewFindingTarget, ResearchProposal
-from simpleloop.roles.orchestrator import LaneResult, ProposerOrchestrator
-from simpleloop.roles.proposer import ScientistRound
+from proposer.memory.models import NewFindingTarget, ResearchProposal
+from proposer.orchestrator import LaneResult, ProposerOrchestrator
+from proposer.scientist import ScientistRound
 
 
 def _make_orch() -> ProposerOrchestrator:

@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from simpleloop.roles.research_tools import (
+from proposer.research_tools import (
     RESEARCH_TOOL_SPECS,
     ResearchCommandRunner,
     ResearchTools,
@@ -155,17 +155,17 @@ def test_research_command_uses_process_group_and_returns_observation(
         popen_calls.append((argv, kwargs))
         return process
 
-    monkeypatch.setattr("simpleloop.roles.research_tools.subprocess.Popen",
+    monkeypatch.setattr("proposer.research_tools.subprocess.Popen",
                         fake_popen)
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
+        "proposer.research_tools.os.killpg", lambda *_args: None,
     )
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.CHILD_PROCESSES.register",
+        "proposer.research_tools.CHILD_PROCESSES.register",
         lambda pid: lifecycle.append(("register", pid)),
     )
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.CHILD_PROCESSES.unregister",
+        "proposer.research_tools.CHILD_PROCESSES.unregister",
         lambda pid: lifecycle.append(("unregister", pid)),
     )
 
@@ -257,11 +257,11 @@ def test_research_command_timeout_kills_process_group(tmp_path, monkeypatch):
     process = _Process(output=("partial", ""), timeout_once=True)
     killed = []
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.subprocess.Popen",
+        "proposer.research_tools.subprocess.Popen",
         lambda *_args, **_kwargs: process,
     )
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.os.killpg",
+        "proposer.research_tools.os.killpg",
         lambda pid, sig: killed.append((pid, sig)),
     )
 
@@ -278,11 +278,11 @@ def test_research_command_caps_combined_output(tmp_path, monkeypatch):
     process = _Process(output=("", "tail"))
     process.stdout = _RepeatingStream("x", 1_000_000)
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.subprocess.Popen",
+        "proposer.research_tools.subprocess.Popen",
         lambda *_args, **_kwargs: process,
     )
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.os.killpg", lambda *_args: None,
+        "proposer.research_tools.os.killpg", lambda *_args: None,
     )
 
     result = runner.run("true", cwd="work")
@@ -393,7 +393,7 @@ def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
         calls.append((command, kwargs)) or {"ok": True}
     )
     monkeypatch.setattr(
-        "simpleloop.roles.research_tools.time.monotonic", lambda: 90,
+        "proposer.research_tools.time.monotonic", lambda: 90,
     )
 
     result = tools.execute({
