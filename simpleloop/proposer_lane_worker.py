@@ -84,6 +84,7 @@ def _redirect_self_repo() -> None:
 
 _redirect_self_repo()
 
+import proposer  # the loaded self (redirected above); reads CONTRACT_VERSION
 from proposer.runtime import ApptainerRuntime, world_mount_map
 from .harness import views
 from .harness.workspace import Workspace
@@ -113,6 +114,7 @@ class ProposerLaneSpec:
     proposal_slots: int = 1
     scientist_steps: int = 200
     attempt: int = 1
+    mode: str = "task"  # "task" (default) | "self" (RSI S3c self-review)
 
     def to_dict(self) -> dict:
         return {
@@ -126,6 +128,7 @@ class ProposerLaneSpec:
             "proposal_slots": self.proposal_slots,
             "scientist_steps": self.scientist_steps,
             "attempt": self.attempt,
+            "mode": self.mode,
         }
 
     @classmethod
@@ -143,6 +146,7 @@ class ProposerLaneSpec:
             proposal_slots=int(data.get("proposal_slots") or 1),
             scientist_steps=int(data.get("scientist_steps") or 200),
             attempt=int(data.get("attempt") or 1),
+            mode=str(data.get("mode") or "task"),
         )
 
 
@@ -359,6 +363,87 @@ def _run_check(self_repo: str | Path, run_dir: str | Path,
     return 0
 
 
+def _self_review_result_to_dict(spec: ProposerLaneSpec, result) -> dict:
+    """SelfReviewResult -> the self-mode result.json shape (RSI S3c). Distinct
+    from the lane shape; consumed only by the Host self-review path (S3c.2)."""
+    sc = result.self_change or {}
+    return {
+        "status": "COMPLETED",
+        "mode": "self",
+        "lane_id": spec.lane_id,
+        "round_id": spec.round_id,
+        "self_review": {
+            "contract_version": proposer.CONTRACT_VERSION,
+            "incumbent_self_sha": None,  # filled by run_self_review_lane
+            "decision": result.decision,
+            "diagnosis": result.diagnosis,
+            "keep_reason": result.keep_reason,
+            "next_review_after_rounds": result.next_review_after_rounds,
+            "self_change": (
+                {
+                    "target": sc.get("target"),
+                    "intent": sc.get("intent"),
+                    "instruction": sc.get("instruction"),
+                    "evidence_refs": list(sc.get("evidence_refs") or ()),
+                } if sc else None
+            ),
+            "abstained": result.abstained,
+        },
+        "trace": result.trace or {},
+        "telemetry": result.deliberation_telemetry or {},
+    }
+
+
+def run_self_review_lane(deps: ProposerLaneDeps, spec: ProposerLaneSpec) -> dict:
+    """Run one self-review episode and return the self-mode result dict. The
+    workspace is the incumbent self-repo (the Scientist reads its own source);
+    the incumbent SHA + reviews path come from run_dir/self/."""
+    from .self_repo import SelfRepo
+    sr = SelfRepo(deps.run_dir)
+    metrics = deps.cfg.get("metrics") or {}
+    objective_key = (metrics.get("objective") or {}).get("key")
+    result = deps.orchestrator.run_self_review(
+        self_repo=sr.repo,
+        run_dir=deps.run_dir,
+        reviews_path=sr.root / "reviews.jsonl",
+        incumbent_self_sha=sr.active_self_sha,
+        goal=deps.cfg["goal"],
+        objective_key=objective_key,
+        current_round=spec.round_id,
+        prompt_dir=deps.prompt_dir,
+        memory_service=deps.memory_service,
+        scientist_steps=spec.scientist_steps,
+    )
+    out = _self_review_result_to_dict(spec, result)
+    out["self_review"]["incumbent_self_sha"] = sr.active_self_sha
+    return out
+
+
+def _self_review_failure_result(spec: ProposerLaneSpec, reason: str) -> dict:
+    """A self-mode terminal result for an infrastructure/business failure: a
+    default KEEP with a short defer so the Host's scheduler re-opens
+    self-attention soon (mirrors the orchestrator's crash default)."""
+    return {
+        "status": "COMPLETED",
+        "mode": "self",
+        "lane_id": spec.lane_id,
+        "round_id": spec.round_id,
+        "self_review": {
+            "contract_version": proposer.CONTRACT_VERSION,
+            "incumbent_self_sha": None,
+            "decision": "KEEP",
+            "diagnosis": reason,
+            "keep_reason": "self-review did not complete; defaulting to KEEP "
+                           "pending a successful review",
+            "next_review_after_rounds": 3,
+            "self_change": None,
+            "abstained": True,
+        },
+        "trace": {},
+        "telemetry": {"tool_calls": 0},
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     """Standalone worker entry. Two modes:
 
@@ -414,17 +499,25 @@ def main(argv: list[str] | None = None) -> int:
             prompt_dir=spec.prompt_dir or None,
         )
         deps.runtime.preflight()
-        result = run_lane(deps, spec)
+        if spec.mode == "self":
+            result = run_self_review_lane(deps, spec)
+        else:
+            result = run_lane(deps, spec)
     except Exception as exc:
         # Catch-all invariant: a business-side failure still produces a
         # terminal result; _FINISHED absence must mean "killed by infra".
         print(f"[{stamp()}] proposer lane worker failed: {exc}", flush=True)
+        mode = str(spec_dict.get("mode") or "task")
         spec = ProposerLaneSpec(
             lane_id=int(spec_dict.get("lane_id") or 0),
             round_id=int(spec_dict.get("round_id") or 0),
             base_sha=str(spec_dict.get("base_sha") or ""),
+            mode=mode,
         )
-        result = _failure_result(spec, f"worker failed: {exc}")
+        if mode == "self":
+            result = _self_review_failure_result(spec, f"worker failed: {exc}")
+        else:
+            result = _failure_result(spec, f"worker failed: {exc}")
     sidecar = {
         "usage": usage,
         "execution": {

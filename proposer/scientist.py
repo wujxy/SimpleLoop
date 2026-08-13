@@ -55,7 +55,7 @@ from .research_agent import (
     _stamp,
 )
 from .scientist_session import ScientistSession
-from .runtime import ApptainerRuntime
+from .runtime import ApptainerRuntime, MountMap
 from .memory.context import build_generation_context
 from .memory.models import (
     ExistingFindingTarget,
@@ -96,6 +96,33 @@ class ScientistRound:
     proposals: list[ResearchProposal]
     abstained: bool = False
     abstain_reason: str | None = None
+    usage: object = None
+    deliberation_telemetry: dict = field(default_factory=dict)
+    trace: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SelfReviewResult:
+    """Internal: one self-review round's outcome (RSI S3c). The Host appends the
+    relevant fields to reviews.jsonl (S3c.2). ``decision`` is KEEP or CHANGE.
+
+    On a CHANGE, ``self_change`` is the WHAT/WHY the Scientist believes is
+    limiting Goal progress (the self-executor in S3d does HOW). On a KEEP,
+    ``keep_reason`` states why current progress is sufficient and
+    ``next_review_after_rounds`` is the Scientist's commitment for when to
+    re-examine itself (the Host's clock, not a fixed schedule).
+
+    ``abstained`` reflects a self-review that exhausted its budget before
+    reaching a decision — surfaced as a KEEP with a default commitment so the
+    scheduler is not stalled.
+    """
+
+    decision: str
+    diagnosis: str
+    keep_reason: str | None = None
+    next_review_after_rounds: int | None = None
+    self_change: dict | None = None
+    abstained: bool = False
     usage: object = None
     deliberation_telemetry: dict = field(default_factory=dict)
     trace: dict = field(default_factory=dict)
@@ -410,6 +437,163 @@ _SUSPEND_PROMPT = (
 )
 
 
+# --- Self-review prompt scaffolding (RSI S3c) ------------------------------
+
+_SELF_REVIEW_PROTOCOL_BLOCK = """Output protocol (immutable): every response is exactly one \
+JSON object.
+
+  {"message": "...optional...", "action": {"action": "...", ...fields...}}
+
+- "action" (required): one research tool call, OR submit_self_decision.
+- "message" (optional): natural text for your own trajectory; not required and
+  not a substitute for acting.
+
+Control action (the only non-tool action):
+- {"action":"submit_self_decision",
+   "decision":"KEEP"|"CHANGE",
+   "diagnosis":"why your current self is, or is not, limiting Goal progress",
+   "keep_reason":"..." | null,                    # required when KEEP
+   "next_review_after_rounds": <int> | null,      # required when KEEP: after how
+                                                   # many task rounds to re-examine
+   "self_change":{"target":"...","intent":"...",
+                  "instruction":"...","evidence_refs":[...]} | null}  # required when CHANGE
+  target ∈ {prompt, context, tools, runtime, retrieval, model-policy}.
+  KEEP requires keep_reason (tied to Goal-progress evidence) and
+  next_review_after_rounds (your commitment). CHANGE requires self_change naming
+  the mechanism you believe limits progress and WHAT/WHY changing it would help;
+  the concrete HOW is not yours to specify. Both decisions need a reason grounded
+  in the evidence above — there is no default KEEP and no default CHANGE.
+"""
+
+_SELF_REVIEW_COLD_START = (
+    "You are beginning a self-review. The Original Goal, your recent task "
+    "progress, your self-review history, and a pointer to your own source are "
+    "in your standing context. Judge honestly whether your current way of "
+    "working is advancing the Goal sufficiently, then submit your decision. "
+    "Read your own source or the records when a suspicion needs grounding; do "
+    "not decide from reputation."
+)
+
+_SELF_REVIEW_BUDGET_NUDGE = (
+    "Your self-review turn is nearing its budget. If you have grounded your "
+    "judgment, submit your self_decision now."
+)
+
+# If a self-review exhausts its budget without deciding, surface a KEEP with
+# this default commitment so the Host's scheduler re-opens self-attention soon
+# rather than stalling.
+_SELF_REVIEW_DEFAULT_DEFER = 3
+
+
+def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
+                              current_round: int, n: int = 12) -> str:
+    """A compact, factual summary of recent Goal progress from history.jsonl —
+    the authoritative 'am I progressing fast enough?' evidence (semantics §5.2).
+    Reports outcomes only (objective trajectory, selection, gates), never
+    proposal/eval text (the S2c coverage-free principle). '' when no history."""
+    from .memory.history import read_history
+    try:
+        rows = read_history(Path(run_dir) / "history.jsonl")
+    except (OSError, ValueError):
+        return ""
+    if not rows:
+        return ""
+    recent = rows[-n:]
+    obj_label = objective_key or "(objective)"
+    lines = [f"Recent task progress (last {len(recent)} of {len(rows)} task round(s)):"]
+    for row in recent:
+        rnd = row.get("round")
+        cands = row.get("candidates") or []
+        n_gate = sum(1 for c in cands
+                     if isinstance(c, dict) and c.get("gate_passed"))
+        selected = next((c for c in cands
+                         if isinstance(c, dict) and c.get("selected")), None)
+        if selected is not None:
+            metrics = selected.get("metrics") or {}
+            obj = metrics.get(objective_key) if objective_key else None
+            obj_s = f"{obj}" if isinstance(obj, (int, float)) else "?"
+            lines.append(
+                f"  - round {rnd}: {len(cands)} candidate(s), {n_gate} passed "
+                f"gates; selected {obj_label} = {obj_s}.")
+        else:
+            lines.append(
+                f"  - round {rnd}: {len(cands)} candidate(s), {n_gate} passed "
+                f"gates; none selected.")
+    return "\n".join(lines)
+
+
+def _read_self_review_history_text(reviews_path: Path, n: int = 6) -> str:
+    """Past self-review judgments as provenance text — their reasons and the
+    conditions that held then, not conclusions to inherit (semantics §14/§15).
+    '' when there is no self-review history yet."""
+    path = Path(reviews_path)
+    if not path.exists():
+        return ""
+    try:
+        rows = [json.loads(line) for line in
+                path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not rows:
+        return ""
+    lines = [f"Your self-review history (last {len(rows[-n:])} of {len(rows)}):"]
+    for r in rows[-n:]:
+        rnd = r.get("round")
+        decision = r.get("decision")
+        diag = str(r.get("diagnosis") or "").strip()
+        change = r.get("change") or {}
+        tgt = change.get("target") if isinstance(change, dict) else None
+        intent = str(change.get("intent") or "").strip() if isinstance(change, dict) else ""
+        head = f"  - round {rnd}: {decision}"
+        tail = []
+        if diag:
+            tail.append(f"diagnosis: {diag}")
+        if decision == "KEEP":
+            tail.append(f"keep_reason: {str(r.get('keep_reason') or '').strip()}")
+        elif decision == "CHANGE":
+            tail.append(f"target: {tgt}; intent: {intent}")
+            if r.get("adopted") is True:
+                tail.append("(adopted)")
+            elif r.get("adopted") is False:
+                tail.append("(not adopted)")
+        lines.append(head + (" — " + "; ".join(tail) if tail else ""))
+    lines.append(
+        "Inherit the reasons and conditions behind these, not their conclusions "
+        "— the facts have changed since they were made.")
+    return "\n".join(lines)
+
+
+def _build_self_review_prompt(
+    *, charter: str, goal: str, incumbent_self_sha: str,
+    progress_pack: str, self_history: str, notebook: str,
+) -> str:
+    """Assemble the Scientist's standing context for a self-review round."""
+    parts = [
+        charter.rstrip(),
+        "Original Goal (the only anchor — self-improvement has no independent "
+        "value):\n" + goal.strip(),
+        f"Current self: incumbent_self_sha = {incumbent_self_sha[:12]}…  "
+        "Your own source is readable at /work — read it when a suspicion points "
+        "at a specific mechanism in you, rather than reasoning about yourself "
+        "from reputation.",
+    ]
+    parts.append(progress_pack.strip() or (
+        "Recent task progress: no task history yet (this may be an early "
+        "self-review with little evidence — weigh that honestly)."))
+    if self_history.strip():
+        parts.append(self_history.strip())
+    parts.append(_TOOL_BLOCK)
+    parts.append(_SELF_REVIEW_PROTOCOL_BLOCK)
+    parts.append(_RUNTIME_BOUNDARIES)
+    if notebook.strip():
+        parts.append(
+            "Your own research notebook (REVISABLE AUTOBIOGRAPHICAL MEMORY — "
+            "your running self-account from task research; it may lag or be "
+            "wrong, so when it disagrees with the records above, trust the "
+            "records):\n" + notebook.strip())
+    return "\n\n".join(parts)
+
+
 def _build_system_prompt(
     *,
     charter: str,
@@ -679,6 +863,46 @@ def _parse_proposal(value) -> ResearchProposal:
     )
 
 
+# The self-mechanism surfaces a CHANGE may target (RSI semantics §10). Frozen as
+# part of the self-review contract — a CHANGE must name which part of itself the
+# Scientist believes is limiting Goal progress.
+_SELF_CHANGE_TARGETS = frozenset({
+    "prompt", "context", "tools", "runtime", "retrieval", "model-policy",
+})
+
+
+def _parse_self_change(value: dict) -> dict:
+    """Validate a CHANGE's self_change object: {target, intent, instruction,
+    evidence_refs?}. target ∈ _SELF_CHANGE_TARGETS; intent/instruction are the
+    WHAT/WHY for the self-executor (HOW is not the Scientist's job, semantics
+    §11)."""
+    if not isinstance(value, dict):
+        raise ProposerError("self_change must be an object")
+    _require_keys(
+        value, {"target", "intent", "instruction"}, {"action", "evidence_refs"})
+    target = value["target"]
+    if target not in _SELF_CHANGE_TARGETS:
+        raise ProposerError(
+            f"self_change.target must be one of {sorted(_SELF_CHANGE_TARGETS)}; "
+            f"got {target!r}")
+    intent = value["intent"]
+    instruction = value["instruction"]
+    for nm, val in (("intent", intent), ("instruction", instruction)):
+        if not isinstance(val, str) or not val.strip():
+            raise ProposerError(f"self_change.{nm} must be a non-empty string")
+    evidence_refs: list[str] = []
+    if "evidence_refs" in value:
+        evidence_refs = _require_string_list(
+            value["evidence_refs"], name="self_change.evidence_refs",
+            allow_empty=True)
+    return {
+        "target": target,
+        "intent": intent.strip(),
+        "instruction": instruction.strip(),
+        "evidence_refs": tuple(evidence_refs),
+    }
+
+
 def _dispatch(action: dict, proposal_slots: int) -> dict:
     """Validate one inner action object. Tool actions and submit_proposals."""
     name = action.get("action")
@@ -781,6 +1005,51 @@ def _dispatch(action: dict, proposal_slots: int) -> dict:
         # 0 proposals is a legal abstention.
         parsed = [_parse_proposal(item) for item in proposals]
         return {"action": name, "proposals": parsed}
+
+    # --- terminal action: self-review decision (RSI S3c) ---
+    if name == "submit_self_decision":
+        _require_keys(
+            action, {"action", "decision", "diagnosis"},
+            {"keep_reason", "next_review_after_rounds", "self_change"})
+        decision = action["decision"]
+        if decision not in ("KEEP", "CHANGE"):
+            raise ProposerError("self_decision.decision must be KEEP or CHANGE")
+        diagnosis = action["diagnosis"]
+        if not isinstance(diagnosis, str) or not diagnosis.strip():
+            raise ProposerError(
+                "self_decision.diagnosis must be a non-empty string")
+        keep_reason = action.get("keep_reason")
+        next_review = action.get("next_review_after_rounds")
+        self_change = action.get("self_change")
+        if decision == "KEEP":
+            # KEEP must justify sufficiency AND commit to a re-examination time
+            # (the Host's clock兑现s it — semantics §17).
+            if not isinstance(keep_reason, str) or not keep_reason.strip():
+                raise ProposerError(
+                    "KEEP requires a non-empty keep_reason tied to Goal progress")
+            if (not isinstance(next_review, int) or isinstance(next_review, bool)
+                    or next_review < 1):
+                raise ProposerError(
+                    "KEEP requires next_review_after_rounds (a positive int): "
+                    "after how many task rounds you should re-examine yourself")
+            self_change = None
+        else:  # CHANGE
+            self_change = _parse_self_change(self_change or {})
+            # CHANGE's commitment is set by the Host after adoption (S3d); the
+            # proposer may optionally suggest one here.
+            if next_review is not None and (
+                    not isinstance(next_review, int)
+                    or isinstance(next_review, bool) or next_review < 1):
+                raise ProposerError(
+                    "next_review_after_rounds must be a positive int if given")
+            keep_reason = None
+        return {
+            "action": name, "decision": decision, "diagnosis": diagnosis.strip(),
+            "keep_reason": (keep_reason.strip()
+                            if isinstance(keep_reason, str) else None),
+            "next_review_after_rounds": next_review,
+            "self_change": self_change,
+        }
 
     raise ProposerError(f"unknown action: {name}")
 
@@ -975,22 +1244,12 @@ class ScientistAgent(ResearchAgent):
                 flush=True,
             )
 
-        steps_budget = max_steps or self.max_steps
-        started = time.monotonic()
-        deadline = started + self.timeout_seconds
-        usages: list = []
-        state = WorkingState()
-        budget_reminder_step = int(0.8 * steps_budget)
-        reminded = False
-
-        proposals: list[ResearchProposal] = []
-        abstain_reason: str | None = None
-
-        with TemporaryDirectory(prefix="simpleloop-scratch-") as scratch, \
-                TemporaryDirectory(prefix="simpleloop-session-") as session_root:
-            home = Path(session_root) / "home"
-            home.mkdir(mode=0o700)
-            tools = ResearchTools(
+        # The setup above (charter, system prompt, cold-start/resume context) is
+        # task-specific; the agentic step-loop below is mode-agnostic and shared
+        # with self_review() via _deliberate. tools_factory / make_result carry
+        # the task-specific construction (workspace-bound tools; ScientistRound).
+        def tools_factory(scratch, home):
+            return ResearchTools(
                 runtime=self.runtime,
                 workspace=source_path,
                 repo=repo_path,
@@ -1003,6 +1262,196 @@ class ScientistAgent(ResearchAgent):
                 command_output_cap_chars=self.command_output_cap_chars,
                 current_round=current_round,
             )
+
+        def make_result(action, state, usages, step, outcome):
+            if outcome == "submit":
+                proposals = action["proposals"]
+                abstained = len(proposals) == 0
+                return ScientistRound(
+                    proposals=proposals,
+                    abstained=abstained,
+                    abstain_reason=(
+                        "submitted no directions this round"
+                        if abstained else None
+                    ),
+                    usage=usages,
+                    deliberation_telemetry=_build_telemetry(
+                        state, steps=step, outcome="submit"),
+                    trace=_build_trace(
+                        state, round_id=current_round, outcome="submit"),
+                )
+            abstain_reason = (
+                "research budget exhausted before the Scientist submitted "
+                "directions"
+            )
+            return ScientistRound(
+                proposals=[],
+                abstained=True,
+                abstain_reason=abstain_reason,
+                usage=usages,
+                deliberation_telemetry=_build_telemetry(
+                    state, steps=step, outcome="abstain"),
+                trace=_build_trace(
+                    state, round_id=current_round, outcome="abstain"),
+            )
+
+        return self._deliberate(
+            system_prompt=system_prompt,
+            messages=messages,
+            session=session,
+            current_round=current_round,
+            max_steps=max_steps,
+            source_root=source_path,
+            tools_factory=tools_factory,
+            terminal_name="submit_proposals",
+            budget_nudge=_BUDGET_NUDGE,
+            make_result=make_result,
+        )
+
+    def self_review(
+        self, *,
+        goal: str,
+        self_repo: Path,
+        run_dir: Path,
+        reviews_path: Path,
+        incumbent_self_sha: str,
+        objective_key: str | None,
+        current_round: int,
+        prompt_dir: Path | None,
+        session: ScientistSession,
+        memory_service=None,
+        max_steps: int | None = None,
+    ) -> SelfReviewResult:
+        """Run one self-review round (RSI S3c): the same Scientist studies itself
+        as the research system and emits a KEEP/CHANGE self_decision. Reuses the
+        shared ``_deliberate`` loop with the self-review charter/world/terminal.
+
+        CHANGE records intent only — the self-executor (S3d) does HOW. The Host
+        (S3c.2) appends the result to reviews.jsonl and兑现s the commitment.
+        """
+        charter = load_semantic("self_review", prompt_dir)
+        progress_pack = _build_self_progress_pack(
+            run_dir, objective_key, current_round)
+        self_history = _read_self_review_history_text(reviews_path)
+        system_prompt = _build_self_review_prompt(
+            charter=charter, goal=goal,
+            incumbent_self_sha=incumbent_self_sha,
+            progress_pack=progress_pack, self_history=self_history,
+            notebook=session.notebook,
+        )
+
+        # Same cold-start vs resume pattern as task research. The Scientist's
+        # autobiography (session/notebook) persists across task AND self rounds
+        # — identity continuity, not system-prompt continuity (semantics §9/§20).
+        if session.is_first_round():
+            messages: list[dict] = [
+                {"role": "user", "content": _SELF_REVIEW_COLD_START}]
+            print("[scientist] self-review cold start", flush=True)
+        else:
+            msg = ("Your self-review is resuming. Re-ground in the current "
+                   "progress and your self-review history above, then decide.")
+            messages: list[dict] = [{"role": "user", "content": msg}]
+            session.append_message("user", msg, round_id=current_round)
+
+        def tools_factory(scratch, home):
+            # The self-world: the Scientist reads its own source. workspace =
+            # self_repo (read-only via an empty MountMap — editing is the
+            # self-executor's job in S3d, not the reviewer's).
+            return ResearchTools(
+                runtime=self.runtime,
+                workspace=self_repo,
+                repo=self_repo,
+                history_dir=run_dir,
+                scratch=Path(scratch),
+                world_mount=MountMap(),
+                home=home,
+                memory_service=memory_service,
+                command_timeout_seconds=self.command_timeout_seconds,
+                command_output_cap_chars=self.command_output_cap_chars,
+                current_round=current_round,
+            )
+
+        def make_result(action, state, usages, step, outcome):
+            if outcome == "submit":
+                return SelfReviewResult(
+                    decision=action["decision"],
+                    diagnosis=action["diagnosis"],
+                    keep_reason=action.get("keep_reason"),
+                    next_review_after_rounds=action.get("next_review_after_rounds"),
+                    self_change=action.get("self_change"),
+                    usage=usages,
+                    deliberation_telemetry=_build_telemetry(
+                        state, steps=step, outcome="submit"),
+                    trace=_build_trace(
+                        state, round_id=current_round, outcome="self_review"),
+                )
+            # Budget exhausted before a decision: KEEP with a default commitment
+            # so the Host's scheduler re-opens self-attention soon, not never.
+            return SelfReviewResult(
+                decision="KEEP",
+                diagnosis="self-review budget exhausted before a decision",
+                keep_reason="no decision reached; defaulting to KEEP pending a "
+                            "real review at the next opening",
+                next_review_after_rounds=_SELF_REVIEW_DEFAULT_DEFER,
+                abstained=True,
+                usage=usages,
+                deliberation_telemetry=_build_telemetry(
+                    state, steps=step, outcome="abstain"),
+                trace=_build_trace(
+                    state, round_id=current_round, outcome="self_review"),
+            )
+
+        return self._deliberate(
+            system_prompt=system_prompt,
+            messages=messages,
+            session=session,
+            current_round=current_round,
+            max_steps=max_steps,
+            source_root=self_repo,
+            tools_factory=tools_factory,
+            terminal_name="submit_self_decision",
+            budget_nudge=_SELF_REVIEW_BUDGET_NUDGE,
+            make_result=make_result,
+        )
+
+    def _deliberate(
+        self, *,
+        system_prompt: str,
+        messages: list[dict],
+        session: ScientistSession,
+        current_round: int,
+        max_steps: int | None,
+        source_root: Path,
+        tools_factory,
+        terminal_name: str,
+        budget_nudge: str,
+        make_result,
+    ):
+        """The shared agentic step-loop for one deliberation (task research OR
+        self-review). The caller builds the mode-specific system prompt, initial
+        messages, and a ``tools_factory(scratch, home) -> ResearchTools``; this
+        owns the budget, session archival, emergency compact, suspension
+        checkpoint, and the terminal/abstain handling — the invariants that must
+        be identical across modes.
+
+        ``make_result(action, state, usages, step, outcome)`` builds the
+        mode-specific return: ``outcome == "submit"`` means the ``terminal_name``
+        action was reached (``action`` is its parsed dict); ``"abstain"`` means
+        the budget ran out first (``action`` is None).
+        """
+        steps_budget = max_steps or self.max_steps
+        started = time.monotonic()
+        deadline = started + self.timeout_seconds
+        usages: list = []
+        state = WorkingState()
+        budget_reminder_step = int(0.8 * steps_budget)
+        reminded = False
+
+        with TemporaryDirectory(prefix="simpleloop-scratch-") as scratch, \
+                TemporaryDirectory(prefix="simpleloop-session-") as session_root:
+            home = Path(session_root) / "home"
+            home.mkdir(mode=0o700)
+            tools = tools_factory(scratch, home)
             # If the round STARTS already over threshold (a bloated resume tail
             # of large prior-round observations — the cross-round stacking case),
             # shed before the first model call so we never open a round already
@@ -1015,49 +1464,35 @@ class ScientistAgent(ResearchAgent):
                       flush=True)
                 if (not reminded and budget_reminder_step > 0
                         and step >= budget_reminder_step):
-                    messages.append({"role": "user", "content": _BUDGET_NUDGE})
+                    messages.append({"role": "user", "content": budget_nudge})
                     reminded = True
 
                 action, reply_text = self._step(
                     state, messages, system_prompt, deadline, usages, step,
-                    source_root=source_path, steps_budget=steps_budget,
+                    source_root=source_root, steps_budget=steps_budget,
                 )
                 name = action["action"]
                 state.action_log.append({"action": name, "step": step})
 
-                if name == "submit_proposals":
-                    proposals = action["proposals"]
+                if name == terminal_name:
                     _bump(state, name)
-                    # The terminal submit reply enters BOTH the live context
-                    # and the archive, so the suspension checkpoint sees what
-                    # the Scientist just decided (it must recall its own
-                    # submitted directions when writing the continuation note).
+                    # The terminal reply enters BOTH the live context and the
+                    # archive, so the suspension checkpoint sees what the
+                    # Scientist just decided (it must recall its own decision
+                    # when writing the continuation note).
                     messages.append({"role": "assistant", "content": reply_text})
                     session.append_message("assistant", reply_text,
                                            round_id=current_round)
                     print(
-                        f"[scientist] submit {len(proposals)} proposal(s) "
-                        f"step={step} elapsed={time.monotonic() - started:.1f}s",
+                        f"[scientist] {name} step={step} "
+                        f"elapsed={time.monotonic() - started:.1f}s",
                         flush=True,
                     )
                     self._suspension_checkpoint(
                         system_prompt, messages, state, session, deadline,
                         usages, current_round,
                     )
-                    abstained = len(proposals) == 0
-                    return ScientistRound(
-                        proposals=proposals,
-                        abstained=abstained,
-                        abstain_reason=(
-                            "submitted no directions this round"
-                            if abstained else None
-                        ),
-                        usage=usages,
-                        deliberation_telemetry=_build_telemetry(
-                            state, steps=step, outcome="submit"),
-                        trace=_build_trace(
-                            state, round_id=current_round, outcome="submit"),
-                    )
+                    return make_result(action, state, usages, step, "submit")
 
                 # tool call
                 observation = tools.execute(action, deadline=deadline)
@@ -1090,26 +1525,14 @@ class ScientistAgent(ResearchAgent):
                 # list loses nothing from the Scientist's lived record.
                 self._maybe_compact(messages, usages, state)
 
-            # Budget exhausted without a submit.
-            abstain_reason = (
-                "research budget exhausted before the Scientist submitted "
-                "directions"
-            )
-            print(f"[scientist] {abstain_reason}", flush=True)
+            # Budget exhausted without a terminal action.
+            print(f"[scientist] budget exhausted before {terminal_name}",
+                  flush=True)
             self._suspension_checkpoint(
                 system_prompt, messages, state, session, deadline, usages,
                 current_round,
             )
-            return ScientistRound(
-                proposals=[],
-                abstained=True,
-                abstain_reason=abstain_reason,
-                usage=usages,
-                deliberation_telemetry=_build_telemetry(
-                    state, steps=steps_budget, outcome="abstain"),
-                trace=_build_trace(
-                    state, round_id=current_round, outcome="abstain"),
-            )
+            return make_result(None, state, usages, steps_budget, "abstain")
 
     def _suspension_checkpoint(
         self, system_prompt: str, messages: list[dict], state: WorkingState,

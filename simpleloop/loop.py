@@ -245,6 +245,17 @@ def _run_locked(cfg: dict, run_dir_path: Path,
     # resolves `import proposer` to this snapshot (see proposer_lane_worker).
     ctx.self_repo = SelfRepo(run_dir_path)
     ctx.self_repo.setup(resume=continue_run)
+    # S3c.2: RSI self-review is opt-in via cfg["rsi"]["first_self_review_round"].
+    # Seed the first self-review only on a fresh run (resume keeps the persisted
+    # commitment). If unset, self-review never triggers (task-only run).
+    if not continue_run:
+        _first = (cfg.get("rsi") or {}).get("first_self_review_round")
+        if (isinstance(_first, int) and not isinstance(_first, bool)
+                and _first >= 0
+                and ctx.self_repo.next_self_review_round is None):
+            ctx.self_repo.update_commitment(next_self_review_round=_first)
+            print(f"[{stamp()}] RSI self-review enabled: first review at round "
+                  f"{_first + 1}", flush=True)
     preflight_id = "executor-preflight"
     preflight_worktree = ctx.workspace.add_worktree(
         preflight_id, ctx.workspace.baseline_sha(),
@@ -264,6 +275,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         return _summary(ctx, run_dir_path)
     start_round, parent_sha, prior_metrics = start
     display_rounds = cfg["max_rounds"] if target_rounds is not None else n_rounds
+    rsi_tally = {"KEEP": 0, "CHANGE": 0}  # anti-self-justification signal (S3c.2)
 
     for round_id in range(start_round, n_rounds):
         print(
@@ -285,6 +297,20 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         # If the frontend crashed during a previous proposer stage, kill any
         # orphan proposer-lane jobs and clear the marker before re-proposing.
         ctx.execution_backend.cleanup_proposer_orphans()
+
+        # S3c.2: RSI self-review mode-switch. If the Scientist's own commitment
+        # says to re-examine itself by this round, run a self-review round
+        # instead of a task round, record it, advance the commitment, and skip
+        # candidates/selection/history (a self-review does not touch the task
+        # incumbent or the task ledger).
+        _nsrr = ctx.self_repo.next_self_review_round
+        if _nsrr is not None and round_id >= _nsrr:
+            _decision = _run_self_review_round(ctx, round_id)
+            rsi_tally[_decision] = rsi_tally.get(_decision, 0) + 1
+            print(f"[{stamp()}] [rsi] self-review r{round_id + 1}: {_decision}  "
+                  f"(running KEEP/CHANGE = {rsi_tally['KEEP']}/{rsi_tally['CHANGE']})",
+                  flush=True)
+            continue
 
         inflight = _load_inflight(ctx.run_dir)
         abstention = None
@@ -520,7 +546,14 @@ def _starting_state(ctx: RunContext, continue_run: bool,
             f"--continue: run-dir {ctx.run_dir} has no history.jsonl rounds; "
             "drop --continue and start a fresh run."
         )
-    start_round = len(done)
+    # S3c.2: self-review rounds consume a round_id but write no history.jsonl
+    # line, so len(history) underestimates the loop position after a self-review.
+    # Resume at max(last task round, last self-review round) + 1. parent_sha /
+    # prior_metrics still come from the last TASK round (self-reviews don't
+    # change the task incumbent) via _resume_chain below.
+    last_task_round = done[-1].get("round", len(done) - 1)
+    last_self_round = ctx.self_repo.last_review_round()
+    start_round = max(last_task_round, last_self_round if last_self_round is not None else -1) + 1
     if start_round >= n_rounds:
         print(f"[{stamp()}] --continue: {start_round} round(s) already recorded, "
               f"max_rounds={n_rounds} -- nothing to do. Bump loop.max_rounds in "
@@ -621,6 +654,30 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
     print(f"[{stamp()}] proposals: {len(proposal_obj.proposals)} candidate(s)",
           flush=True)
     return proposal_obj
+
+
+# S3c.2: if a self-review payload carries no next_review_after_rounds (a CHANGE
+# without a suggested commitment — S3d has not acted on it yet), defer
+# re-examination by this many task rounds. KEEP requires a commitment and the
+# proposer's abstain path defaults to 3, so this only hits a bare CHANGE.
+_DEFAULT_SELF_REVIEW_DEFER = 8
+
+
+def _run_self_review_round(ctx: RunContext, round_id: int) -> str:
+    """Run one RSI self-review round (S3c.2): invoke the proposer in self mode,
+    record the decision in reviews.jsonl, and write the next commitment back to
+    state.json. Returns the decision ("KEEP"|"CHANGE"). Does NOT touch the task
+    incumbent, prior_metrics, or history.jsonl — the caller `continue`s past the
+    task-round body."""
+    payload = ctx.execution_backend.run_self_review(round_id=round_id)
+    defer = payload.get("next_review_after_rounds")
+    if not isinstance(defer, int) or isinstance(defer, bool) or defer < 1:
+        defer = _DEFAULT_SELF_REVIEW_DEFER
+    next_review_round = round_id + defer
+    ctx.self_repo.append_review(
+        round_id, payload=payload, next_review_round=next_review_round)
+    ctx.self_repo.update_commitment(next_self_review_round=next_review_round)
+    return payload.get("decision") or "KEEP"
 
 
 def _summary(ctx: RunContext, run_dir_path: Path) -> dict:

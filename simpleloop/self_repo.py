@@ -141,6 +141,21 @@ class SelfRepo:
     def active_self_sha(self) -> str:
         return self._read_state()["active_self_sha"]
 
+    @property
+    def next_self_review_round(self):
+        """The round at which the Host should next run a self-review (RSI S3c.2),
+        or None if self-review is not scheduled. Set by the commitment scheduler."""
+        return self._read_state().get("next_self_review_round")
+
+    def update_commitment(self, *, next_self_review_round) -> None:
+        """Write the next self-review commitment back to state.json, preserving
+        the active self SHA + schema. (RSI S3c.2 — the Host兑现s the Scientist's
+        own commitment; semantics §17: the Host is a clock, not a tutor.)"""
+        state = self._read_state()
+        self._write_state(
+            state["active_self_sha"],
+            next_self_review_round=next_self_review_round)
+
     def _read_state(self) -> dict:
         if not self.state_path.exists():
             raise FileNotFoundError(f"self state missing: {self.state_path}")
@@ -153,17 +168,73 @@ class SelfRepo:
             raise RuntimeError(f"self state has no active_self_sha: {self.state_path}")
         return data
 
-    def _write_state(self, active_self_sha: str) -> None:
+    def _write_state(
+        self, active_self_sha: str, *,
+        next_self_review_round=_DEFAULT_NEXT_REVIEW,
+        mode: str = _DEFAULT_MODE,
+    ) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "schema_version": _SCHEMA_VERSION,
             "active_self_sha": active_self_sha,
-            "mode": _DEFAULT_MODE,
-            "next_self_review_round": _DEFAULT_NEXT_REVIEW,
+            "mode": mode,
+            "next_self_review_round": next_self_review_round,
         }
         tmp = self.state_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         tmp.replace(self.state_path)
+
+    # ---- self-review ledger (RSI S3c.2) ------------------------------------
+    # Host-owned, Host-appended; the proposer reads it read-only (contract §9.2 /
+    # semantics §15). Mirrors harness/store.py:append_generation's open-append-one-
+    # line pattern (no tmp-replace, no per-write flock — the run-level flock at
+    # loop._acquire_run_lock serializes).
+
+    @property
+    def reviews_path(self) -> Path:
+        return self.root / "reviews.jsonl"
+
+    def append_review(
+        self, round_id: int, *, payload: dict, next_review_round: int,
+    ) -> None:
+        """Append one self-review record to run_dir/self/reviews.jsonl. The S3d
+        fields (candidate_self_sha / viable / adopted) are null until adoption
+        exists; ``change`` is the payload's self_change (target/intent/
+        instruction/evidence_refs) or None for KEEP."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        record = {
+            "round": round_id,
+            "incumbent_self_sha": payload.get("incumbent_self_sha"),
+            "decision": payload.get("decision"),
+            "diagnosis": payload.get("diagnosis"),
+            "keep_reason": payload.get("keep_reason"),
+            "change": payload.get("self_change"),
+            "candidate_self_sha": None,   # S3d
+            "viable": None,               # S3d
+            "adopted": None,              # S3d
+            "next_review_round": next_review_round,
+        }
+        with self.reviews_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def last_review_round(self) -> int | None:
+        """The round of the last recorded self-review, or None if none. Used by
+        ``--continue`` resume (self-review rounds consume a round_id but write no
+        history.jsonl line)."""
+        path = self.reviews_path
+        if not path.exists():
+            return None
+        last_round = None
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                obj = json.loads(line)
+                if isinstance(obj, dict) and isinstance(obj.get("round"), int):
+                    last_round = obj["round"]
+        except (OSError, json.JSONDecodeError):
+            pass
+        return last_round
 
     # ---- git helper (mirrors harness/workspace.py:_git) ----
 

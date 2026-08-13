@@ -89,7 +89,41 @@ class LocalBackend(ExecutionBackend):
             pl.clear_inflight_proposer(run_dir)
             ctx.workspace.remove_lane_workspace(lane_id)
 
-    def _popen_lane(self, spec, result_dir):
+    def run_self_review(self, *, round_id: int) -> dict:
+        """Run one RSI self-review round as the same proposer-lane worker
+        subprocess, but in self mode (manifest carries mode='self'). Returns the
+        worker's ``self_review`` payload. No lane workspace is created: the
+        worker reads the incumbent self-repo itself via SelfRepo(deps.run_dir),
+        so only the manifest + spawn + collect differ from run_proposer_lanes
+        (the self-review reader/collector, not the lane ones)."""
+        from ..loop import stamp
+        from ..proposer_lane_worker import ProposerLaneSpec
+
+        ctx, cfg = self.ctx, self.ctx.cfg
+        run_dir = Path(ctx.run_dir)
+        lane_id = 0
+        result_dir = pl.lane_result_dir(run_dir, round_id, lane_id)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        spec = ProposerLaneSpec(
+            lane_id=lane_id, round_id=round_id, base_sha="",
+            run_dir=str(run_dir), workspace_path="",
+            result_dir=str(result_dir),
+            prompt_dir=str(getattr(ctx, "prompt_dir", None) or ""),
+            scientist_steps=cfg.get("scientist_steps", 200), attempt=1,
+            mode="self",
+        )
+        pl.write_lane_manifest(result_dir, spec)
+        print(f"[{stamp()}] self-review round {round_id + 1}: spawning worker "
+              f"in self mode (local subprocess)", flush=True)
+        try:
+            job = self._popen_lane(spec, result_dir,
+                                   reader=pl.read_self_review_result)
+            return pl.collect_self_review_result(
+                job, telemetry=getattr(ctx, "telemetry", None))
+        finally:
+            pl.clear_inflight_proposer(run_dir)
+
+    def _popen_lane(self, spec, result_dir, *, reader=pl.read_lane_result):
         """Spawn ``proposer_lane_worker`` on the host, poll to completion, and
         return a COMPLETED ``LaneJob`` (with ``result.json`` read) — or raise
         ``InfraRoundError``.
@@ -149,7 +183,7 @@ class LocalBackend(ExecutionBackend):
               flush=True)
         return pl.LaneJob(
             lane_id=spec.lane_id, result_dir=Path(result_dir),
-            state="COMPLETED", result=pl.read_lane_result(result_dir))
+            state="COMPLETED", result=reader(result_dir))
 
     def cleanup_proposer_orphans(self) -> None:
         """Kill any proposer-lane subprocess a crashed frontend left running

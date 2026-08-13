@@ -85,6 +85,25 @@ def read_lane_result(result_dir: Path) -> dict:
     return result
 
 
+def read_self_review_result(result_dir: Path) -> dict:
+    """Pure read + shape check of a self-review worker's ``result.json`` (RSI S3c).
+
+    Validates the self-mode shape (``mode == "self"`` + a ``self_review`` dict).
+    The lane reader ``read_lane_result`` REJECTS this shape (it requires a
+    ``proposals`` list), so the self-review spawn must use this reader.
+    """
+    try:
+        result = json.loads(
+            (Path(result_dir) / "result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{exc}") from exc
+    if (not isinstance(result, dict)
+            or result.get("mode") != "self"
+            or not isinstance(result.get("self_review"), dict)):
+        raise ValueError("result.json is not a self-review result object")
+    return result
+
+
 def read_worker_meta(result_dir: Path) -> dict:
     """Read the ``usage.json`` sidecar; degrade to ``{}`` when absent/unreadable."""
     try:
@@ -150,6 +169,24 @@ def collect_lane_results(lane_jobs, *, round_id: int, telemetry=None):
         deliberation_telemetry={"lanes": lane_telemetries},
         trace={"lanes": lane_traces},
     )
+
+
+def collect_self_review_result(job, *, telemetry=None) -> dict:
+    """Turn a finished self-review job into its ``self_review`` payload (RSI S3c.2).
+
+    Ingests ``usage.json`` into ``telemetry`` (same path as ``collect_lane_results``
+    — the host otherwise never sees proposer model usage) and raises
+    ``InfraRoundError`` if the job did not complete. Self-review is single-lane,
+    so this takes one job, not a list. Returns the ``self_review`` dict.
+    """
+    if job.state != "COMPLETED" or job.result is None:
+        raise InfraRoundError(
+            "self-review job did not complete on infrastructure")
+    meta = read_worker_meta(job.result_dir)
+    if telemetry is not None:
+        for record in (meta.get("usage") or []):
+            telemetry.record_usage(record)
+    return job.result["self_review"]
 
 
 def inflight_proposer_path(run_dir: Path) -> Path:

@@ -294,3 +294,44 @@ def test_viability_never_mutates_the_run_it_checks(tmp_path: Path):
     assert sorted(p.name for p in prop_dir.iterdir()) == ["meta.json", "notebook.md",
                                                           "session.jsonl"]
 
+
+# === S3c.2: commitment + self-review ledger ================================
+
+def test_update_commitment_writes_next_review_round(tmp_path: Path):
+    repo = SelfRepo(tmp_path)
+    repo.setup(resume=False)
+    assert repo.next_self_review_round is None  # dormant after S0
+    repo.update_commitment(next_self_review_round=7)
+    assert repo.next_self_review_round == 7
+    sha = repo.active_self_sha
+    repo.update_commitment(next_self_review_round=12)
+    assert repo.next_self_review_round == 12
+    assert repo.active_self_sha == sha  # commitment writes preserve the SHA
+
+
+def test_append_review_and_last_review_round(tmp_path: Path):
+    repo = SelfRepo(tmp_path)
+    repo.setup(resume=False)
+    assert repo.last_review_round() is None
+
+    keep = {"decision": "KEEP", "diagnosis": "d", "keep_reason": "r",
+            "next_review_after_rounds": 5, "self_change": None,
+            "incumbent_self_sha": repo.active_self_sha, "abstained": False}
+    repo.append_review(5, payload=keep, next_review_round=10)
+
+    change = {"decision": "CHANGE", "diagnosis": "d2", "keep_reason": None,
+              "next_review_after_rounds": None,
+              "self_change": {"target": "prompt", "intent": "i",
+                              "instruction": "j", "evidence_refs": ["a"]},
+              "incumbent_self_sha": repo.active_self_sha, "abstained": False}
+    repo.append_review(10, payload=change, next_review_round=18)
+
+    assert repo.last_review_round() == 10
+    r0, r1 = [json.loads(ln) for ln in repo.reviews_path.read_text().splitlines()]
+    assert r0["round"] == 5 and r0["decision"] == "KEEP"
+    assert r0["next_review_round"] == 10 and r0["change"] is None
+    assert r0["adopted"] is None and r0["viable"] is None  # S3d fields null
+    assert r1["round"] == 10 and r1["decision"] == "CHANGE"
+    assert r1["change"]["target"] == "prompt"
+
+

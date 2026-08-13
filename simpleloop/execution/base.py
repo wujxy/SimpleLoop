@@ -72,6 +72,16 @@ class ExecutionBackend:
         ProposerResult.proposals fan out to run_candidates as usual."""
         raise NotImplementedError
 
+    def run_self_review(self, *, round_id: int) -> dict:
+        """Run one RSI self-review round (RSI S3c.2): spawn the proposer-lane
+        worker in self mode and return its ``self_review`` payload dict
+        (decision / diagnosis / keep_reason / next_review_after_rounds /
+        self_change / incumbent_self_sha / abstained). The Host appends it to
+        reviews.jsonl and writes the commitment back; the worker resolves the
+        incumbent self-repo itself, so there is no base_sha argument. v0
+        implements Local only; HEPJob defers to S3c.3."""
+        raise NotImplementedError
+
     def cleanup_proposer_orphans(self) -> None:
         """Kill any proposer-lane jobs a crashed frontend left running and
         clear the inflight_proposer marker. Called by the loop at round start

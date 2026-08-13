@@ -25,7 +25,9 @@ from .scientist import (
     ProposerError,
     ProposerResult,
     SCIENTIST_PROMPT_VERSION,
+    SelfReviewResult,
     ScientistAgent,
+    _SELF_REVIEW_DEFAULT_DEFER,
 )
 from .scientist_session import ScientistSession
 
@@ -258,6 +260,74 @@ class ProposerOrchestrator:
             deliberation_telemetry=result.deliberation_telemetry,
             trace=result.trace,
         )
+
+    def run_self_review(
+        self, *,
+        self_repo: Path,
+        run_dir: Path,
+        reviews_path: Path,
+        incumbent_self_sha: str,
+        goal: str,
+        objective_key: str | None,
+        current_round: int,
+        prompt_dir: Path | None,
+        memory_service=None,
+        scientist_steps: int = 200,
+    ) -> SelfReviewResult:
+        """Run ONE self-review (RSI S3c): the resident Scientist studies itself as
+        the research system and emits a KEEP/CHANGE decision. Mirrors
+        ``run_lane_episode`` for the self-review path. CHANGE records intent only
+        — the self-executor (S3d) does HOW."""
+        return self._run_self_review(
+            self_repo=self_repo, run_dir=run_dir, reviews_path=reviews_path,
+            incumbent_self_sha=incumbent_self_sha, goal=goal,
+            objective_key=objective_key, current_round=current_round,
+            prompt_dir=prompt_dir, memory_service=memory_service,
+            scientist_steps=scientist_steps,
+        )
+
+    def _run_self_review(
+        self, *,
+        self_repo: Path,
+        run_dir: Path,
+        reviews_path: Path,
+        incumbent_self_sha: str,
+        goal: str,
+        objective_key: str | None,
+        current_round: int,
+        prompt_dir: Path | None,
+        memory_service,
+        scientist_steps: int,
+    ) -> SelfReviewResult:
+        """Load/resume the resident Scientist, run one self-review, persist the
+        session. Same session continuity as a task round (the Scientist's
+        autobiography persists across task AND self rounds — semantics §9/§20)."""
+        session = ScientistSession.load_or_create(
+            run_dir, 0, prompt_version=SCIENTIST_PROMPT_VERSION,
+        )
+        try:
+            result = self.scientist.self_review(
+                goal=goal, self_repo=self_repo, run_dir=run_dir,
+                reviews_path=reviews_path, incumbent_self_sha=incumbent_self_sha,
+                objective_key=objective_key, current_round=current_round,
+                prompt_dir=prompt_dir, session=session,
+                memory_service=memory_service, max_steps=scientist_steps,
+            )
+        except (ProposerError, Exception) as exc:
+            print(f"[orchestrator] self-review failed: {exc}", flush=True)
+            _safe_save_meta(session, current_round, incumbent_self_sha)
+            # Crash → KEEP with a short defer so self-attention re-opens soon,
+            # not never.
+            return SelfReviewResult(
+                decision="KEEP",
+                diagnosis=f"self-review crashed before a decision: {exc}",
+                keep_reason="self-review did not complete; defaulting to KEEP "
+                            "pending a successful review",
+                next_review_after_rounds=_SELF_REVIEW_DEFAULT_DEFER,
+                abstained=True,
+            )
+        _safe_save_meta(session, current_round, incumbent_self_sha)
+        return result
 
     @staticmethod
     def _log_lane_result(lr: LaneResult) -> None:

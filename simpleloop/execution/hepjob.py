@@ -960,6 +960,15 @@ class HEPJobBackend(ExecutionBackend):
     def _clear_inflight_proposer(self) -> None:
         self._inflight_proposer_path().unlink(missing_ok=True)
 
+    def run_self_review(self, *, round_id: int) -> dict:
+        """RSI self-review on HEPJob is deferred to S3c.3. The condor submit/
+        supervise machinery is reusable; only the lane-specific glue
+        (workspace, result reader, collect) needs self-review variants. RSI
+        self-review is validated on the Local backend in v0 — a HEPJob run that
+        enables it fails loudly here rather than silently misbehaving."""
+        raise NotImplementedError(
+            "self-review requires the Local backend in v0 (HEPJob support: S3c.3)")
+
     def cleanup_proposer_orphans(self) -> None:
         """On --continue after a crash during the proposer stage: kill any lane
         jobs still in the queue, then clear the marker. The interrupted round
