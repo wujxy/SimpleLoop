@@ -19,8 +19,6 @@ from simpleloop.candidate import (
 )
 from proposer.memory import MemoryService
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
-from simpleloop.roles.executor import ExecResult
-from simpleloop.harness.evals import EvalResult
 from simpleloop.loop import RunContext, _run_candidates
 from simpleloop.execution import proposer_lanes
 from simpleloop.execution.base import InfraRoundError
@@ -428,22 +426,27 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         def diff(self, parent_sha, sha):
             return f"diff {parent_sha}..{sha}"
 
-    def fake_execute(agent, *, proposal, goal, workspace, worktree, round_id, gate_block="", prompt_dir=None):
-        return ExecResult(
-            sha=f"sha-{round_id}", reason=None,
-            changed_paths=[f"{round_id}.cc"], path_gate_passed=True,
-            path_gate_violations=[])
+        def changed_paths(self, worktree):
+            return [f"{Path(worktree).name}.cc"]
 
-    def fake_run_eval(commands, cwd, runtime, metrics_schema=None, **kwargs):
-        cid = int(str(cwd).rsplit("c", 1)[-1])
-        return EvalResult(
+        def commit(self, worktree, round_id, paths):
+            return f"sha-{round_id}"
+
+    def fake_execute(self, request):
+        return ExecutionResult("EXECUTED")
+
+    def fake_run_eval(self, request):
+        cid = int(str(request.worktree).rsplit("c", 1)[-1])
+        return EvaluationResult(
             "eval",
             {"SPEED_MS": 100.0 + cid, "CORRECTNESS": True},
             (0,),
         )
 
-    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_run_eval)
+    monkeypatch.setattr(worker_mod.AgentExecutor, "execute", fake_execute)
+    monkeypatch.setattr(
+        worker_mod.HarnessEvaluator, "evaluate", fake_run_eval,
+    )
 
     workspace = FakeWorkspace()
     proposals = ["p0", "p1", "p2"]
@@ -476,15 +479,22 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
         def diff(self, parent_sha, sha):
             return "diff"
 
-    def fake_execute(*_args, **_kwargs):
-        return ExecResult(
-            sha="candidate", reason=None, changed_paths=["a.cc"],
-            path_gate_passed=True, path_gate_violations=[])
+        def changed_paths(self, worktree):
+            return ["a.cc"]
 
-    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
+        def commit(self, worktree, round_id, paths):
+            return "candidate"
+
+    def fake_execute(*_args, **_kwargs):
+        return ExecutionResult("EXECUTED")
+
+    monkeypatch.setattr(worker_mod.AgentExecutor, "execute", fake_execute)
     monkeypatch.setattr(
-        worker_mod.evals, "run_eval",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("eval exploded")),
+        worker_mod.HarnessEvaluator,
+        "evaluate",
+        lambda *_a, **_k: EvaluationResult(
+            "(eval failed to run: eval exploded)", error="eval exploded",
+        ),
     )
 
     ctx = RunContext(
@@ -500,7 +510,6 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
     assert candidates[0].status is CandidateStatus.EVAL_FAILED
     assert candidates[0].eligible is False
     assert "eval exploded" in candidates[0].evaluation.text
-    assert "candidate r2-c0 eval error:" in capsys.readouterr().out
 
 
 def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):

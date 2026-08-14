@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from simpleloop.candidate import EvaluationResult, ExecutionResult
 from simpleloop.candidate_worker import CandidateDeps, CandidateSpec, run_candidate
 from simpleloop.persistence.artifacts import (
     decode_candidate_result,
@@ -13,10 +14,8 @@ from simpleloop.execution.proposer_lanes import (
     read_lane_result,
     read_self_review_result,
 )
-from simpleloop.harness.evals import EvalResult
 from simpleloop.harness.store import Store
 from simpleloop.loop import _InflightJournal, _load_inflight
-from simpleloop.roles.executor import ExecResult
 from simpleloop.round import RoundResult
 from simpleloop.stages.proposer import Abstention, ProposalBatch
 from simpleloop.stages.selector import Selection
@@ -45,23 +44,24 @@ def _write_result(tmp_path: Path, name: str) -> Path:
 
 def test_candidate_result_shape(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "simpleloop.candidate_worker.executor_mod.execute",
-        lambda *args, **kwargs: ExecResult(
-            sha="child",
-            reason=None,
-            changed_paths=["src/cache.cc"],
-            path_gate_passed=True,
-            path_gate_violations=[],
-        ),
+        "simpleloop.candidate_worker.AgentExecutor.execute",
+        lambda *args, **kwargs: ExecutionResult("EXECUTED"),
     )
     monkeypatch.setattr(
-        "simpleloop.candidate_worker.evals.run_eval",
-        lambda *args, **kwargs: EvalResult(
+        "simpleloop.candidate_worker.HarnessEvaluator.evaluate",
+        lambda *args, **kwargs: EvaluationResult(
             "SPEED_MS=90\nCORRECTNESS=PASS",
             {"SPEED_MS": 90.0, "CORRECTNESS": True},
             (0,),
         ),
     )
+    class FakeWorkspace:
+        def changed_paths(self, worktree):
+            return ["src/cache.cc"]
+
+        def commit(self, worktree, round_id, paths):
+            return "child"
+
     deps = CandidateDeps(
         cfg={
             "goal": "make it faster",
@@ -70,7 +70,7 @@ def test_candidate_result_shape(tmp_path: Path, monkeypatch):
         },
         run_dir=tmp_path,
         runtime=object(),
-        workspace=object(),
+        workspace=FakeWorkspace(),
         executor_agent=object(),
     )
     spec = CandidateSpec(

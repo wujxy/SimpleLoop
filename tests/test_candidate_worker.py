@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from simpleloop import candidate_worker as worker_mod
-from simpleloop.candidate import CandidateStatus
+from simpleloop.candidate import (
+    CandidateStatus,
+    EvaluationResult,
+    ExecutionResult,
+)
 from simpleloop.candidate_worker import (
     CandidateDeps,
     CandidateSpec,
@@ -18,9 +23,7 @@ from simpleloop.candidate_worker import (
     run_candidate,
     write_result,
 )
-from simpleloop.harness.evals import EvalResult
-from simpleloop.roles import executor as exec_mod
-from simpleloop.roles.executor import ExecResult, parse_self_report
+from simpleloop.stages.executor import parse_self_report
 
 
 _SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -45,8 +48,11 @@ def _deps(tmp_path: Path, cfg: dict | None = None) -> CandidateDeps:
             pass
 
     class FakeWorkspace:
-        def diff(self, parent_sha, sha):
-            return f"diff {parent_sha}..{sha}"
+        def changed_paths(self, worktree):
+            return ["a.cc"]
+
+        def commit(self, worktree, round_id, paths):
+            return "def456"
 
     return CandidateDeps(
         cfg=cfg or {
@@ -92,17 +98,18 @@ def test_spec_tolerates_unknown_manifest_fields(tmp_path: Path):
 
 
 def test_run_candidate_completed(tmp_path: Path, monkeypatch):
-    def fake_execute(*_args, **kwargs):
-        return ExecResult(
-            sha="def456", reason=None, changed_paths=["a.cc"],
-            path_gate_passed=True, path_gate_violations=[],
-        )
-
-    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(worker_mod.evals, "run_eval",
-                        lambda *a, **k: EvalResult(
-                            "eval", {"SPEED_MS": 100.0, "CORRECTNESS": True},
-                            (0,)))
+    monkeypatch.setattr(
+        worker_mod.AgentExecutor,
+        "execute",
+        lambda *args, **kwargs: ExecutionResult("EXECUTED"),
+    )
+    monkeypatch.setattr(
+        worker_mod.HarnessEvaluator,
+        "evaluate",
+        lambda *args, **kwargs: EvaluationResult(
+            "eval", {"SPEED_MS": 100.0, "CORRECTNESS": True}, (0,),
+        ),
+    )
     deps = _deps(tmp_path)
     deps.prompt_dir = tmp_path / "prompts"
     result = run_candidate(deps, _spec(tmp_path))
@@ -130,12 +137,19 @@ def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
         nonlocal called
         called = True
 
-    monkeypatch.setattr(worker_mod.evals, "run_eval", fake_eval)
-    monkeypatch.setattr(worker_mod.executor_mod, "execute",
-                        lambda *a, **k: ExecResult(
-                            sha=None, reason="executor made no changes",
-                            changed_paths=[], path_gate_passed=True,
-                            path_gate_violations=[]))
+    monkeypatch.setattr(
+        worker_mod.HarnessEvaluator, "evaluate", fake_eval,
+    )
+    monkeypatch.setattr(
+        worker_mod.AgentExecutor,
+        "execute",
+        lambda *args, **kwargs: ExecutionResult("EXECUTED"),
+    )
+    monkeypatch.setattr(
+        worker_mod.GitArtifactWorkspace,
+        "inspect",
+        lambda *args, **kwargs: (),
+    )
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
     assert called is False
     assert result.status is CandidateStatus.NO_CHANGE
@@ -147,14 +161,18 @@ def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
 
 
 def test_nonzero_eval_command_is_a_gate_rejection(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(worker_mod.executor_mod, "execute",
-                        lambda *a, **k: ExecResult(
-                            sha="def456", reason=None, changed_paths=["a.cc"],
-                            path_gate_passed=True, path_gate_violations=[]))
-    monkeypatch.setattr(worker_mod.evals, "run_eval",
-                        lambda *a, **k: EvalResult(
-                            "failed", {"SPEED_MS": 90.0,
-                                       "CORRECTNESS": True}, (7,)))
+    monkeypatch.setattr(
+        worker_mod.AgentExecutor,
+        "execute",
+        lambda *args, **kwargs: ExecutionResult("EXECUTED"),
+    )
+    monkeypatch.setattr(
+        worker_mod.HarnessEvaluator,
+        "evaluate",
+        lambda *args, **kwargs: EvaluationResult(
+            "failed", {"SPEED_MS": 90.0, "CORRECTNESS": True}, (7,),
+        ),
+    )
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
     assert result.status is CandidateStatus.GATE_REJECTED
     assert result.gate.results["EVAL_COMMANDS"].passed is False
@@ -164,13 +182,19 @@ def test_nonzero_eval_command_is_a_gate_rejection(tmp_path: Path, monkeypatch):
 
 def test_eval_exception_retains_sha_and_factual_failure(tmp_path: Path,
                                                         monkeypatch):
-    monkeypatch.setattr(worker_mod.executor_mod, "execute",
-                        lambda *a, **k: ExecResult(
-                            sha="def456", reason=None, changed_paths=["a.cc"],
-                            path_gate_passed=True, path_gate_violations=[]))
-    monkeypatch.setattr(worker_mod.evals, "run_eval",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            RuntimeError("container unavailable")))
+    monkeypatch.setattr(
+        worker_mod.AgentExecutor,
+        "execute",
+        lambda *args, **kwargs: ExecutionResult("EXECUTED"),
+    )
+    monkeypatch.setattr(
+        worker_mod.HarnessEvaluator,
+        "evaluate",
+        lambda *args, **kwargs: EvaluationResult(
+            "(eval failed to run: container unavailable)",
+            error="container unavailable",
+        ),
+    )
 
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
 
@@ -203,16 +227,23 @@ def _write_manifest(tmp_path: Path, spec: CandidateSpec) -> Path:
 def test_cli_writes_terminal_result(tmp_path: Path, monkeypatch):
     spec = _spec(tmp_path)
     manifest = _write_manifest(tmp_path, spec)
-    monkeypatch.setattr(worker_mod, "build_deps",
-                        lambda cfg, run_dir, usage_observer=None,
-                        prompt_dir=None: (
-                            _deps(tmp_path)))
+    expected = candidate_failure(
+        spec.candidate_id, spec, "test terminal", spec.parent_sha,
+    )
     monkeypatch.setattr(
         worker_mod,
-        "run_candidate",
-        lambda deps, spec: candidate_failure(
-            spec.candidate_id, spec, "test terminal", spec.parent_sha,
+        "build_ports",
+        lambda cfg, run_dir, usage_observer=None, prompt_dir=None: (
+            SimpleNamespace(
+                executor=object(), artifacts=object(), evaluator=object(),
+                gate_spec=object(), trace=object(), preflight=lambda: None,
+            )
         ),
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "run_candidate_guarded",
+        lambda request, **ports: expected,
     )
     rc = main(["--manifest", str(manifest), "--job-id", "123.4"])
     assert rc == 0
@@ -229,21 +260,62 @@ def test_cli_writes_terminal_result(tmp_path: Path, monkeypatch):
     assert sidecar["usage"] == []
 
 
+def test_worker_delegates_business_to_shared_pipeline(
+    tmp_path: Path,
+    monkeypatch,
+):
+    spec = _spec(tmp_path)
+    manifest = _write_manifest(tmp_path, spec)
+    seen = []
+    expected = candidate_failure(
+        spec.candidate_id, spec, "delegated", spec.parent_sha,
+    )
+
+    monkeypatch.setattr(
+        worker_mod,
+        "build_ports",
+        lambda cfg, run_dir, usage_observer=None, prompt_dir=None: (
+            SimpleNamespace(
+                executor=object(), artifacts=object(), evaluator=object(),
+                gate_spec=object(), trace=object(), preflight=lambda: None,
+            )
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "run_candidate_guarded",
+        lambda request, **ports: seen.append(request) or expected,
+        raising=False,
+    )
+
+    assert main(["--manifest", str(manifest)]) == 0
+    assert len(seen) == 1
+    assert seen[0].proposal.instruction == "do the thing"
+    assert seen[0].parent_sha == "abc123"
+
+
 def test_cli_catch_all_still_finishes(tmp_path: Path, monkeypatch):
     """A non-AgentError bug mid-run is a BUSINESS failure: result.json +
     _FINISHED must still appear so the backend never mistakes it for a
     lost job and wastes a retry."""
     spec = _spec(tmp_path)
     manifest = _write_manifest(tmp_path, spec)
-    monkeypatch.setattr(worker_mod, "build_deps",
-                        lambda cfg, run_dir, usage_observer=None,
-                        prompt_dir=None: (
-                            _deps(tmp_path)))
+    monkeypatch.setattr(
+        worker_mod,
+        "build_ports",
+        lambda cfg, run_dir, usage_observer=None, prompt_dir=None: (
+            SimpleNamespace(
+                executor=object(), artifacts=object(), evaluator=object(),
+                gate_spec=None, trace=object(), preflight=lambda: None,
+            )
+        ),
+    )
 
-    def explode(_deps, _spec):
+    def explode(request, **ports):
         raise RuntimeError("unexpected bug")
 
-    monkeypatch.setattr(worker_mod, "run_candidate", explode)
+    monkeypatch.setattr(worker_mod, "run_candidate_guarded", explode)
     rc = main(["--manifest", str(manifest)])
     assert rc == 0
     result_dir = Path(spec.result_dir)
@@ -358,40 +430,19 @@ def test_self_report_flows_into_candidate_record(tmp_path: Path, monkeypatch):
     report = {"outcome": "blocked", "blocked_reason_kind": "objective",
               "summary": "target absent"}
 
-    def fake_execute(*_a, **_k):
-        return ExecResult(
-            sha=None, reason="executor made no changes", changed_paths=[],
-            path_gate_passed=True, path_gate_violations=[],
-            self_report=report)
-
-    monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
-    monkeypatch.setattr(worker_mod.evals, "run_eval", lambda *a, **k: None)
+    monkeypatch.setattr(
+        worker_mod.AgentExecutor,
+        "execute",
+        lambda *args, **kwargs: ExecutionResult(
+            "EXECUTED", self_report=report,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_mod.GitArtifactWorkspace,
+        "inspect",
+        lambda *args, **kwargs: (),
+    )
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
     assert result.status is CandidateStatus.NO_CHANGE
     assert result.eligible is False
     assert result.execution.self_report == report
-
-
-def test_execute_parses_self_report_from_agent_output(tmp_path: Path,
-                                                       monkeypatch):
-    """execute() runs parse_self_report on the agent's text and attaches it to
-    ExecResult on every return path (here: the committed path)."""
-    class FakeAgent:
-        def run_text(self, _prompt, cwd=None, label=None):
-            return ('work\n```json\n{"outcome": "completed", '
-                    '"summary": "done"}\n```')
-
-    class FakeWorkspace:
-        def changed_paths(self, _wt):
-            return ["a.cc"]
-
-        def commit(self, _wt, _rid, _paths):
-            return "sha1"
-
-    result = exec_mod.execute(
-        FakeAgent(), proposal="p", goal="g",
-        workspace=FakeWorkspace(), worktree=tmp_path, round_id="r1")
-    assert result.sha == "sha1"
-    assert result.self_report == {"outcome": "completed",
-                                  "blocked_reason_kind": None,
-                                  "summary": "done"}

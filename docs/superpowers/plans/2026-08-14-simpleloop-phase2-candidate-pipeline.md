@@ -540,7 +540,7 @@ git commit -m "refactor: add shared candidate pipeline"
 - Consumes: `CandidateSpec`, Task 2 configured adapters, `run_candidate_guarded()`, and existing candidate result codec.
 - Produces: unchanged worker CLI and durable result shape without embedded business stages.
 
-- [ ] **Step 1: Redirect worker tests to the shared pipeline and assert thin ownership**
+- [x] **Step 1: Redirect worker tests to the shared pipeline and assert thin ownership**
 
 Add:
 
@@ -556,7 +556,7 @@ def test_worker_delegates_business_to_shared_pipeline(tmp_path, monkeypatch):
 
 Update existing candidate behavior tests to import and exercise `simpleloop.candidate.run_candidate` with fake ports; leave CLI/result tests in `test_candidate_worker.py`.
 
-- [ ] **Step 2: Run the delegation test and verify it fails**
+- [x] **Step 2: Run the delegation test and verify it fails**
 
 ```bash
 python -m pytest -q tests/test_candidate_worker.py::test_worker_delegates_business_to_shared_pipeline
@@ -564,7 +564,7 @@ python -m pytest -q tests/test_candidate_worker.py::test_worker_delegates_busine
 
 Expected: failure because worker still owns and calls its local `run_candidate` implementation.
 
-- [ ] **Step 3: Delete worker business logic and build explicit adapters**
+- [x] **Step 3: Delete worker business logic and build explicit adapters**
 
 Keep in `candidate_worker.py` only:
 
@@ -590,7 +590,7 @@ class CandidatePorts:
 
 `build_ports(cfg, run_dir, usage_observer, prompt_dir)` may read resolved config because it is the worker composition boundary. It must return configured ports; `run_candidate()` never sees `cfg`.
 
-- [ ] **Step 4: Verify worker and all Phase 0 boundaries**
+- [x] **Step 4: Verify worker and all Phase 0 boundaries**
 
 ```bash
 python -m pytest -q tests/test_candidate_worker.py tests/test_phase0_characterization.py tests/test_telemetry.py
@@ -598,7 +598,7 @@ python -m pytest -q tests/test_candidate_worker.py tests/test_phase0_characteriz
 
 Expected: all pass and `tests/fixtures/phase0/candidate-result.json` remains unmodified.
 
-- [ ] **Step 5: Commit the thin worker**
+- [x] **Step 5: Commit the thin worker**
 
 ```bash
 git add simpleloop/candidate_worker.py tests/test_candidate_worker.py tests/test_phase0_characterization.py tests/test_telemetry.py
