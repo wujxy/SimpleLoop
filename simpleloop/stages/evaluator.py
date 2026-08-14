@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
 from ..candidate import EvaluationResult
-from ..container.runtime import ApptainerRuntime
 from ..harness import evals
+from ..world import ExecutionSandbox, SourceWorkspace
 from .gate import GateSpec
 
 
@@ -23,7 +22,7 @@ class EvaluationConfig:
 
 @dataclass(frozen=True)
 class EvaluationRequest:
-    worktree: Path
+    workspace: SourceWorkspace
 
 
 class Evaluator(Protocol):
@@ -38,10 +37,10 @@ class BaselineAcceptanceError(RuntimeError):
 class HarnessEvaluator:
     def __init__(
         self,
-        runtime: ApptainerRuntime,
+        world: ExecutionSandbox,
         config: EvaluationConfig,
     ):
-        self.runtime = runtime
+        self.world = world
         self.config = config
 
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
@@ -52,8 +51,7 @@ class HarnessEvaluator:
         try:
             result = evals.run_eval(
                 list(self.config.commands),
-                cwd=request.worktree,
-                runtime=self.runtime,
+                world=self.world,
                 metrics_schema=schema,
                 timeout_seconds=self.config.timeout_seconds,
                 output_cap=self.config.output_cap_chars,

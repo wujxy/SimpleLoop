@@ -10,6 +10,7 @@ from typing import Protocol
 from ..candidate import ExecutionResult
 from ..prompts import load_semantic
 from ..roles.agent import Agent, AgentError
+from ..world import SourceWorkspace
 from .proposer import Proposal
 
 
@@ -25,7 +26,7 @@ class ExecutionRequest:
     round_id: int
     candidate_id: int
     proposal: Proposal
-    worktree: Path
+    workspace: SourceWorkspace
 
 
 class Executor(Protocol):
@@ -103,7 +104,7 @@ structured response.
         try:
             output = self.agent.run_text(
                 prompt,
-                cwd=request.worktree,
+                cwd=request.workspace.path,
                 label=f"executor r{request.round_id}-c{request.candidate_id}",
             )
         except (AgentError, ValueError) as exc:

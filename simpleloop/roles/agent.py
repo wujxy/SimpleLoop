@@ -11,11 +11,12 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from ..container.runtime import ApptainerRuntime, MountMap
 from ..processes import CHILD_PROCESSES
+from ..world import ExecutionSandbox, ProcessRequest
 
 
 class AgentError(RuntimeError):
@@ -55,7 +56,9 @@ def _decode_output(stdout: str) -> AgentResult:
 class Agent:
     def __init__(
         self,
-        runtime: ApptainerRuntime,
+        runtime: ApptainerRuntime | None = None,
+        *,
+        world: ExecutionSandbox | None = None,
         command: str = "claude",
         timeout_seconds: int = 1800,
         extra_args: list[str] | None = None,
@@ -67,6 +70,7 @@ class Agent:
         mounts: MountMap | None = None,
     ):
         self.runtime = runtime
+        self.world = world
         self.command = command
         self.timeout_seconds = timeout_seconds
         self.extra_args = list(extra_args or [])
@@ -143,6 +147,38 @@ class Agent:
                 "--json-schema",
                 json.dumps(json_schema, separators=(",", ":")),
             ]
+        if self.world is not None:
+            print(
+                f"[{label}] claude call started "
+                f"(timeout={self.timeout_seconds}s, world=/work)",
+                flush=True,
+            )
+            completed = self.world.run(ProcessRequest(
+                tuple(payload),
+                PurePosixPath("/work"),
+                self.timeout_seconds,
+                stdin=prompt,
+                label=label,
+            ))
+            result = _decode_output(completed.stdout)
+            self._notify_usage(result.usage, label)
+            if completed.timed_out:
+                raise AgentError(
+                    f"[{label}] timed out after {self.timeout_seconds}s\n"
+                    f"stderr: {completed.stderr.strip()[:2000]}"
+                )
+            if completed.exit_code != 0:
+                raise AgentError(
+                    f"[{label}] claude exited {completed.exit_code}\n"
+                    f"stdout: {completed.stdout.strip()[:2000]}\n"
+                    f"stderr: {completed.stderr.strip()[:2000]}"
+                )
+            print(
+                f"[{label}] claude call finished "
+                f"({completed.duration_seconds:.0f}s)",
+                flush=True,
+            )
+            return result
         sandbox: str | None = None
         proc: subprocess.Popen | None = None
         try:

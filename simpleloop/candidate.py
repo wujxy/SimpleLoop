@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Mapping, Protocol
 
 from .stages.proposer import Proposal
+from .world import CommitRequest, SourceWorkspace
 
 
 class CandidateStatus(str, Enum):
@@ -107,23 +108,18 @@ class CandidateRequest:
     candidate_id: int
     parent_sha: str
     proposal: Proposal
-    worktree: Path
-
-
-@dataclass(frozen=True)
-class CommitRequest:
-    round_id: int
-    candidate_id: int
-    parent_sha: str
-    worktree: Path
-    changed_paths: tuple[PurePosixPath, ...]
+    workspace: SourceWorkspace
 
 
 class ArtifactWorkspace(Protocol):
-    def inspect(self, worktree: Path) -> tuple[PurePosixPath, ...]:
+    def inspect(self, workspace: SourceWorkspace) -> tuple[PurePosixPath, ...]:
         ...
 
-    def commit(self, request: CommitRequest) -> CandidateArtifact:
+    def commit(
+        self,
+        workspace: SourceWorkspace,
+        request: CommitRequest,
+    ) -> CandidateArtifact:
         ...
 
 
@@ -197,7 +193,7 @@ def run_candidate(
         request.round_id,
         request.candidate_id,
         request.proposal,
-        request.worktree,
+        request.workspace,
     ))
     if execution.status == CandidateStatus.EXECUTOR_FAILED.value:
         trace.record_execution(request, execution, None)
@@ -208,7 +204,7 @@ def run_candidate(
             gate=unavailable_gates(gate_spec),
         )
 
-    changed_paths = artifacts.inspect(request.worktree)
+    changed_paths = artifacts.inspect(request.workspace)
     if not changed_paths:
         execution = replace(
             execution,
@@ -228,16 +224,18 @@ def run_candidate(
             gate=gate,
         )
 
-    artifact = artifacts.commit(CommitRequest(
-        request.round_id,
-        request.candidate_id,
-        request.parent_sha,
-        request.worktree,
-        changed_paths,
-    ))
+    artifact = artifacts.commit(
+        request.workspace,
+        CommitRequest(
+            request.round_id,
+            request.candidate_id,
+            request.parent_sha,
+            changed_paths,
+        ),
+    )
     execution = replace(execution, status="COMMITTED")
     trace.record_execution(request, execution, artifact)
-    evaluation = evaluator.evaluate(EvaluationRequest(request.worktree))
+    evaluation = evaluator.evaluate(EvaluationRequest(request.workspace))
     gate = apply_gates(evaluation, gate_spec)
     if evaluation.error is not None:
         status = CandidateStatus.EVAL_FAILED

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from simpleloop.roles import agent as agent_mod
 from simpleloop.roles.agent import Agent, _decode_output
+from simpleloop.world import ProcessResult
 
 
 class RecordingRuntime:
@@ -93,6 +94,25 @@ def test_usage_observer_failure_is_nonfatal(capsys):
     agent._notify_usage({"input_tokens": 1, "output_tokens": 2}, "researcher")
 
     assert "[telemetry] warning:" in capsys.readouterr().out
+
+
+def test_agent_runs_claude_through_world(tmp_path: Path):
+    class FakeWorld:
+        def __init__(self):
+            self.requests = []
+
+        def run(self, request):
+            self.requests.append(request)
+            return ProcessResult(
+                request.argv, 0, '{"result":"ok","usage":{}}', "", 0.1,
+            )
+
+    world = FakeWorld()
+    agent = Agent(world=world, timeout_seconds=60)
+
+    assert agent.run_text("prompt", cwd=tmp_path, label="executor") == "ok"
+    assert world.requests[0].argv[0] == "claude"
+    assert world.requests[0].stdin == "prompt"
 
 
 def test_agent_wraps_literal_claude_and_keeps_prompt_on_stdin(

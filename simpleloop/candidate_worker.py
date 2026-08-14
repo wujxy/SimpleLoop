@@ -43,6 +43,7 @@ from .stages.evaluator import (
 )
 from .stages.executor import AgentExecutor, Executor, ExecutorConfig
 from .stages.gate import GateSpec, apply_gates
+from .world import SourceWorkspace
 from .stages.proposer import Proposal
 
 
@@ -97,7 +98,11 @@ class CandidateSpec:
             candidate_id=self.candidate_id,
             parent_sha=self.parent_sha,
             proposal=Proposal(self.proposal),
-            worktree=Path(self.worktree_path),
+            workspace=SourceWorkspace(
+                f"{self.round_id}-c{self.candidate_id}",
+                Path(self.worktree_path),
+                self.parent_sha,
+            ),
         )
 
 
@@ -188,7 +193,7 @@ def _run_baseline_eval(
     spec: CandidateSpec,
 ) -> CandidateResult:
     evaluation = ports.evaluator.evaluate(
-        EvaluationRequest(Path(spec.worktree_path))
+        EvaluationRequest(spec.to_request().workspace)
     )
     if evaluation.error:
         raise ValueError(f"baseline evaluation failed: {evaluation.error}")
@@ -249,7 +254,12 @@ def _fallback_request(spec_dict: dict) -> CandidateRequest:
         candidate_id=int(spec_dict.get("candidate_id") or 0),
         parent_sha=str(spec_dict.get("parent_sha") or ""),
         proposal=Proposal(str(spec_dict.get("proposal") or "<missing proposal>")),
-        worktree=Path(str(spec_dict.get("worktree_path") or ".")),
+        workspace=SourceWorkspace(
+            f"{int(spec_dict.get('round_id') or 0)}-c"
+            f"{int(spec_dict.get('candidate_id') or 0)}",
+            Path(str(spec_dict.get("worktree_path") or ".")),
+            str(spec_dict.get("parent_sha") or ""),
+        ),
     )
 
 

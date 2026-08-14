@@ -13,6 +13,7 @@ from simpleloop.loop import RunContext, _finalize_candidates
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
 from simpleloop.stages.proposer import Proposal
+from simpleloop.world import SourceWorkspace
 from round_helpers import append_round
 
 
@@ -350,7 +351,7 @@ def test_finalize_candidates_ingests_usage_and_stamps_snapshots():
                     candidate_id,
                     "parent",
                     Proposal(f"p{candidate_id}"),
-                    Path("."),
+                    SourceWorkspace("test", Path("."), "parent"),
                 ),
                 "test",
             ),

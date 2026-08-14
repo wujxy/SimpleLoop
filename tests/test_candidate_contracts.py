@@ -13,6 +13,7 @@ from simpleloop.candidate import (
 )
 from simpleloop.stages.gate import GateSpec, apply_gates
 from simpleloop.stages.proposer import Proposal
+from simpleloop.world import SourceWorkspace
 
 
 def test_candidate_batch_allows_independent_parents(tmp_path: Path):
@@ -21,11 +22,11 @@ def test_candidate_batch_allows_independent_parents(tmp_path: Path):
         CandidatePlan(1, "parent-b", Proposal("b")),
     )
     batch = CandidateBatchRequest(4, plans)
-    request = CandidateRequest(
-        4, 1, "parent-b", plans[1].proposal, tmp_path,
-    )
+    workspace = SourceWorkspace("4-c1", tmp_path, "parent-b")
+    request = CandidateRequest(4, 1, "parent-b", plans[1].proposal, workspace)
 
     assert batch.candidates[1].parent_sha == request.parent_sha
+    assert request.workspace is workspace
     with pytest.raises(FrozenInstanceError):
         plans[0].parent_sha = "mutated"
 

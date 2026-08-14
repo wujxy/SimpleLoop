@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import PurePosixPath
 
-from ..container.runtime import ApptainerRuntime
+from ..world import ExecutionSandbox, ProcessRequest
 
 
 @dataclass(frozen=True)
@@ -33,8 +32,7 @@ def objective_delta(this, other, lower_is_better: bool) -> tuple[float, bool] | 
 
 def run_eval(
     commands: list[str],
-    cwd: Path,
-    runtime: ApptainerRuntime,
+    world: ExecutionSandbox,
     metrics_schema: dict | None = None,
     timeout_seconds: int = 600,
     output_cap: int = 16000,
@@ -45,15 +43,17 @@ def run_eval(
     for cmd in commands:
         # Non-login bash: a login shell's /etc/profile.d exports BASH_FUNC_*
         # vars that poison /bin/sh children on EL-based images.
-        argv = runtime.exec_argv(["bash", "-c", cmd], cwd=cwd)
-        completed = subprocess.run(
-            argv, shell=False, cwd=str(cwd), env=runtime.subprocess_env(),
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout_seconds, check=False,
+        completed = world.run(
+            ProcessRequest(
+                ("bash", "-c", cmd),
+                PurePosixPath("/work"),
+                timeout_seconds,
+                label="evaluation",
+            )
         )
         out = completed.stdout.strip()
         err = completed.stderr.strip()
-        status = "OK" if completed.returncode == 0 else f"EXIT {completed.returncode}"
+        status = "OK" if completed.exit_code == 0 else f"EXIT {completed.exit_code}"
         if out and err:
             body = f"stdout:\n{out}\nstderr:\n{err}"
             metric_source = f"{out}\n{err}"
@@ -62,7 +62,7 @@ def run_eval(
             metric_source = body
         blocks.append(f"$ {cmd}  [{status}]\n{body[:output_cap]}")
         full_text.append(metric_source)
-        returncodes.append(completed.returncode)
+        returncodes.append(completed.exit_code)
     text = "\n\n".join(blocks)
     combined = "\n".join(full_text)
     metrics = _parse_metrics(combined, metrics_schema) if metrics_schema else {}

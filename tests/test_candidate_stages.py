@@ -32,6 +32,7 @@ from simpleloop.stages.executor import (
 from simpleloop.stages.gate import GateSpec, apply_gates
 from simpleloop.stages.proposer import Proposal
 from simpleloop.roles.agent import AgentError
+from simpleloop.world import ChangeSet, ProcessResult, SourceWorkspace
 
 
 class FakeAgent:
@@ -54,12 +55,16 @@ class FakeWorkspace:
         self.sha = sha
         self.commit_args = None
 
-    def changed_paths(self, worktree: Path) -> list[str]:
-        return list(self.changed)
+    def inspect(self, workspace: SourceWorkspace) -> ChangeSet:
+        return ChangeSet(tuple(Path(path) for path in self.changed))
 
-    def commit(self, worktree: Path, round_id: str, paths: list[str]) -> str:
-        self.commit_args = (worktree, round_id, paths)
-        return self.sha
+    def commit(self, workspace, request):
+        self.commit_args = (workspace, request)
+        return CandidateArtifact(request.parent_sha, self.sha, request.changed_paths)
+
+
+def source(tmp_path: Path, base: str = "parent") -> SourceWorkspace:
+    return SourceWorkspace("2-c3", tmp_path, base)
 
 
 def test_agent_executor_only_returns_agent_facts(tmp_path: Path):
@@ -68,7 +73,7 @@ def test_agent_executor_only_returns_agent_facts(tmp_path: Path):
     )
 
     result = AgentExecutor(agent, ExecutorConfig("goal")).execute(
-        ExecutionRequest(2, 3, Proposal("cache it"), tmp_path)
+        ExecutionRequest(2, 3, Proposal("cache it"), source(tmp_path))
     )
 
     assert result.status == "EXECUTED"
@@ -85,7 +90,7 @@ def test_agent_executor_normalizes_agent_error(tmp_path: Path):
             raise AgentError("model unavailable")
 
     result = AgentExecutor(FailingAgent(), ExecutorConfig("goal")).execute(
-        ExecutionRequest(2, 3, Proposal("cache it"), tmp_path)
+        ExecutionRequest(2, 3, Proposal("cache it"), source(tmp_path))
     )
 
     assert result.status == "EXECUTOR_FAILED"
@@ -105,20 +110,16 @@ def test_parse_self_report_remains_best_effort():
 
 
 def test_git_artifact_workspace_maps_commit_request(tmp_path: Path):
-    workspace = FakeWorkspace(changed=["src/a.cc"], sha="child")
-    adapter = GitArtifactWorkspace(workspace)
+    provider = FakeWorkspace(changed=["src/a.cc"], sha="child")
+    adapter = GitArtifactWorkspace(provider)
 
-    paths = adapter.inspect(tmp_path)
-    artifact = adapter.commit(
-        CommitRequest(2, 3, "parent", tmp_path, paths)
-    )
+    workspace = source(tmp_path)
+    paths = adapter.inspect(workspace)
+    artifact = adapter.commit(workspace, CommitRequest(2, 3, "parent", paths))
 
     assert artifact == CandidateArtifact("parent", "child", paths)
-    assert workspace.commit_args == (
-        tmp_path,
-        "2-c3",
-        ["src/a.cc"],
-    )
+    assert provider.commit_args[0] == source(tmp_path)
+    assert provider.commit_args[1].changed_paths == paths
 
 
 def test_harness_evaluator_maps_eval_result(tmp_path: Path, monkeypatch):
@@ -134,11 +135,38 @@ def test_harness_evaluator_maps_eval_result(tmp_path: Path, monkeypatch):
         EvaluationConfig(("eval",), "SPEED_MS", ("CORRECTNESS",)),
     )
 
-    result = evaluator.evaluate(EvaluationRequest(tmp_path))
+    result = evaluator.evaluate(EvaluationRequest(source(tmp_path)))
 
     assert result == EvaluationResult(
         "eval", {"SPEED_MS": 90.0, "CORRECTNESS": True}, (0,),
     )
+
+
+def test_harness_evaluator_runs_commands_through_world(tmp_path: Path):
+    class FakeWorld:
+        def __init__(self):
+            self.requests = []
+
+        def run(self, request):
+            self.requests.append(request)
+            return ProcessResult(
+                request.argv,
+                0,
+                "SPEED_MS=90\nCORRECTNESS=PASS",
+                "",
+                0.1,
+            )
+
+    world = FakeWorld()
+    evaluator = HarnessEvaluator(
+        world,
+        EvaluationConfig(("bench",), "SPEED_MS", ("CORRECTNESS",)),
+    )
+
+    result = evaluator.evaluate(EvaluationRequest(source(tmp_path)))
+
+    assert result.metrics == {"SPEED_MS": 90.0, "CORRECTNESS": True}
+    assert world.requests[0].argv == ("bash", "-c", "bench")
 
 
 def test_harness_evaluator_normalizes_runtime_failure(
@@ -156,7 +184,7 @@ def test_harness_evaluator_normalizes_runtime_failure(
         object(), EvaluationConfig(("eval",), "SPEED_MS", ()),
     )
 
-    result = evaluator.evaluate(EvaluationRequest(tmp_path))
+    result = evaluator.evaluate(EvaluationRequest(source(tmp_path)))
 
     assert result.error == "container unavailable"
     assert "eval failed to run" in result.text
@@ -173,7 +201,8 @@ def test_validate_baseline_rejects_missing_objective():
 def test_handoff_trace_writes_typed_stage_facts(tmp_path: Path):
     trace = HandoffCandidateTrace(tmp_path)
     request = CandidateRequest(
-        2, 3, "parent", Proposal("cache it"), tmp_path / "worktree",
+        2, 3, "parent", Proposal("cache it"),
+        source(tmp_path / "worktree"),
     )
     execution = ExecutionResult(
         "EXECUTED", output="agent response",

@@ -23,6 +23,7 @@ from simpleloop.harness.store import Store
 from simpleloop.loop import _InflightJournal, _load_inflight
 from simpleloop.round import RoundResult
 from simpleloop.stages.gate import GateSpec
+from simpleloop.world import SourceWorkspace
 from simpleloop.stages.proposer import Abstention, Proposal, ProposalBatch
 from simpleloop.stages.selector import Selection
 
@@ -57,7 +58,7 @@ def test_candidate_result_shape(tmp_path: Path):
         def inspect(self, worktree):
             return (Path("src/cache.cc"),)
 
-        def commit(self, request):
+        def commit(self, workspace, request):
             return CandidateArtifact(
                 request.parent_sha, "child", request.changed_paths,
             )
@@ -82,7 +83,9 @@ def test_candidate_result_shape(tmp_path: Path):
         candidate_id=1,
         parent_sha="parent",
         proposal=Proposal("cache the transform"),
-        worktree=tmp_path / "worktree",
+        workspace=SourceWorkspace(
+            "2-c1", tmp_path / "worktree", "parent",
+        ),
     )
 
     assert encode_candidate_result(run_candidate(

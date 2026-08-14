@@ -14,6 +14,7 @@ from simpleloop import loop as loop_mod
 from simpleloop.container import runtime as runtime_mod
 from simpleloop.harness.evals import EvalResult
 from simpleloop.container.runtime import ApptainerRuntime, MountMap, RuntimePreflightError
+from simpleloop.world import ProcessResult
 
 
 _MISSING = object()
@@ -713,23 +714,20 @@ def test_runtime_summary_does_not_include_environment_values(
 
 
 def test_run_eval_wraps_bash_lc_and_parses_metrics(
-    monkeypatch,
     tmp_path: Path,
 ):
-    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
-    seen = {}
+    class World:
+        def __init__(self):
+            self.requests = []
 
-    def fake_run(argv, **kwargs):
-        seen["argv"] = argv
-        seen["kwargs"] = kwargs
-        return subprocess.CompletedProcess(
-            argv,
-            0,
-            "SPEED_MS=12.5\nCORRECTNESS=PASS\n",
-            "",
-        )
+        def run(self, request):
+            self.requests.append(request)
+            return ProcessResult(
+                request.argv, 0,
+                "SPEED_MS=12.5\nCORRECTNESS=PASS\n", "", 0.1,
+            )
 
-    monkeypatch.setattr(evals_mod.subprocess, "run", fake_run)
+    world = World()
     schema = {
         "objective": {"key": "SPEED_MS", "lower_is_better": True},
         "gates": [{"key": "CORRECTNESS"}],
@@ -737,18 +735,15 @@ def test_run_eval_wraps_bash_lc_and_parses_metrics(
 
     result = evals_mod.run_eval(
         ["bash scripts/eval.sh --evtmax 10"],
-        tmp_path,
-        runtime,
+        world,
         schema,
     )
 
-    assert seen["argv"][-3:] == [
+    assert list(world.requests[0].argv) == [
         "bash",
         "-c",
         "bash scripts/eval.sh --evtmax 10",
     ]
-    assert seen["kwargs"]["shell"] is False
-    assert seen["kwargs"]["env"] == runtime.subprocess_env()
     assert result.returncodes == (0,)
     assert result.metrics == {
         "SPEED_MS": 12.5,
@@ -758,23 +753,21 @@ def test_run_eval_wraps_bash_lc_and_parses_metrics(
 
 
 def test_run_eval_records_nonzero_status_and_preserves_streams(
-    monkeypatch, tmp_path: Path,
+    tmp_path: Path,
 ):
-    runtime = _make_runtime(tmp_path, executable="/usr/bin/apptainer")
     results = iter(
         [
-            subprocess.CompletedProcess([], 0, "first", ""),
-            subprocess.CompletedProcess([], 9, "build progress",
-                                        "compiler diagnostic"),
+            ProcessResult(("bash",), 0, "first", "", 0.1),
+            ProcessResult(
+                ("bash",), 9, "build progress", "compiler diagnostic", 0.1,
+            ),
         ]
     )
-    monkeypatch.setattr(
-        evals_mod.subprocess,
-        "run",
-        lambda *args, **kwargs: next(results),
-    )
+    class World:
+        def run(self, request):
+            return next(results)
 
-    result = evals_mod.run_eval(["first", "second"], tmp_path, runtime)
+    result = evals_mod.run_eval(["first", "second"], World())
 
     assert result.returncodes == (0, 9)
     assert result.commands_ok is False

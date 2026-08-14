@@ -315,7 +315,7 @@ git commit -m "refactor: add explicit world builder"
 - Consumes: Task 1–4 contracts and concrete Worlds supplied at composition.
 - Produces: Candidate/Execution/Evaluation requests using `SourceWorkspace`; Agent and HarnessEvaluator run only through `World.run()`.
 
-- [ ] **Step 1: Write failing stage boundary tests**
+- [x] **Step 1: Write failing stage boundary tests**
 
 ```python
 def test_candidate_request_carries_source_workspace(tmp_path):
@@ -337,23 +337,23 @@ def test_evaluator_runs_commands_through_world():
     assert result.metrics == {"SPEED": 1.0, "OK": True}
 ```
 
-- [ ] **Step 2: Run focused tests and observe old Path/Runtime API failures**
+- [x] **Step 2: Run focused tests and observe old Path/Runtime API failures**
 
 Run: `python -m pytest -q tests/test_candidate_contracts.py tests/test_candidate_stages.py tests/test_agent_usage.py tests/test_prompt_templates.py`
 
 Expected: new tests fail because requests and adapters still use `Path`/`ApptainerRuntime`.
 
-- [ ] **Step 3: Migrate the typed pipeline and adapters minimally**
+- [x] **Step 3: Migrate the typed pipeline and adapters minimally**
 
 Remove `worktree` from the candidate `CommitRequest`; make `ArtifactWorkspace.inspect/commit` accept `SourceWorkspace`; make `ExecutionRequest` and `EvaluationRequest` carry it. Agent builds only Claude argv and decodes output; HarnessEvaluator loops commands through its World and uses pure metric parsing. Preserve all Phase 2 statuses, trace projections, output caps, and baseline validation.
 
-- [ ] **Step 4: Run all candidate, agent, eval, gate, and prompt tests**
+- [x] **Step 4: Run all candidate, agent, eval, gate, and prompt tests**
 
 Run: `python -m pytest -q tests/test_candidate_contracts.py tests/test_candidate_stages.py tests/test_candidate_worker.py tests/test_agent_usage.py tests/test_prompt_templates.py tests/test_gate_pipeline.py tests/test_runtime.py -k 'candidate or eval or metric or baseline'`
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/candidate.py simpleloop/stages simpleloop/roles/agent.py simpleloop/harness/evals.py tests

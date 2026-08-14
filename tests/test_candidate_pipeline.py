@@ -14,6 +14,7 @@ from simpleloop.candidate import (
 )
 from simpleloop.stages.gate import GateSpec
 from simpleloop.stages.proposer import Proposal
+from simpleloop.world import SourceWorkspace
 
 
 SPEC = GateSpec("SPEED_MS", ("CORRECTNESS",))
@@ -43,11 +44,11 @@ class FakeArtifacts:
         self.calls = calls
         self.paths = paths
 
-    def inspect(self, worktree):
+    def inspect(self, workspace):
         self.calls.append("inspect")
         return self.paths
 
-    def commit(self, request):
+    def commit(self, workspace, request):
         self.calls.append("commit")
         return CandidateArtifact(
             request.parent_sha,
@@ -79,7 +80,8 @@ class FakeTrace:
 
 def request(tmp_path: Path) -> CandidateRequest:
     return CandidateRequest(
-        2, 3, "parent", Proposal("cache it"), tmp_path,
+        2, 3, "parent", Proposal("cache it"),
+        SourceWorkspace("2-c3", tmp_path, "parent"),
     )
 
 

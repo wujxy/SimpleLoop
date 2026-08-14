@@ -1,31 +1,22 @@
 """Narrow adapter for inspecting and committing candidate Git artifacts."""
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from ..candidate import CandidateArtifact, CommitRequest
-from ..harness.workspace import Workspace
+from ..world import SourceWorkspace, WorkspaceProvider
 
 
 class GitArtifactWorkspace:
-    def __init__(self, workspace: Workspace):
-        self.workspace = workspace
+    def __init__(self, provider: WorkspaceProvider):
+        self.provider = provider
 
-    def inspect(self, worktree: Path) -> tuple[PurePosixPath, ...]:
-        return tuple(
-            PurePosixPath(path)
-            for path in self.workspace.changed_paths(worktree)
-        )
+    def inspect(self, workspace: SourceWorkspace) -> tuple[PurePosixPath, ...]:
+        return self.provider.inspect(workspace).paths
 
-    def commit(self, request: CommitRequest) -> CandidateArtifact:
-        paths = [path.as_posix() for path in request.changed_paths]
-        sha = self.workspace.commit(
-            request.worktree,
-            f"{request.round_id}-c{request.candidate_id}",
-            paths,
-        )
-        return CandidateArtifact(
-            request.parent_sha,
-            sha,
-            request.changed_paths,
-        )
+    def commit(
+        self,
+        workspace: SourceWorkspace,
+        request: CommitRequest,
+    ) -> CandidateArtifact:
+        return self.provider.commit(workspace, request)

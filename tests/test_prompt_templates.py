@@ -11,6 +11,7 @@ from simpleloop.stages.executor import (
     ExecutorConfig,
 )
 from simpleloop.stages.proposer import Proposal
+from simpleloop.world import SourceWorkspace
 
 
 class CapturingAgent:
@@ -51,7 +52,10 @@ def test_executor_assembles_active_semantics_and_safety(tmp_path: Path):
         agent,
         ExecutorConfig(goal="faster", prompt_dir=prompt_dir),
     ).execute(
-        ExecutionRequest(0, 0, Proposal("replace lookup"), tmp_path),
+        ExecutionRequest(
+            0, 0, Proposal("replace lookup"),
+            SourceWorkspace("0-c0", tmp_path, "parent"),
+        ),
     )
 
     assert result.status == "EXECUTED"
