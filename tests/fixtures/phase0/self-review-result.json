@@ -1,0 +1,18 @@
+{
+  "status": "COMPLETED",
+  "mode": "self",
+  "lane_id": 0,
+  "round_id": 5,
+  "self_review": {
+    "contract_version": "proposer-cli-v0",
+    "incumbent_self_sha": "self-parent",
+    "decision": "KEEP",
+    "diagnosis": "progress remains coherent",
+    "keep_reason": "no limiting pattern warrants a self change",
+    "next_review_after_rounds": 5,
+    "self_change": null,
+    "abstained": false
+  },
+  "trace": {},
+  "telemetry": {}
+}

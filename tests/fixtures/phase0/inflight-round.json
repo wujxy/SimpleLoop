@@ -1,0 +1,24 @@
+{
+  "round_id": 2,
+  "parent_sha": "parent",
+  "proposals": [
+    {
+      "instruction": "cache the transform",
+      "evidence_refs": [
+        "src/transform.cc:40"
+      ],
+      "material_difference": "move setup out of the event loop"
+    }
+  ],
+  "jobs": [
+    {
+      "candidate_id": 1,
+      "job_id": "123.0",
+      "attempt": 1,
+      "state": "SUBMITTED",
+      "note": "",
+      "worktree_id": "2-c1",
+      "result_dir": "/run/rounds/r2/candidates/c1"
+    }
+  ]
+}

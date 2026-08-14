@@ -1,0 +1,26 @@
+{
+  "status": "COMPLETED",
+  "lane_id": 0,
+  "outcome": "submit",
+  "proposals": [
+    {
+      "instruction": "cache the transform",
+      "research_target": {
+        "question": "is transform setup dominant?",
+        "mechanisms": [],
+        "code_regions": []
+      },
+      "evidence_refs": [
+        "src/transform.cc:40"
+      ],
+      "material_difference": "move setup out of the event loop"
+    }
+  ],
+  "reason_kind": null,
+  "explanation": null,
+  "abstain_reason": null,
+  "trace": {},
+  "telemetry": {
+    "tool_calls": 3
+  }
+}
