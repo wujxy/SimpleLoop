@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from simpleloop.scheduling import worker
+from simpleloop.scheduling.handlers import proposer as proposer_handler
 from simpleloop.scheduling.envelope import (
     WorkerRequest,
     WorkerStatus,
     read_result,
     write_request,
 )
+
+
+def test_proposer_handler_owns_serializable_lane_spec():
+    from simpleloop.scheduling.handlers.proposer import ProposerLaneSpec
+
+    spec = ProposerLaneSpec(0, 4, "base", run_dir="/run", proposal_slots=2)
+
+    assert ProposerLaneSpec.from_dict(spec.to_dict()) == spec
 
 
 def _run(tmp_path, monkeypatch, kind, handler):
@@ -57,3 +66,45 @@ def test_worker_unknown_kind_writes_failed_envelope(tmp_path):
     result = read_result(result_path, expected=request)
     assert result.status is WorkerStatus.FAILED
     assert "unsupported worker kind" in result.error
+
+
+def test_candidate_dispatch_does_not_load_proposer_handler(monkeypatch):
+    imported = []
+    real_import = worker.importlib.import_module
+
+    def track(name):
+        imported.append(name)
+        return real_import(name)
+
+    monkeypatch.setattr(worker.importlib, "import_module", track)
+
+    worker._load_handler("candidate")
+
+    assert imported == ["simpleloop.scheduling.handlers.candidate"]
+
+
+def test_viability_redirect_happens_before_proposer_composition(
+    tmp_path, monkeypatch,
+):
+    selected = tmp_path / "candidate-self"
+    (selected / "proposer").mkdir(parents=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.resolved.json").write_text("{}", encoding="utf-8")
+    seen = []
+
+    def build(*args, **kwargs):
+        import sys
+        seen.append(sys.path[0])
+        raise RuntimeError("stop after redirect")
+
+    monkeypatch.setattr(proposer_handler, "build_lane_deps", build)
+
+    result = proposer_handler.handle_viability({
+        "lane_id": 0, "round_id": 0, "base_sha": "base",
+        "run_dir": str(run_dir), "workspace_path": str(tmp_path / "ws"),
+        "self_repo": str(selected),
+    }, lambda row: None)
+
+    assert seen == [str(selected.resolve())]
+    assert result["status"] == "LANE_FAILED"

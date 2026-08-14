@@ -4,8 +4,8 @@ The proposer package (the Scientist) is the "self" that RSI modifies. S3a makes 
 run *actually execute* a per-run copy of it: at run start we snapshot the installed
 ``proposer/`` package into ``run_dir/self/repo/`` as an independent git history
 (revision **S0**), and record the active self SHA in ``run_dir/self/state.json``. The
-proposer-lane worker subprocess then resolves ``import proposer`` to that snapshot
-(see ``proposer_lane_worker._redirect_self_repo``), so a one-line edit in the snapshot
+unified worker subprocess then resolves ``import proposer`` to that snapshot
+(see ``scheduling.handlers.proposer._redirect``), so an edit in the snapshot
 takes effect in the next round while the installed package stays untouched.
 
 Three physical layers (contract §2.4 / RSI impl-design §1):
@@ -24,14 +24,13 @@ candidate → viability → adopt, advancing ``active_self_sha``).
 
 This module is Host/Kernel code: it must never be importable from the ``proposer``
 package, and never modified by a self-change. It deliberately does NOT import
-``simpleloop.loop`` (matplotlib) so it stays light like ``proposer_lane_worker``.
+``simpleloop.loop`` (matplotlib), so it stays light and reusable.
 """
 from __future__ import annotations
 
 import json
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +48,6 @@ _DEFAULT_NEXT_REVIEW = None  # null until the first self-review sets a commitmen
 # test IS the loop contract in miniature (goal in -> result out), so it runs a real
 # (short) research episode. See ``check_viability``.
 _SMOKE_SCIENTIST_STEPS = 20
-_SMOKE_TIMEOUT_SECONDS = 600
 
 
 def _stamp() -> str:
@@ -332,7 +330,7 @@ class SelfRepo:
             next_self_review_round=state.get("next_self_review_round"))
 
     def transition(self, *, agent, self_change: dict, run_dir: str | Path,
-                   label: str = "self-exec") -> "TransitionResult":
+                   label: str = "self-exec", viability=None) -> "TransitionResult":
         """Apply a self_change, smoke-test the candidate, adopt if viable (S3d).
 
         The self-executor (``agent`` — a claude-p ``Agent`` reused from the task
@@ -358,7 +356,7 @@ class SelfRepo:
                 return TransitionResult(None, False, False, "executor made no changes")
             target = sc.get("target") or "self-change"
             candidate = self._commit_self_worktree(wt, f"S(n+1): {target}")
-            vr = check_viability(wt, run_dir)
+            vr = (viability or check_viability)(wt, run_dir)
             if vr.viable:
                 self._adopt(candidate)
                 return TransitionResult(candidate, True, True, vr.detail)
@@ -426,14 +424,6 @@ def _classify_smoke(result: dict | None, *, exit_code: int | None,
         f"{result.get('explanation') or result.get('abstain_reason')}{tail}")
 
 
-def _tail(path: Path, n: int = 2000) -> str:
-    """Last ~n chars of a file (the worker's job.err), for failed-candidate diagnostics."""
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")[-n:]
-    except OSError:
-        return ""
-
-
 def _empty_git_workspace(path: Path) -> str:
     """A valid-but-empty git repo with one initial commit, so the candidate's research
     probes (``git log``/``show``/…) don't fail for *environmental* reasons and falsely
@@ -451,7 +441,12 @@ def _empty_git_workspace(path: Path) -> str:
     return out.stdout.strip() or ""
 
 
-def check_viability(candidate_repo: str | Path, run_dir: str | Path) -> ViabilityResult:
+def check_viability(
+    candidate_repo: str | Path,
+    run_dir: str | Path,
+    *,
+    execute=None,
+) -> ViabilityResult:
     """Smoke-test a candidate self-repo: run it as a normal task-mode proposer lane on
     the run's real goal + a throwaway empty workspace, and return whether it reached a
     COMPLETED terminal. See the module/section notes for the semantics.
@@ -467,49 +462,32 @@ def check_viability(candidate_repo: str | Path, run_dir: str | Path) -> Viabilit
         return ViabilityResult(
             False, f"no config.resolved.json in {run_dir} — cannot smoke-test")
 
+    if execute is None:
+        return ViabilityResult(False, "no viability worker runner was configured")
     candidate = str(Path(candidate_repo).resolve())
-    with TemporaryDirectory() as base:
+    # Keep the smoke world below run_dir: Local and HEPJob workers must observe
+    # the same files on a shared filesystem.
+    smoke_root = run_dir / "self" / "viability"
+    smoke_root.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=smoke_root) as base:
         smoke_run, result_dir = Path(base), Path(base) / "result"
         result_dir.mkdir()
         shutil.copy2(resolved, smoke_run / "config.resolved.json")
         smoke_ws = smoke_run / "ws"
         smoke_ws.mkdir()
         base_sha = _empty_git_workspace(smoke_ws)
-        # Mirrors ProposerLaneSpec.to_dict() (mode="task"); the worker reads it via
-        # ProposerLaneSpec.from_dict, which tolerates extra/missing fields.
-        manifest = {
+        payload = {
             "lane_id": 0, "round_id": 0, "base_sha": base_sha,
             "run_dir": str(smoke_run), "workspace_path": str(smoke_ws),
             "result_dir": str(result_dir), "prompt_dir": "",
             "proposal_slots": 1, "scientist_steps": _SMOKE_SCIENTIST_STEPS,
-            "attempt": 1, "mode": "task",
+            "attempt": 1, "mode": "task", "self_repo": candidate,
         }
-        (result_dir / "manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8")
-        argv = [sys.executable, "-m", "simpleloop.proposer_lane_worker",
-                "--self-repo", candidate,
-                "--manifest", str(result_dir / "manifest.json")]
-        err_path = result_dir / "job.err"
-        with open(err_path, "w") as err:
-            try:
-                proc = subprocess.run(
-                    argv, stdout=subprocess.DEVNULL, stderr=err,
-                    check=False, timeout=_SMOKE_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                return ViabilityResult(
-                    False, f"smoke run timed out after {_SMOKE_TIMEOUT_SECONDS}s")
-
-        result = None
-        rpath = result_dir / "result.json"
-        if rpath.is_file():
-            try:
-                decoded = json.loads(rpath.read_text(encoding="utf-8"))
-                result = decoded if isinstance(decoded, dict) else None
-            except (OSError, json.JSONDecodeError):
-                result = None
-        return _classify_smoke(
-            result, exit_code=proc.returncode, stderr_tail=_tail(err_path))
+        try:
+            result = execute(payload)
+        except Exception as exc:
+            return ViabilityResult(False, f"viability worker failed: {exc}")
+        return _classify_smoke(result, exit_code=0 if result is not None else None)
 
 
 # ---- self-execution + adoption (S3d) --------------------------------------

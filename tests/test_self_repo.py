@@ -1,7 +1,7 @@
 """S3a/S3b tests: run-local self-repo lifecycle + worker redirect + viability smoke test.
 
-Covers the SelfRepo snapshot/state machine, the proposer_lane_worker
-``_redirect_self_repo`` bootstrap, and the S3b viability smoke test: the verdict logic
+Covers the SelfRepo snapshot/state machine, the unified proposer handler redirect,
+and the S3b viability smoke test: the verdict logic
 (``_classify_smoke``) is unit-tested deterministically; a boot-death candidate (the
 worker dies at import before the model) is an offline integration test; the
 healthy-self-passes path runs a real model episode and is left as a manual e2e.
@@ -17,7 +17,7 @@ import pytest
 
 from simpleloop.self_repo import (
     SelfRepo, ViabilityResult, check_viability, _classify_smoke)
-from simpleloop.proposer_lane_worker import _redirect_self_repo
+from simpleloop.scheduling.handlers.proposer import _redirect
 
 
 # --- SelfRepo fresh lifecycle ---------------------------------------------
@@ -119,67 +119,30 @@ def test_snapshot_is_importable_as_proposer(tmp_path: Path):
 
 # --- worker redirect bootstrap -------------------------------------------
 
-@pytest.fixture
-def isolated_argv_path():
-    """Snapshot sys.argv and sys.path so redirect tests can't pollute siblings."""
-    argv, path = sys.argv[:], sys.path[:]
-    yield
-    sys.argv, sys.path = argv, path[:]
-
-
-def _write_manifest(path: Path, run_dir: str | Path) -> Path:
-    path.write_text(json.dumps({"run_dir": str(run_dir)}), encoding="utf-8")
-    return path
-
-
-def test_redirect_activates_when_self_repo_exists(tmp_path: Path,
-                                                  isolated_argv_path):
+def test_redirect_activates_when_self_repo_exists(tmp_path: Path, monkeypatch):
     (tmp_path / "self" / "repo" / "proposer").mkdir(parents=True)
-    manifest = _write_manifest(tmp_path / "manifest.json", tmp_path)
-    sys.argv = ["worker", "--manifest", str(manifest)]
+    monkeypatch.syspath_prepend(str(tmp_path / "baseline"))
 
-    _redirect_self_repo()
+    _redirect({"run_dir": str(tmp_path)})
+    import sys
     assert sys.path[0] == str((tmp_path / "self" / "repo").resolve())
 
 
-def test_redirect_noop_when_self_repo_absent(tmp_path: Path,
-                                             isolated_argv_path):
-    manifest = _write_manifest(tmp_path / "manifest.json", tmp_path)
-    sys.argv = ["worker", "--manifest", str(manifest)]
+def test_redirect_noop_when_self_repo_absent(tmp_path: Path):
     baseline = sys.path[:]
 
-    _redirect_self_repo()
+    _redirect({"run_dir": str(tmp_path)})
     assert sys.path == baseline  # nothing inserted
 
 
-def test_redirect_noop_without_manifest(tmp_path: Path, isolated_argv_path):
-    sys.argv = ["worker", "--unrelated", "x"]
-    baseline = sys.path[:]
+def test_redirect_accepts_explicit_candidate_repo(tmp_path: Path, monkeypatch):
+    selected = tmp_path / "candidate"
+    (selected / "proposer").mkdir(parents=True)
+    monkeypatch.syspath_prepend(str(tmp_path / "baseline"))
 
-    _redirect_self_repo()
-    assert sys.path == baseline
+    _redirect({"run_dir": str(tmp_path), "self_repo": str(selected)})
 
-
-def test_redirect_noop_when_manifest_missing_run_dir(tmp_path: Path,
-                                                    isolated_argv_path):
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"no_run_dir": True}), encoding="utf-8")
-    sys.argv = ["worker", "--manifest", str(tmp_path / "manifest.json")]
-    baseline = sys.path[:]
-
-    _redirect_self_repo()
-    assert sys.path == baseline
-
-
-def test_redirect_noop_on_unreadable_manifest(tmp_path: Path,
-                                              isolated_argv_path):
-    (tmp_path / "self" / "repo" / "proposer").mkdir(parents=True)
-    (tmp_path / "manifest.json").write_text("{ not json", encoding="utf-8")
-    sys.argv = ["worker", "--manifest", str(tmp_path / "manifest.json")]
-    baseline = sys.path[:]
-
-    _redirect_self_repo()
-    assert sys.path == baseline  # defensive: falls through to installed proposer
+    assert sys.path[0] == str(selected.resolve())
 
 
 # --- helper ----------------------------------------------------------------
@@ -272,7 +235,7 @@ def test_viability_fails_on_syntax_error_boot(tmp_path: Path):
     # an unparseable scientist.py -> `from proposer.scientist import ...` dies at worker
     # module load (boot), before main()/model -> no result.json -> not viable.
     _append(repo, "scientist.py", "\n!!! unparseable syntax error !!!\n")
-    res = check_viability(repo, tmp_path)
+    res = check_viability(repo, tmp_path, execute=lambda payload: None)
     assert res.viable is False
     assert "boot" in res.detail or "import" in res.detail
 
@@ -290,8 +253,33 @@ def test_viability_missing_config_returns_not_viable(tmp_path: Path):
 def test_viability_healthy_self_passes(tmp_path: Path):
     repo = _candidate(tmp_path)
     _dummy_resolved_config(tmp_path)
-    res = check_viability(repo, tmp_path)
+    res = check_viability(repo, tmp_path, execute=lambda payload: {
+        "status": "COMPLETED", "outcome": "abstain", "proposals": [],
+    })
     assert res.viable is True
+
+
+def test_viability_prepares_payload_for_injected_worker_runner(tmp_path: Path):
+    repo = _candidate(tmp_path)
+    _dummy_resolved_config(tmp_path)
+    seen = []
+
+    def execute(payload):
+        seen.append({
+            **payload,
+            "workspace_exists": Path(payload["workspace_path"]).is_dir(),
+            "config_exists": Path(
+                payload["run_dir"], "config.resolved.json"
+            ).is_file(),
+        })
+        return {"status": "COMPLETED", "outcome": "abstain", "proposals": []}
+
+    result = check_viability(repo, tmp_path, execute=execute)
+
+    assert result.viable is True
+    assert seen[0]["self_repo"] == str(repo.resolve())
+    assert seen[0]["workspace_exists"] is True
+    assert seen[0]["config_exists"] is True
 
 
 # === S3c.2: commitment + self-review ledger ================================
@@ -455,5 +443,3 @@ def test_self_repo_worktree_edit_commit_adopt_mechanics(tmp_path: Path):
             encoding="utf-8") == "X"
     finally:
         sr._remove_self_worktree(wt)
-
-

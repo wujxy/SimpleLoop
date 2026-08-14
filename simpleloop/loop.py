@@ -20,7 +20,7 @@ from .candidate import (
 )
 from . import config as config_mod
 from .execution import build_backend
-from .execution.base import InfraRoundError, RoundJournal
+from .execution.backend import InfraRoundError
 from .harness import evals
 from .reporting import plot as plot_mod
 from .stages.evaluator import BaselineAcceptanceError
@@ -44,39 +44,11 @@ from .world import (
 )
 from .world.git import GitWorkspaceProvider
 from .processes import run_signal_handlers
-from .self_repo import SelfRepo
+from .self_repo import SelfRepo, check_viability
 
 
 class RunLockError(RuntimeError):
     """Raised when another simpleloop process already holds the run_dir."""
-
-
-INFLIGHT_NAME = "inflight_round.json"
-
-
-class _InflightJournal(RoundJournal):
-    """The loop-owned in-flight round file: ONE atomic unit carrying
-    everything a --continue needs — the round meta (round_id, parent_sha,
-    proposals with their finding targets) plus the backend's opaque jobs
-    table. The backend calls save(jobs) on every job-state transition but
-    never sees the meta; clear() happens only when the round produced
-    business-terminal candidates. The file appears at the first save (after
-    job submission), so a crash before that simply re-proposes the round —
-    there is no half-written meta to reconcile."""
-
-    def __init__(self, path: Path, meta: dict):
-        self.path = path
-        self.meta = meta
-
-    def save(self, jobs: list[dict]) -> None:
-        payload = {**self.meta, "jobs": jobs}
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2)
-                       + "\n", encoding="utf-8")
-        os.replace(tmp, self.path)
-
-    def clear(self) -> None:
-        self.path.unlink(missing_ok=True)
 
 
 @dataclass
@@ -250,7 +222,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
 
     # S3a: snapshot the proposer source into run_dir/self/repo (S0) on a fresh run,
     # or resume the existing self life-history on --continue. The worker subprocess
-    # resolves `import proposer` to this snapshot (see proposer_lane_worker).
+    # resolves `import proposer` to this snapshot in the proposer handler.
     ctx.self_repo = SelfRepo(run_dir_path)
     ctx.self_repo.setup(resume=continue_run)
     # S3c.2: RSI self-review is opt-in via cfg["rsi"]["first_self_review_round"].
@@ -314,10 +286,6 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 flush=True,
             )
 
-        # If the frontend crashed during a previous proposer stage, kill any
-        # orphan proposer-lane jobs and clear the marker before re-proposing.
-        ctx.execution_backend.cleanup_proposer_orphans()
-
         # S3c.2: RSI self-review mode-switch. If the Scientist's own commitment
         # says to re-examine itself by this round, run a self-review round
         # instead of a task round, record it, advance the commitment, and skip
@@ -332,22 +300,20 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                   flush=True)
             continue
 
-        inflight = _load_inflight(ctx.run_dir)
-        if inflight is not None:
-            if inflight.get("round_id") != round_id:
+        inflight = (
+            ctx.execution_backend.inflight()
+            if hasattr(ctx.execution_backend, "inflight") else None
+        )
+        if inflight is not None and inflight.stage == "candidates":
+            if inflight.round_id != round_id:
                 raise ValueError(
-                    f"--continue: inflight_round.json is for round "
-                    f"{inflight.get('round_id')} but the loop is at round "
-                    f"{round_id}; delete {ctx.run_dir / INFLIGHT_NAME} to "
+                    f"--continue: inflight.json is for round "
+                    f"{inflight.round_id} but the loop is at round "
+                    f"{round_id}; delete {ctx.run_dir / 'inflight.json'} to "
                     "re-propose this round, or fix loop.max_rounds.")
             print(f"[{stamp()}] resuming in-flight round {round_id + 1} "
-                  "from inflight_round.json (proposer skipped)", flush=True)
-            # The journal's meta was written by the original session; keep it
-            # whole so subsequent saves preserve the proposer's outputs.
-            journal = _InflightJournal(
-                ctx.run_dir / INFLIGHT_NAME,
-                meta={k: v for k, v in inflight.items() if k != "jobs"})
-            proposals_meta = inflight.get("proposals") or []
+                  "from inflight.json (proposer skipped)", flush=True)
+            proposals_meta = inflight.context.get("proposals") or []
             proposal_batch = ProposalBatch(tuple(
                 Proposal(
                     instruction=(
@@ -364,10 +330,20 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 )
                 for item in proposals_meta
             ))
+            plans = tuple(
+                CandidatePlan(
+                    int(payload["candidate_id"]),
+                    str(payload["parent_sha"]),
+                    Proposal(
+                        str(payload["proposal"]),
+                        tuple(str(ref) for ref in payload.get("evidence_refs") or ()),
+                    ),
+                )
+                for payload in (inflight.context.get("payloads") or ())
+            )
             try:
-                candidates = ctx.execution_backend.resume_round(
-                    inflight.get("jobs") or [], round_id=round_id,
-                    parent_sha=inflight["parent_sha"], journal=journal)
+                candidates = ctx.execution_backend.run_candidates(
+                    CandidateBatchRequest(round_id, plans))
             except InfraRoundError as exc:
                 print(f"[{stamp()}] {exc}", flush=True)
                 print(f"[{stamp()}] round {round_id + 1} still not complete; "
@@ -388,22 +364,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 print(f"[{stamp()}] proposer abstained round {round_id + 1}: "
                       f"{proposal_batch.abstention.reason}", flush=True)
                 candidates = ()
-                journal = None
             else:
-                proposals_meta = [
-                    {
-                        "instruction": prop.instruction,
-                        "evidence_refs": list(prop.evidence_refs),
-                    }
-                    for prop in proposal_batch.proposals
-                ]
-                journal = _InflightJournal(
-                    ctx.run_dir / INFLIGHT_NAME,
-                    meta={
-                        "round_id": round_id,
-                        "parent_sha": parent_sha,
-                        "proposals": proposals_meta,
-                    })
                 try:
                     candidates = ctx.execution_backend.run_candidates(
                         CandidateBatchRequest(
@@ -415,15 +376,14 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                                 )
                             ),
                         ),
-                        journal=journal,
                     )
                 except InfraRoundError as exc:
-                    # The round is not consumed: inflight_round.json stays on
+                    # The round is not consumed: inflight.json stays on
                     # disk so --continue can resume; exit for human recovery.
                     print(f"[{stamp()}] {exc}", flush=True)
                     print(f"[{stamp()}] round {round_id + 1} not recorded; "
                           "fix the infrastructure issue and re-run with "
-                          "--continue (or delete inflight_round.json to "
+                          "--continue (or delete inflight.json to "
                           "re-propose).", flush=True)
                     return _summary(ctx, run_dir_path)
         candidates = _finalize_candidates(ctx, tuple(candidates))
@@ -475,8 +435,8 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             telemetry=ctx.telemetry.snapshot(persist=True),
         )
         ctx.store.append_round(round_result)
-        if journal is not None:
-            journal.clear()
+        if hasattr(ctx.execution_backend, "clear_inflight"):
+            ctx.execution_backend.clear_inflight()
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
         parent_sha = round_result.next_sha
 
@@ -516,7 +476,7 @@ def _build_context(
 ) -> RunContext:
     """Construct the run's fixed fixtures: runtime, executor agent, workspace,
     store, and telemetry. The proposer runs as a subprocess
-    (simpleloop.proposer_lane_worker), not as an in-context agent."""
+    (simpleloop.scheduling.worker), not as an in-context agent."""
     telemetry = RunTelemetry(run_dir_path, resume=resume)
     sandbox = ApptainerSandbox()
     sandbox_spec = _executor_sandbox_spec(cfg)
@@ -734,11 +694,19 @@ def _run_self_review_round(ctx: RunContext, round_id: int) -> str:
 
     candidate_sha = viable = adopted = None
     if decision == "CHANGE" and payload.get("self_change"):
+        viability_runner = None
+        if hasattr(ctx.execution_backend, "run_viability"):
+            viability_runner = lambda candidate, run_dir: check_viability(
+                candidate,
+                run_dir,
+                execute=ctx.execution_backend.run_viability,
+            )
         tr = ctx.self_repo.transition(
             agent=_get_self_executor(ctx),
             self_change=payload["self_change"],
             run_dir=ctx.run_dir,
-            label=f"self-exec r{round_id}")
+            label=f"self-exec r{round_id}",
+            viability=viability_runner)
         candidate_sha, viable, adopted = (
             tr.candidate_self_sha, tr.viable, tr.adopted)
         if tr.adopted:
@@ -887,23 +855,6 @@ def _resume_chain(history: list[dict],
 
 def stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _load_inflight(run_dir: Path) -> dict | None:
-    """Read run_dir/inflight_round.json, or None when no in-flight round is
-    persisted. A corrupt/empty file is treated as absent so a half-written
-    atomic file never blocks a resume."""
-    path = run_dir / INFLIGHT_NAME
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and "round_id" in data:
-            return data
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[{stamp()}] warning: inflight_round.json unreadable ({exc}); "
-              "ignoring", flush=True)
-    return None
 
 
 def _load_proposals(proposals: str | Path | list[str] | None) -> list[str] | None:

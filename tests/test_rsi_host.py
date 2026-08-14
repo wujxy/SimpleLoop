@@ -1,6 +1,6 @@
-"""S3c.2 Host tests: the self-review result reader, the loop's self-review round
-helper (_run_self_review_round), and the --continue resume fix that accounts for
-self-review rounds. All deterministic (no model, no subprocess).
+"""S3c.2 Host tests: self-review transition and resume behavior.
+
+All deterministic (no model, no subprocess).
 """
 from __future__ import annotations
 
@@ -8,57 +8,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
-from simpleloop.execution.proposer_lanes import read_self_review_result
 from simpleloop.loop import _run_self_review_round, _starting_state
 from simpleloop.self_repo import SelfRepo, ViabilityResult
-
-
-# --- read_self_review_result (the self-mode result.json reader) ------------
-
-def _valid_self_review_result() -> dict:
-    return {
-        "status": "COMPLETED", "mode": "self", "lane_id": 0, "round_id": 5,
-        "self_review": {
-            "contract_version": "proposer-cli-v0",
-            "incumbent_self_sha": "abc123",
-            "decision": "KEEP", "diagnosis": "d", "keep_reason": "r",
-            "next_review_after_rounds": 5, "self_change": None, "abstained": False,
-        },
-        "trace": {}, "telemetry": {},
-    }
-
-
-def _write_result(result_dir: Path, obj: dict) -> Path:
-    result_dir.mkdir(parents=True, exist_ok=True)
-    (result_dir / "result.json").write_text(json.dumps(obj), encoding="utf-8")
-    return result_dir
-
-
-def test_read_self_review_result_accepts_self_shape(tmp_path: Path):
-    res = read_self_review_result(_write_result(tmp_path / "r", _valid_self_review_result()))
-    assert res["mode"] == "self"
-    assert res["self_review"]["decision"] == "KEEP"
-
-
-def test_read_self_review_result_rejects_lane_shape(tmp_path: Path):
-    # a lane result (proposals list, no self_review) must be rejected
-    lane = {"status": "COMPLETED", "outcome": "submit", "proposals": []}
-    with pytest.raises(ValueError):
-        read_self_review_result(_write_result(tmp_path / "r", lane))
-
-
-def test_read_self_review_result_rejects_wrong_mode(tmp_path: Path):
-    bad = _valid_self_review_result()
-    bad["mode"] = "task"
-    with pytest.raises(ValueError):
-        read_self_review_result(_write_result(tmp_path / "r", bad))
-
-
-def test_read_self_review_result_rejects_missing_file(tmp_path: Path):
-    with pytest.raises(ValueError):
-        read_self_review_result(tmp_path / "nope")
 
 
 # --- _run_self_review_round (the loop's self-review round helper) ----------

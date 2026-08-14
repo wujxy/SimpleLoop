@@ -181,7 +181,7 @@ def test_run_self_review_lane_result_shape(tmp_path: Path):
     _self_review_result_to_dict. Spans the worker → orchestrator seam without a
     live model, so it is deterministic."""
     from simpleloop.self_repo import SelfRepo
-    from simpleloop.proposer_lane_worker import (
+    from simpleloop.scheduling.handlers.proposer import (
         ProposerLaneDeps, ProposerLaneSpec, run_self_review_lane,
     )
 

@@ -75,6 +75,7 @@ def test_submit_renders_worker_resources_and_target(tmp_path):
     script = (tmp_path / "job.sh").read_text()
     assert "'/python path/python'" in script
     assert "simpleloop.scheduling.worker" in script
+    assert "export SIMPLELOOP_SCHEDULER=hepjob" in script
     submit = (tmp_path / "job.sub").read_text()
     assert "request_memory = 4096" in submit
     assert "request_cpus = 2" in submit

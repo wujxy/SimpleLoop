@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -111,8 +111,10 @@ class JobSupervisor:
             )
         else:
             if record.stage != request.stage or record.round_id != request.round_id:
-                journal.begin(
-                    request.stage, request.round_id, request.context, (),
+                raise ValueError(
+                    "persisted batch does not match requested stage/round: "
+                    f"{record.stage}/r{record.round_id} != "
+                    f"{request.stage}/r{request.round_id}"
                 )
             persisted_ids = {str(item.get("request_id")) for item in record.jobs}
             if persisted_ids != set(by_id):
@@ -153,7 +155,11 @@ class JobSupervisor:
                 if request_id in outcomes or runtime.state != "ready":
                     continue
                 job = by_id[request_id]
-                write_request(job.manifest_path, job.request)
+                attempt_request = replace(
+                    job.request,
+                    payload={**job.request.payload, "attempt": runtime.attempt},
+                )
+                write_request(job.manifest_path, attempt_request)
                 now = self.clock()
                 try:
                     runtime.handle = scheduler.submit(job)

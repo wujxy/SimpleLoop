@@ -19,6 +19,7 @@ from simpleloop.scheduling.envelope import (
     WorkerRequest,
     WorkerResult,
     WorkerStatus,
+    read_request,
     write_result,
 )
 from simpleloop.scheduling.supervisor import JobSupervisor
@@ -114,6 +115,24 @@ def test_held_job_retries_then_collects(tmp_path):
     assert scheduler.cancelled == [JobHandle("fake", "1")]
 
 
+def test_retry_manifest_carries_current_attempt(tmp_path):
+    scheduler = FakeScheduler(
+        states=[JobState.FAILED], complete_on_attempt=2,
+    )
+    attempts = []
+    original_submit = scheduler.submit
+
+    def submit(job):
+        attempts.append(read_request(job.manifest_path).payload["attempt"])
+        return original_submit(job)
+
+    scheduler.submit = submit
+
+    _run(tmp_path, scheduler, [_job(tmp_path)])
+
+    assert attempts == [1, 2]
+
+
 def test_unknown_query_does_not_consume_an_attempt(tmp_path):
     job = _job(tmp_path)
     scheduler = FakeScheduler(states=[JobState.UNKNOWN, JobState.RUNNING])
@@ -133,6 +152,70 @@ def test_unknown_query_does_not_consume_an_attempt(tmp_path):
 
     assert result.outcomes[0].result.result == {"ok": True}
     assert len(scheduler.submitted) == 1
+
+
+def test_disappeared_job_waits_for_grace_then_retries(tmp_path):
+    job = _job(tmp_path)
+    job = JobSpec(
+        job.request, job.manifest_path, job.result_path, job.stdout_path,
+        job.stderr_path, job.argv, RetryPolicy(2, 10, 2), job.resources,
+        job.workspace,
+    )
+    scheduler = FakeScheduler(
+        states=[JobState.LOST, JobState.LOST], complete_on_attempt=2,
+    )
+
+    result = _run(tmp_path, scheduler, [job])
+
+    assert result.completed[0].result.result == {"attempt": 2}
+    assert len(scheduler.submitted) == 2
+
+
+def test_running_timeout_cancels_and_retries(tmp_path):
+    job = _job(tmp_path)
+    job = JobSpec(
+        job.request, job.manifest_path, job.result_path, job.stdout_path,
+        job.stderr_path, job.argv, RetryPolicy(2, 1, 0), job.resources,
+        job.workspace,
+    )
+    scheduler = FakeScheduler(
+        states=[JobState.RUNNING, JobState.RUNNING], complete_on_attempt=2,
+    )
+
+    result = _run(tmp_path, scheduler, [job])
+
+    assert result.completed[0].result.result == {"attempt": 2}
+    assert scheduler.cancelled == [JobHandle("fake", "1")]
+
+
+def test_resume_inspects_persisted_remote_handle_without_submit(tmp_path):
+    job = _job(tmp_path)
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin("candidates", 1, {}, [{
+        "request_id": "r1-c0", "attempt": 1, "state": "running",
+        "handle": {"scheduler": "fake", "value": "remote-1"},
+        "submitted_at": 1.0, "running_since": 1.0,
+        "gone_since": None, "note": "",
+    }])
+    scheduler = FakeScheduler(states=[JobState.RUNNING])
+
+    def inspect(handles):
+        assert handles == (JobHandle("fake", "remote-1"),)
+        write_result(job.result_path, WorkerResult(
+            "candidate", "r1-c0", WorkerStatus.COMPLETED, {"resumed": True},
+        ))
+        return (JobObservation(handles[0], JobState.RUNNING),)
+
+    scheduler.inspect = inspect
+    result = JobSupervisor(
+        clock=Clock(), sleep=lambda _: None, poll_seconds=0,
+    ).run_batch(
+        JobBatchRequest("candidates", 1, {}, (job,), 1),
+        scheduler=scheduler, journal=journal,
+    )
+
+    assert result.completed[0].result.result == {"resumed": True}
+    assert scheduler.submitted == []
 
 
 def test_malformed_result_is_protocol_error_not_retry(tmp_path):
@@ -191,3 +274,31 @@ def test_supervisor_limits_parallel_submissions(tmp_path):
 
     assert len(result.outcomes) == 2
     assert len(scheduler.submitted) == 2
+
+
+def test_partial_success_is_returned_with_exhausted_failure(tmp_path):
+    first = _job(tmp_path, "r1-c0", attempts=1)
+    second = _job(tmp_path, "r1-c1", attempts=1)
+
+    class PartialScheduler(FakeScheduler):
+        def submit(self, job):
+            self.submitted.append(job)
+            handle = JobHandle(self.name, job.request.request_id)
+            if job.request.request_id == "r1-c0":
+                write_result(job.result_path, WorkerResult(
+                    "candidate", "r1-c0", WorkerStatus.COMPLETED, {"ok": True},
+                ))
+            return handle
+
+        def inspect(self, handles):
+            return tuple(JobObservation(handle, JobState.FAILED, "held")
+                         for handle in handles)
+
+    result = _run(
+        tmp_path, PartialScheduler(), (first, second), max_parallel=2,
+    )
+
+    assert len(result.completed) == 1
+    assert result.completed[0].job.request.request_id == "r1-c0"
+    assert len(result.failed) == 1
+    assert result.failed[0].infrastructure_error == "held"

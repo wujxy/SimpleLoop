@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from simpleloop import candidate_worker as worker_mod
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop.candidate import (
@@ -22,9 +21,6 @@ from simpleloop.candidate import (
 from proposer.memory import MemoryService
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.loop import RunContext
-from simpleloop.execution import proposer_lanes
-from simpleloop.execution.base import InfraRoundError
-from simpleloop.execution.local import LocalBackend
 from simpleloop.harness.store import Store, best_candidate
 from simpleloop.stages.proposer import Proposal, ProposalBatch, ProposerRequest
 from simpleloop.stages.selector import select_candidate
@@ -413,120 +409,6 @@ def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Pat
     )["sha"] == "best"
 
 
-def test_local_batch_uses_each_plan_parent_and_preserves_order(tmp_path: Path):
-    class FakeWorkspace:
-        def __init__(self):
-            self.added = []
-            self.removed = []
-
-        def create(self, spec):
-            self.added.append((spec.workspace_id, spec.revision))
-            path = tmp_path / spec.workspace_id
-            path.mkdir(exist_ok=True)
-            return SourceWorkspace(spec.workspace_id, path, spec.revision)
-
-        def remove(self, workspace):
-            self.removed.append(workspace.workspace_id)
-
-    workspace = FakeWorkspace()
-    seen = []
-
-    def candidate_runner(request):
-        seen.append(request)
-        return _typed([{
-            "candidate": request.candidate_id,
-            "parent_sha": request.parent_sha,
-            "proposal": request.proposal.instruction,
-            "sha": f"sha-{request.candidate_id}",
-            "status": "COMPLETED",
-            "metrics": {"SPEED_MS": 100.0 + request.candidate_id},
-            "gate_passed": True,
-            "eligible": True,
-        }])[0]
-
-    ctx = RunContext(
-        cfg={"max_workers": 1},
-        workspace=workspace,
-    )
-    plans = (
-        CandidatePlan(0, "parent-a", Proposal("p0")),
-        CandidatePlan(1, "parent-b", Proposal("p1")),
-    )
-
-    candidates = LocalBackend(
-        ctx, candidate_runner=candidate_runner,
-    ).run_candidates(CandidateBatchRequest(7, plans))
-
-    assert workspace.added == [
-        ("7-c0", "parent-a"), ("7-c1", "parent-b"),
-    ]
-    assert workspace.removed == ["7-c0", "7-c1"]
-    assert [request.parent_sha for request in seen] == [
-        "parent-a", "parent-b",
-    ]
-    assert [candidate.candidate_id for candidate in candidates] == [0, 1]
-
-
-def test_local_parallel_normalizes_each_runner_failure(tmp_path: Path, capsys):
-    class FakeWorkspace:
-        def create(self, spec):
-            path = tmp_path / spec.workspace_id
-            path.mkdir(exist_ok=True)
-            return SourceWorkspace(spec.workspace_id, path, spec.revision)
-
-        def remove(self, workspace):
-            pass
-
-    def fail_worker(request):
-        raise RuntimeError(f"worker {request.candidate_id} exploded")
-
-    candidates = LocalBackend(
-        RunContext(cfg={"max_workers": 2}, workspace=FakeWorkspace()),
-        candidate_runner=fail_worker,
-    ).run_candidates(CandidateBatchRequest(
-        3,
-        (
-            CandidatePlan(0, "parent", Proposal("p0")),
-            CandidatePlan(1, "parent", Proposal("p1")),
-        ),
-    ))
-
-    assert [candidate.status for candidate in candidates] == [
-        CandidateStatus.WORKER_FAILED, CandidateStatus.WORKER_FAILED,
-    ]
-    out = capsys.readouterr().out
-    assert "candidate r3-c0 worker failed: worker 0 exploded" in out
-    assert "candidate r3-c1 worker failed: worker 1 exploded" in out
-
-
-def test_local_serial_normalizes_runner_failure(tmp_path: Path, capsys):
-    class FakeWorkspace:
-        def create(self, spec):
-            path = tmp_path / spec.workspace_id
-            path.mkdir(exist_ok=True)
-            return SourceWorkspace(spec.workspace_id, path, spec.revision)
-
-        def remove(self, workspace):
-            pass
-
-    def fail_worker(request):
-        raise RuntimeError("serial worker exploded")
-
-    candidates = LocalBackend(
-        RunContext(cfg={"max_workers": 1}, workspace=FakeWorkspace()),
-        candidate_runner=fail_worker,
-    ).run_candidates(CandidateBatchRequest(
-        4,
-        (CandidatePlan(0, "parent", Proposal("p0")),),
-    ))
-
-    assert candidates[0].status is CandidateStatus.WORKER_FAILED
-    assert candidates[0].parent_sha == "parent"
-    assert "candidate r4-c0 worker failed: serial worker exploded" in (
-        capsys.readouterr().out
-    )
-
-
 def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):
     agent = Agent(world=object())
     expected = {"proposals": []}
@@ -562,99 +444,6 @@ def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path:
             label="proposer",
             json_schema={"type": "object"},
         )
-
-
-def test_next_proposals_creates_lane_workspaces_and_passes_them(tmp_path):
-
-    class FakeWorkspace:
-        repo = tmp_path / "repo"
-        calls = []
-
-        def create_lane(self, lane_id, base_sha):
-            self.calls.append(("add", lane_id, base_sha))
-            path = tmp_path / f"lane-{lane_id}"
-            path.mkdir(exist_ok=True)
-            return SourceWorkspace(f"lane-{lane_id}", path, base_sha)
-
-        def remove_lane(self, workspace):
-            self.calls.append(("remove", int(workspace.workspace_id[5:])))
-
-    manifest_seen = {}
-
-    def fake_lane_runner(spec, result_dir):
-        # S2a: the lane_runner replaces the in-process proposer call. The
-        # manifest has already been written by run_proposer_lanes — verify it
-        # threads the round context into what the worker subprocess would read.
-        manifest_seen.update(json.loads(
-            (Path(result_dir) / "manifest.json").read_text()))
-        return proposer_lanes.LaneJob(
-            lane_id=0, result_dir=Path(result_dir), state="COMPLETED",
-            result={"status": "COMPLETED", "outcome": "submit",
-                    "proposals": [{"instruction": "try cache",
-                                   "research_target": {"question": "cache?"},
-                                   "evidence_refs": [],
-                                   "material_difference": None}],
-                    "reason_kind": None, "explanation": "",
-                    "abstain_reason": None, "trace": {}, "telemetry": {}})
-
-    ctx = RunContext(
-        cfg={
-            "goal": "faster", "editable_paths": ["src/**"],
-            "candidates_per_round": 1,
-        },
-        run_dir=tmp_path,
-        workspace=FakeWorkspace(),
-        store=None,
-    )
-
-    result = LocalBackend(ctx, lane_runner=fake_lane_runner).run_proposer_lanes(
-        ProposerRequest(1, "faster", "parent-sha"))
-
-    assert result.proposals[0].instruction == "try cache"
-    # candidates_per_round=1 -> proposal_slots=1; the workspace path + round
-    # are threaded into the worker via the manifest.
-    assert manifest_seen["proposal_slots"] == 1
-    assert manifest_seen["workspace_path"] == str(tmp_path / "lane-0")
-    assert manifest_seen["round_id"] == 1
-    # add_lane_workspace before spawn, remove_lane_workspace in the finally.
-    assert ctx.workspace.calls == [
-        ("add", 0, "parent-sha"),
-        ("remove", 0),
-    ]
-
-
-def test_next_proposals_removes_lane_workspaces_when_proposer_fails(tmp_path):
-    removed = []
-
-    class FakeWorkspace:
-        repo = tmp_path / "repo"
-
-        def create_lane(self, lane_id, base_sha):
-            path = tmp_path / f"lane-{lane_id}"
-            path.mkdir(exist_ok=True)
-            return SourceWorkspace(f"lane-{lane_id}", path, base_sha)
-
-        def remove_lane(self, workspace):
-            removed.append(int(workspace.workspace_id[5:]))
-
-    def failing_lane_runner(_spec, _result_dir):
-        # S2a: an infrastructure failure (worker killed, no _FINISHED) surfaces
-        # as InfraRoundError from the lane runner.
-        raise InfraRoundError("worker exited without _FINISHED")
-
-    ctx = RunContext(
-        cfg={"goal": "faster", "editable_paths": [],
-             "candidates_per_round": 1},
-        run_dir=tmp_path, workspace=FakeWorkspace(),
-        store=type("Store", (), {"history": lambda self: []})(),
-    )
-
-    with pytest.raises(InfraRoundError, match="without _FINISHED"):
-        LocalBackend(ctx, lane_runner=failing_lane_runner).run_proposer_lanes(
-            ProposerRequest(2, "faster", "parent"))
-
-    # The finally still tears down the lane workspace on infra failure.
-    assert removed == [0]
 
 
 def test_next_proposals_static_mode_returns_host_proposal(tmp_path):
@@ -789,16 +578,9 @@ def _run_loop_integration(
                 plan.proposal.instruction for plan in request.candidates
             ] == ["test another sparse gather"]
             assert request.candidates[0].parent_sha == "seed-sha"
-            # The inflight journal carries structured proposal metadata, NOT
-            # annotations. finding_id is no longer threaded through the
-            # execution layer — the proposer owns the finding lifecycle
-            # internally (commit_proposals), and the Kernel ledger carries no
-            # finding semantics.
-            assert "annotations" not in journal.meta
-            assert journal.meta["proposals"] == [
-                {"instruction": "test another sparse gather",
-                 "evidence_refs": []},
-            ]
+            # The backend now owns the single typed inflight journal; Loop
+            # passes only domain plans and no persistence object.
+            assert journal is None
             return fake_run_candidates()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,

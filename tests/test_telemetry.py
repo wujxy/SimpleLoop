@@ -314,7 +314,7 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
     loop_mod.run("config.yaml", run_dir)
 
     # Only the executor agent is wired in-process now (S2a.5a): the proposer
-    # runs as a subprocess, so its model usage arrives via usage.json and is
+    # runs as a subprocess, so its model usage arrives in the worker envelope and is
     # ingested by collect_lane_results, not an in-process observer.
     # Agents are now candidate-scoped and therefore not constructed in a
     # zero-round run.

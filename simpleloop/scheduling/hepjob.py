@@ -57,6 +57,7 @@ class HEPJobScheduler:
             "set -uo pipefail\n"
             f"{source}"
             "export SIMPLELOOP_JOB_ID=\"${1:-}\"\n"
+            "export SIMPLELOOP_SCHEDULER=hepjob\n"
             f"exec {shlex.join(job.argv)}\n",
             encoding="utf-8",
         )

@@ -15,12 +15,8 @@ from simpleloop.persistence.artifacts import (
     decode_candidate_result,
     encode_candidate_result,
 )
-from simpleloop.execution.proposer_lanes import (
-    read_lane_result,
-    read_self_review_result,
-)
 from simpleloop.harness.store import Store
-from simpleloop.loop import _InflightJournal, _load_inflight
+from simpleloop.persistence.journal import JobJournal
 from simpleloop.round import RoundResult
 from simpleloop.stages.gate import GateSpec
 from simpleloop.world import SourceWorkspace
@@ -37,16 +33,6 @@ SCHEMA = {
 
 def load(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
-
-
-def _write_result(tmp_path: Path, name: str) -> Path:
-    result_dir = tmp_path / name.removesuffix(".json")
-    result_dir.mkdir()
-    (result_dir / "result.json").write_text(
-        json.dumps(load(name), ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    return result_dir
 
 
 def test_candidate_result_shape(tmp_path: Path):
@@ -101,13 +87,17 @@ def test_candidate_result_shape(tmp_path: Path):
 
 
 def test_proposer_lane_result_shape(tmp_path: Path):
-    result_dir = _write_result(tmp_path, "proposer-lane-result.json")
-    assert read_lane_result(result_dir) == load("proposer-lane-result.json")
+    result = load("proposer-lane-result.json")
+    assert result["status"] == "COMPLETED"
+    assert isinstance(result["proposals"], list)
+    assert result["lane_id"] == 0
 
 
 def test_self_review_result_shape(tmp_path: Path):
-    result_dir = _write_result(tmp_path, "self-review-result.json")
-    assert read_self_review_result(result_dir) == load("self-review-result.json")
+    result = load("self-review-result.json")
+    assert result["status"] == "COMPLETED"
+    assert result["mode"] == "self"
+    assert isinstance(result["self_review"], dict)
 
 
 def test_history_round_shape(tmp_path: Path):
@@ -158,12 +148,20 @@ def test_abstained_round_projection(tmp_path: Path):
     }]
 
 
-def test_inflight_round_shape(tmp_path: Path):
+def test_inflight_journal_shape(tmp_path: Path):
     expected = load("inflight-round.json")
-    journal = _InflightJournal(
-        tmp_path / "inflight_round.json",
-        meta={key: value for key, value in expected.items() if key != "jobs"},
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin(
+        expected["stage"], expected["round_id"],
+        expected["context"], expected["jobs"],
     )
-    journal.save(expected["jobs"])
 
-    assert _load_inflight(tmp_path) == expected
+    record = journal.load()
+    assert record is not None
+    assert {
+        "schema": "simpleloop.inflight.v1",
+        "round_id": record.round_id,
+        "stage": record.stage,
+        "context": record.context,
+        "jobs": list(record.jobs),
+    } == expected

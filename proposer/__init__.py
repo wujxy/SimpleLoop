@@ -1,7 +1,7 @@
 """The proposer (Scientist): a standalone, relocatable research agent.
 
-This package is the "self" that SimpleLoop's Host runs as a subprocess
-(``python -m simpleloop.proposer_lane_worker``) and — in the RSI design — the
+This package is the "self" that the Host loads only inside a unified worker
+subprocess and — in the RSI design — the
 unit that gets snapshotted into a run-local self-repo and self-modified. It
 owns the Scientist control loop, its research tools, its model client, and its
 own research memory (findings/experiments/retrieval). The Host owns only the
@@ -21,4 +21,3 @@ into this package as ``runtime.py``, ``child_processes.py``, and
 # NOT a contract-version gate, so the self may evolve its own protocol freely as
 # long as it keeps functioning in the loop.
 CONTRACT_VERSION = "proposer-cli-v0"
-

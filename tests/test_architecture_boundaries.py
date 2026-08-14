@@ -22,7 +22,8 @@ def imported_modules(path: Path) -> set[str]:
 def test_host_pipeline_does_not_import_proposer_package():
     for relative in (
         "simpleloop/loop.py",
-        "simpleloop/execution/proposer_lanes.py",
+        "simpleloop/execution/backend.py",
+        "simpleloop/scheduling/worker.py",
         "simpleloop/stages/proposer.py",
     ):
         imports = imported_modules(ROOT / relative)
@@ -67,9 +68,8 @@ def test_current_round_pipeline_does_not_index_candidate_dicts():
 def test_candidate_execution_modules_do_not_import_loop():
     for relative in (
         "simpleloop/candidate.py",
-        "simpleloop/candidate_worker.py",
-        "simpleloop/execution/local.py",
-        "simpleloop/execution/hepjob.py",
+        "simpleloop/scheduling/handlers/candidate.py",
+        "simpleloop/execution/backend.py",
         "simpleloop/stages/executor.py",
         "simpleloop/stages/evaluator.py",
         "simpleloop/stages/gate.py",
@@ -106,6 +106,54 @@ def test_candidate_pipeline_has_no_context_or_config_bundle():
 def test_migrated_candidate_owners_are_removed():
     assert not (ROOT / "simpleloop/roles/executor.py").exists()
     assert not (ROOT / "simpleloop/harness/gate.py").exists()
+
+
+def test_legacy_scheduling_owners_are_removed():
+    for relative in (
+        "simpleloop/candidate_worker.py",
+        "simpleloop/proposer_lane_worker.py",
+        "simpleloop/execution/base.py",
+        "simpleloop/execution/local.py",
+        "simpleloop/execution/hepjob.py",
+        "simpleloop/execution/proposer_lanes.py",
+    ):
+        assert not (ROOT / relative).exists(), relative
+
+
+def test_phase4_has_one_result_protocol_and_one_inflight_journal():
+    production = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "simpleloop").rglob("*.py")
+    )
+    for legacy in (
+        "_FINISHED", "usage.json", "inflight_round.json",
+        "inflight_proposer.json",
+    ):
+        assert legacy not in production
+    assert production.count('PROTOCOL = "simpleloop.worker.v1"') == 1
+    assert production.count('SCHEMA = "simpleloop.inflight.v1"') == 1
+
+
+def test_condor_commands_are_owned_only_by_config_and_scheduler():
+    owners = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "simpleloop").rglob("*.py")
+        if any(command in path.read_text(encoding="utf-8") for command in (
+            "condor_submit", "condor_q", "condor_rm",
+        ))
+    }
+    assert owners <= {
+        "simpleloop/config.py", "simpleloop/scheduling/hepjob.py",
+    }
+
+
+def test_standalone_proposer_does_not_import_simpleloop():
+    for path in (ROOT / "proposer").rglob("*.py"):
+        imports = imported_modules(path)
+        assert not any(
+            name == "simpleloop" or name.startswith("simpleloop.")
+            for name in imports
+        ), path
 
 
 def test_business_modules_depend_only_on_world_contracts():

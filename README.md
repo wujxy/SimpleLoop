@@ -136,7 +136,12 @@ that factual history and can inspect the repository and diffs itself.
 | `stages/proposer.py` | typed proposer input/output boundary |
 | `stages/executor.py` | one proposal → implementation result |
 | `candidate.py` | shared typed candidate pipeline and result assembly |
-| `candidate_worker.py` | standalone transport/composition entrypoint |
+| `execution/backend.py` | domain requests ↔ generic worker jobs |
+| `scheduling/contracts.py` | scheduler/job input-output contracts |
+| `scheduling/supervisor.py` | submit, poll, timeout, retry, resume, collect |
+| `scheduling/local.py` / `hepjob.py` | thin Local/HTCondor scheduler adapters |
+| `scheduling/worker.py` | one worker-envelope dispatch entrypoint |
+| `scheduling/handlers/` | candidate and standalone proposer composition |
 | `stages/gate.py` | eval-command and configured gate normalization |
 | `stages/evaluator.py` | evaluator port, adapter, and baseline policy |
 | `harness/evals.py` | evaluator execution and `KEY=VALUE` metric parsing |
@@ -150,3 +155,12 @@ that factual history and can inspect the repository and diffs itself.
 Writable paths are enforced by the prepared container world. `PATHS` remains
 an always-pass compatibility result; final admission is the conjunction of the
 evaluation gates.
+
+World and scheduling are separate boundaries. The World layer prepares the
+filesystem and Apptainer process view; the Scheduler chooses Local or HTCondor
+placement; `JobSupervisor` alone owns polling, timeouts, retries, resume,
+collection, and workspace release. Both placements invoke the same worker CLI
+and exchange the same atomic envelope. Agent/model traffic may use the network;
+the prepared filesystem world remains the authority over what an agent can
+read or modify. The independently packaged `proposer` is imported lazily only
+inside its selected worker handler.
