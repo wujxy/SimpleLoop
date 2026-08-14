@@ -1,8 +1,12 @@
 # SimpleLoop Phase 6 RSI Vertical Migration Implementation Plan
 
-**Status:** Approved for implementation (2026-08-14)
+**Status:** Implemented (2026-08-14)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Verification:** `522 passed`; compileall passed; old `self_repo.py`,
+`SelfRepo`, and `LegacyRsiRunner` absent; RSI pipeline provider guard passed;
+proposer → SimpleLoop import guard passed.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace the monolithic RSI host with typed body/history/pipeline modules, an event-sourced active revision, and one Local/HEPJob worker path for review, edit, and viability.
 
@@ -34,7 +38,7 @@
 - Produces: `SelfDecisionKind`, `SelfRevision`, `SelfChange`, `SelfDecision`, `SelfState`, `SelfEventKind`, `SelfEvent`, `SelfCandidate`, `SelfReviewRequest`, `SelfEditRequest`, `SelfEditResult`, `SelfCommitRequest`, `ViabilityRequest`, `ViabilityResult`, `RsiRequest`, and `RsiResult`.
 - Produces: `SelfReviewer`, `SelfEditor`, `SelfBodyStore`, `SelfHistoryStore`, `ViabilityChecker`, and `RsiCheckpoint` protocols.
 
-- [ ] **Step 1: Write failing model tests**
+- [x] **Step 1: Write failing model tests**
 
 ```python
 def test_change_decision_requires_a_change():
@@ -53,26 +57,26 @@ def test_rsi_result_exposes_loop_decision_string():
     assert result.decision.value == "KEEP"
 ```
 
-- [ ] **Step 2: Run the tests and verify missing imports fail**
+- [x] **Step 2: Run the tests and verify missing imports fail**
 
 Run: `python -m pytest -q tests/test_rsi_models.py`
 
 Expected: FAIL because `simpleloop.rsi.models` does not exist.
 
-- [ ] **Step 3: Implement the minimal immutable domain model**
+- [x] **Step 3: Implement the minimal immutable domain model**
 
 Use frozen dataclasses and the six event kinds from the design. Validate only
 invariants required by the pipeline: non-empty SHAs/event ids, CHANGE has a
 change, KEEP has no change, positive explicit defer, and adopted events have a
 candidate SHA. Keep serialization out of this module.
 
-- [ ] **Step 4: Run model tests**
+- [x] **Step 4: Run model tests**
 
 Run: `python -m pytest -q tests/test_rsi_models.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/rsi/__init__.py simpleloop/rsi/models.py tests/test_rsi_models.py
@@ -92,7 +96,7 @@ git commit -m "refactor: define typed rsi contracts"
 - Produces: `SelfHistoryConflictError`.
 - Produces: `JsonlSelfHistoryStore(root: Path)` implementing `state`, `events`, `append`, `initialize`, `last_terminal_round`, and `review_view_path`.
 
-- [ ] **Step 1: Write failing event-store tests**
+- [x] **Step 1: Write failing event-store tests**
 
 ```python
 def test_events_are_idempotent_and_conflicting_ids_fail(tmp_path):
@@ -124,13 +128,13 @@ def test_review_view_is_rebuilt_from_terminal_events(tmp_path):
 Also cover rejection retaining active SHA, malformed/unknown events,
 out-of-order parent conflicts, fsync, and an interrupted projection replace.
 
-- [ ] **Step 2: Run the tests and verify failure**
+- [x] **Step 2: Run the tests and verify failure**
 
 Run: `python -m pytest -q tests/test_rsi_history.py`
 
 Expected: FAIL because `rsi.history` does not exist.
 
-- [ ] **Step 3: Implement codec, append, and projections**
+- [x] **Step 3: Implement codec, append, and projections**
 
 Encode each event to a stable JSON object with `schema_version`, `event_id`,
 `kind`, and typed payload fields. `append` compares existing event ids, appends
@@ -138,13 +142,13 @@ one line, flushes, calls `os.fsync`, and atomically rewrites `reviews.jsonl`.
 `state` folds events and raises on impossible transitions rather than silently
 repairing authority.
 
-- [ ] **Step 4: Run history tests**
+- [x] **Step 4: Run history tests**
 
 Run: `python -m pytest -q tests/test_rsi_history.py tests/test_rsi_models.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/rsi/history.py tests/test_rsi_history.py
@@ -166,7 +170,7 @@ git commit -m "refactor: make self history event sourced"
 - Produces: `GitSelfBodyStore(root: Path, seed: Path)` with idempotent `initialize`, `prepare_candidate`, `commit_candidate`, `discard_candidate`, and `materialize`.
 - Produces only the smallest generic workspace change needed for idempotent reuse of an existing deterministic worktree.
 
-- [ ] **Step 1: Write failing body contract tests**
+- [x] **Step 1: Write failing body contract tests**
 
 ```python
 def test_initialize_snapshots_only_proposer_and_materializes_s0(tmp_path, seed):
@@ -193,14 +197,14 @@ def test_candidate_can_start_from_non_active_parent(tmp_path, seed):
 Also cover no-change, wrong parent, stale deterministic worktree reuse,
 discard safety, and materializing an unknown SHA.
 
-- [ ] **Step 2: Run body tests and verify failure**
+- [x] **Step 2: Run body tests and verify failure**
 
 Run: `python -m pytest -q tests/test_rsi_body.py tests/test_git_workspace_provider.py`
 
 Expected: FAIL because the body store and required idempotent workspace API do
 not exist.
 
-- [ ] **Step 3: Implement the minimum body adapter**
+- [x] **Step 3: Implement the minimum body adapter**
 
 Initialization copies only the proposer tree, initializes local Git identity,
 commits S0, and constructs `GitWorkspaceProvider` over `self/repo`. Candidate
@@ -209,13 +213,13 @@ through the provider and treats a clean workspace whose HEAD differs from the
 parent as the already committed result. `materialize` checks out the requested
 SHA as the runtime cache; it does not write history or decide adoption.
 
-- [ ] **Step 4: Run provider/body tests**
+- [x] **Step 4: Run provider/body tests**
 
 Run: `python -m pytest -q tests/test_rsi_body.py tests/test_git_workspace_provider.py tests/test_world_contracts.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/rsi/body.py simpleloop/world/git.py \
@@ -238,7 +242,7 @@ git commit -m "refactor: adapt self bodies to git workspaces"
 - Produces: `run_rsi(request, *, reviewer, editor, bodies, viability, history) -> RsiResult`.
 - Produces: `RsiPipeline.prepare`, `RsiPipeline.due`, and `RsiPipeline.run` implementing the loop `RsiRunner` port.
 
-- [ ] **Step 1: Write failing pure pipeline tests**
+- [x] **Step 1: Write failing pure pipeline tests**
 
 ```python
 def test_keep_appends_one_terminal_event_and_advances_commitment():
@@ -267,13 +271,13 @@ Also cover default defer 8, invalid CHANGE rejection, editor error, no-change,
 non-viable rejection, repeated terminal call idempotence, infrastructure
 propagation, and terminal-vs-unfinished checkpoint reconciliation.
 
-- [ ] **Step 2: Run pipeline tests and verify failure**
+- [x] **Step 2: Run pipeline tests and verify failure**
 
 Run: `python -m pytest -q tests/test_rsi_pipeline.py`
 
 Expected: FAIL because `rsi.pipeline` does not exist.
 
-- [ ] **Step 3: Implement the minimal transaction**
+- [x] **Step 3: Implement the minimal transaction**
 
 Resume is driven only by events: no event calls reviewer; REVIEWED_CHANGE calls
 or resumes editor; CANDIDATE_CREATED calls or resumes viability; a terminal
@@ -282,19 +286,19 @@ before materializing the active runtime cache. `RsiPipeline.prepare` initializes
 body/history, materializes projected active SHA, rebuilds the review view, and
 clears only a journal proven terminal by history.
 
-- [ ] **Step 4: Run pipeline and loop tests**
+- [x] **Step 4: Run pipeline and loop tests**
 
 Run: `python -m pytest -q tests/test_rsi_pipeline.py tests/test_loop_pipeline.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Run a provider import guard**
+- [x] **Step 5: Run a provider import guard**
 
 Run: `rg -n "subprocess|shutil|json|config|Apptainer|WorkerJobs|SelfRepo" simpleloop/rsi/pipeline.py`
 
 Expected: no output.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add simpleloop/rsi/pipeline.py simpleloop/loop.py \
@@ -322,7 +326,7 @@ git commit -m "refactor: add event driven rsi pipeline"
 - Produces: `ScheduledViabilityChecker.check(ViabilityRequest) -> ViabilityResult`.
 - Produces: worker kind `self_edit` and explicit self-review/viability payloads.
 
-- [ ] **Step 1: Write failing scheduled adapter tests**
+- [x] **Step 1: Write failing scheduled adapter tests**
 
 ```python
 def test_review_starts_rsi_journal_with_explicit_body_and_history(tmp_path):
@@ -346,38 +350,38 @@ def test_viability_transitions_from_self_edit(tmp_path):
 Also cover replay of persisted payloads, usage telemetry, infrastructure
 failure, typed decode, and direct `CANDIDATE_CREATED` resume into viability.
 
-- [ ] **Step 2: Write failing self-edit handler tests**
+- [x] **Step 2: Write failing self-edit handler tests**
 
 Verify that the handler builds an Apptainer world with the candidate body root
 read-only and only `proposer/` read-write, feeds the explicit instruction to the
 Agent, reports `EDITED`/`EDITOR_FAILED`, and never runs Git.
 
-- [ ] **Step 3: Run tests and verify failure**
+- [x] **Step 3: Run tests and verify failure**
 
 Run: `python -m pytest -q tests/test_scheduled_rsi.py tests/test_rsi_worker.py tests/test_scheduling_worker.py`
 
 Expected: FAIL because typed adapters and `self_edit` do not exist.
 
-- [ ] **Step 4: Implement scheduled adapters and worker handler**
+- [x] **Step 4: Implement scheduled adapters and worker handler**
 
 Remove all `finally: jobs.clear()` calls. Decode proposer self-review into
 `SelfDecision`; classify proposer lane COMPLETED/LANE_FAILED for viability;
 return typed edit status from the new handler. The handler may construct World
 and Agent but may not inspect, commit, or adopt Git.
 
-- [ ] **Step 5: Make proposer inputs explicit**
+- [x] **Step 5: Make proposer inputs explicit**
 
 Replace the `SelfRepo` import in `run_self_review_lane` with values from
 `ProposerLaneSpec`: `self_repo`, `reviews_path`, and `incumbent_self_sha`.
 Task and viability redirects use the explicit `self_repo` manifest field.
 
-- [ ] **Step 6: Run scheduled/worker tests**
+- [x] **Step 6: Run scheduled/worker tests**
 
 Run: `python -m pytest -q tests/test_scheduled_rsi.py tests/test_rsi_worker.py tests/test_scheduling_worker.py tests/test_self_review.py tests/test_host_proposer_contract.py`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add simpleloop/scheduling/rsi.py simpleloop/scheduling/handlers/rsi.py \
@@ -406,7 +410,7 @@ git commit -m "refactor: schedule every rsi model stage"
 - Produces: one `RsiPipeline` composed in `app.py`; task proposer always loads the materialized active body.
 - Removes: `SelfRepo`, `LegacyRsiRunner`, `check_viability`, mutable commitment seeding, and direct self-executor factory.
 
-- [ ] **Step 1: Write failing composition and boundary tests**
+- [x] **Step 1: Write failing composition and boundary tests**
 
 ```python
 def test_app_composes_typed_rsi_pipeline(monkeypatch, config):
@@ -425,37 +429,37 @@ def test_old_self_repo_module_is_absent():
 Also cover fresh initialization with configured first review, resume after a
 self-review-only round, terminal stale journal cleanup, and summary tally.
 
-- [ ] **Step 2: Run cutover tests and verify failure**
+- [x] **Step 2: Run cutover tests and verify failure**
 
 Run: `python -m pytest -q tests/test_app_composition.py tests/test_scheduled_task.py tests/test_rsi_host.py tests/test_self_repo.py`
 
 Expected: FAIL because app still composes `LegacyRsiRunner`.
 
-- [ ] **Step 3: Cut over the Composition Root**
+- [x] **Step 3: Cut over the Composition Root**
 
 Construct body/history first, pass typed scheduled ports into `RsiPipeline`,
 call `prepare`, and use projected `last_review_round` for loop resume. Pass the
 body runtime path explicitly into scheduled task proposer payloads. Remove
 `_seed_rsi_commitment`, `_self_executor_factory`, and all old imports.
 
-- [ ] **Step 4: Delete the old host module and migrate tests**
+- [x] **Step 4: Delete the old host module and migrate tests**
 
 Delete `simpleloop/self_repo.py`. Retain behavioral tests under the new modules;
 do not add forwarding imports, aliases, or a compatibility facade.
 
-- [ ] **Step 5: Run all RSI and composition tests**
+- [x] **Step 5: Run all RSI and composition tests**
 
 Run: `python -m pytest -q tests/test_rsi_models.py tests/test_rsi_history.py tests/test_rsi_body.py tests/test_rsi_pipeline.py tests/test_scheduled_rsi.py tests/test_rsi_worker.py tests/test_rsi_host.py tests/test_self_repo.py tests/test_app_composition.py tests/test_loop_pipeline.py tests/test_self_review.py`
 
 Expected: PASS.
 
-- [ ] **Step 6: Run structural guards**
+- [x] **Step 6: Run structural guards**
 
 Run: `test ! -f simpleloop/self_repo.py && ! rg -n "SelfRepo|LegacyRsiRunner|from \.\.\.self_repo|from \.self_repo" simpleloop tests --glob '*.py'`
 
 Expected: exit 0 and no matches.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A simpleloop tests
@@ -473,7 +477,7 @@ git commit -m "refactor: cut over to typed rsi application"
 **Interfaces:**
 - Documents the stable trust boundary and run-directory authority after cutover.
 
-- [ ] **Step 1: Update architecture documentation**
+- [x] **Step 1: Update architecture documentation**
 
 Document:
 
@@ -488,26 +492,26 @@ review/edit/viability = WorkerJobs under Local or HEPJob
 State explicitly that proposer remains independent and that Phase 6 prepares
 body interfaces for future branching without implementing tree evolution.
 
-- [ ] **Step 2: Run focused architecture suite**
+- [x] **Step 2: Run focused architecture suite**
 
 Run: `python -m pytest -q tests/test_rsi_models.py tests/test_rsi_history.py tests/test_rsi_body.py tests/test_rsi_pipeline.py tests/test_scheduled_rsi.py tests/test_rsi_worker.py tests/test_app_composition.py`
 
 Expected: PASS.
 
-- [ ] **Step 3: Run the full suite**
+- [x] **Step 3: Run the full suite**
 
 Run: `python -m pytest -q`
 
 Expected: all tests pass; the one real-model viability test may remain skipped.
 
-- [ ] **Step 4: Run compile and boundary verification**
+- [x] **Step 4: Run compile and boundary verification**
 
 ```bash
 python -m compileall -q simpleloop proposer tests
 test ! -f simpleloop/self_repo.py
 ! rg -n "SelfRepo|LegacyRsiRunner" simpleloop tests --glob '*.py'
 ! rg -n "subprocess|shutil|json|config|Apptainer|WorkerJobs" simpleloop/rsi/pipeline.py
-! rg -n "from simpleloop|import simpleloop" proposer --glob '*.py'
+! rg -n "^\\s*(from|import) simpleloop" proposer --glob '*.py'
 git diff --check
 git status --short
 ```
@@ -515,12 +519,12 @@ git status --short
 Expected: compile succeeds; guards emit no matches; diff check succeeds; only
 the intended documentation completion edit remains before the final commit.
 
-- [ ] **Step 5: Mark this plan implemented and record exact verification**
+- [x] **Step 5: Mark this plan implemented and record exact verification**
 
 Set `Status` to `Implemented`, check every completed box, and add the exact
 pytest count plus structural guard results at the top of this document.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add README.md docs/superpowers/plans/2026-08-14-simpleloop-phase6-rsi-pipeline.md

@@ -8,6 +8,7 @@ from simpleloop.rsi.history import (
     reviewed_change_event,
 )
 from simpleloop.rsi.models import (
+    NoSelfChangeError,
     RsiRequest,
     SelfCandidate,
     SelfChange,
@@ -140,6 +141,7 @@ def test_change_edits_commits_checks_and_adopts(tmp_path):
 
     assert result.adopted is True
     assert values["history"].state().active_sha == "s1"
+    assert values["history"].state().next_review_round == 12
     assert [event.kind for event in values["history"].events()][-3:] == [
         SelfEventKind.REVIEWED_CHANGE,
         SelfEventKind.CANDIDATE_CREATED,
@@ -169,6 +171,21 @@ def test_editor_failure_is_a_terminal_rejection_without_viability(tmp_path):
     assert result.adopted is False
     assert "model unavailable" in result.detail
     assert values["bodies"].committed == []
+    assert values["viability"].calls == []
+
+
+def test_no_filesystem_change_is_a_terminal_rejection(tmp_path):
+    values = ports(tmp_path)
+
+    def no_change(workspace, request):
+        raise NoSelfChangeError("self editor made no changes")
+
+    values["bodies"].commit_candidate = no_change
+
+    result = run_rsi(RsiRequest(4, "goal"), **values)
+
+    assert result.adopted is False
+    assert "no changes" in result.detail
     assert values["viability"].calls == []
 
 
@@ -215,3 +232,24 @@ def test_pipeline_prepare_clears_only_terminal_stale_checkpoint(tmp_path):
 
     assert checkpoint.cleared == 1
     assert pipeline.due(9) is True
+
+
+def test_pipeline_prepare_keeps_unfinished_checkpoint(tmp_path):
+    values = ports(tmp_path)
+    values["history"].append(reviewed_change_event(4, "s0", change()))
+    record = type("Record", (), {"stage": "self_edit", "round_id": 4})()
+    checkpoint = Checkpoint(record)
+    pipeline = RsiPipeline(
+        goal="goal",
+        seed=tmp_path / "seed",
+        first_review_round=4,
+        checkpoint=checkpoint,
+        **{key: values[key] for key in (
+            "reviewer", "editor", "bodies", "viability", "history"
+        )},
+    )
+
+    pipeline.prepare()
+
+    assert checkpoint.cleared == 0
+    assert checkpoint.inflight() is record

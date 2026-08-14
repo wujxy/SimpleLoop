@@ -136,6 +136,9 @@ that factual history and can inspect the repository and diffs itself.
 | `app.py` | config/CLI composition root: constructs concrete ports once |
 | `loop.py` | typed Task/RSI state progression and commit ordering |
 | `round.py` | proposer → candidates → selection data flow |
+| `rsi/pipeline.py` | review → edit → viability → adopt/reject transaction |
+| `rsi/body.py` | run-local proposer revisions over Git workspaces |
+| `rsi/history.py` | authoritative self events and derived review view |
 | `stages/proposer.py` | typed proposer input/output boundary |
 | `stages/executor.py` | one proposal → implementation result |
 | `candidate.py` | shared typed candidate pipeline and result assembly |
@@ -156,11 +159,19 @@ that factual history and can inspect the repository and diffs itself.
 | `world/builder.py` | validated Executor/Evaluator filesystem worlds |
 | `reporting/plot.py` | 2×3 factual progress overview |
 
-The live path is `app → loop → round → proposer/candidate ports`. Local and
-HTCondor differ only at the scheduler adapter; the same Round, Loop, worker
-envelope, handlers, persistence, and RSI adapter are used by both. The
-standalone `proposer/` package remains behind its worker protocol and is not
-imported back into the Host pipeline.
+The live path is `app → loop → round/rsi → typed ports`. Local and HTCondor
+differ only at the scheduler adapter; the same Round, Loop, RSI pipeline,
+worker envelope, handlers, and persistence are used by both. Self review,
+self edit, and viability use one resumable worker journal.
+
+`self/history.jsonl` is the sole authority for the active self SHA and next
+review commitment. `self/reviews.jsonl` is a rebuildable read projection for
+the standalone proposer, and `self/repo` is the materialized run-local body.
+The body API accepts an explicit parent SHA, which permits a future tree policy
+without adding tree search or lineage machinery to the current linear loop.
+
+The standalone `proposer/` package remains behind its worker protocol and is
+not imported back into the Host pipeline.
 
 Writable paths are enforced by the prepared container world. `PATHS` remains
 an always-pass compatibility result; final admission is the conjunction of the
