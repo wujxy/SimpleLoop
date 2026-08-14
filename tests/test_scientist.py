@@ -160,7 +160,8 @@ def test_session_tail_respects_block_budget(tmp_path):
 
 class _FakeExp:
     def __init__(self, rnd, cand, sel, gp, status="completed",
-                 metrics=None, finding=None):
+                 metrics=None, finding=None, parent_sha="parent",
+                 candidate_sha="candidate", changed_paths=()):
         self.round = rnd
         self.candidate = cand
         self.selected = sel
@@ -168,6 +169,9 @@ class _FakeExp:
         self.status = status
         self.metrics = metrics or {}
         self.finding_id = finding
+        self.parent_sha = parent_sha
+        self.candidate_sha = candidate_sha
+        self.changed_paths = tuple(changed_paths)
         self.experiment_id = f"r{rnd}c{cand}"
 
 
@@ -203,7 +207,8 @@ def test_world_event_self_and_project_parts():
 def test_world_event_no_selection_keeps_incumbent():
     exps = [_FakeExp(0, 0, False, False)]
     we = _build_world_event(_FakeMem(exps), 1, "beefdead")
-    assert "no candidate cleared the gates" in we
+    assert "No candidate passed the gates" in we
+    assert "accepted revision is unchanged" in we
 
 
 # ---------------- system prompt notebook framing ----------------
