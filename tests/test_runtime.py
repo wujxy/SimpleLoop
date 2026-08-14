@@ -966,9 +966,7 @@ def test_run_preflights_before_agent_or_workspace(
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "", {"SPEED_MS": 100.0}
 
-        def run_candidates(self, *, proposals: list[dict], round_id: int,
-                           parent_sha: str, prior_metrics: dict,
-                           baseline_metrics: dict, journal=None) -> list[dict]:
+        def run_candidates(self, request, *, journal=None) -> list[dict]:
             return []
 
         def resume_round(self, jobs: list[dict], *, round_id: int,

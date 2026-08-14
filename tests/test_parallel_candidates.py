@@ -11,6 +11,8 @@ from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop.candidate import (
     CandidateArtifact,
+    CandidateBatchRequest,
+    CandidatePlan,
     CandidateResult,
     CandidateStatus,
     EvaluationResult,
@@ -19,7 +21,7 @@ from simpleloop.candidate import (
 )
 from proposer.memory import MemoryService
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
-from simpleloop.loop import RunContext, _run_candidates
+from simpleloop.loop import RunContext
 from simpleloop.execution import proposer_lanes
 from simpleloop.execution.base import InfraRoundError
 from simpleloop.execution.local import LocalBackend
@@ -410,7 +412,7 @@ def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Pat
     )["sha"] == "best"
 
 
-def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path: Path):
+def test_local_batch_uses_each_plan_parent_and_preserves_order(tmp_path: Path):
     class FakeWorkspace:
         def __init__(self):
             self.added = []
@@ -423,52 +425,46 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
         def remove_worktree(self, round_id):
             self.removed.append(round_id)
 
-        def diff(self, parent_sha, sha):
-            return f"diff {parent_sha}..{sha}"
-
-        def changed_paths(self, worktree):
-            return [f"{Path(worktree).name}.cc"]
-
-        def commit(self, worktree, round_id, paths):
-            return f"sha-{round_id}"
-
-    def fake_execute(self, request):
-        return ExecutionResult("EXECUTED")
-
-    def fake_run_eval(self, request):
-        cid = int(str(request.worktree).rsplit("c", 1)[-1])
-        return EvaluationResult(
-            "eval",
-            {"SPEED_MS": 100.0 + cid, "CORRECTNESS": True},
-            (0,),
-        )
-
-    monkeypatch.setattr(worker_mod.AgentExecutor, "execute", fake_execute)
-    monkeypatch.setattr(
-        worker_mod.HarnessEvaluator, "evaluate", fake_run_eval,
-    )
-
     workspace = FakeWorkspace()
-    proposals = ["p0", "p1", "p2"]
-    schema = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
-              "gates": [{"key": "CORRECTNESS"}]}
+    seen = []
+
+    def candidate_runner(request):
+        seen.append(request)
+        return _typed([{
+            "candidate": request.candidate_id,
+            "parent_sha": request.parent_sha,
+            "proposal": request.proposal.instruction,
+            "sha": f"sha-{request.candidate_id}",
+            "status": "COMPLETED",
+            "metrics": {"SPEED_MS": 100.0 + request.candidate_id},
+            "gate_passed": True,
+            "eligible": True,
+        }])[0]
+
     ctx = RunContext(
-        cfg={
-            "goal": "g", "editable_paths": ["src/**"],
-            "eval_commands": ["eval"], "max_workers": 1, "metrics": schema,
-        },
-        workspace=workspace, executor_agent=object(),
-        runtime=object(), baseline_metrics={"SPEED_MS": 200.0},
+        cfg={"max_workers": 1},
+        workspace=workspace,
     )
-    candidates = _run_candidates(ctx, proposals, 7, "parent")
+    plans = (
+        CandidatePlan(0, "parent-a", Proposal("p0")),
+        CandidatePlan(1, "parent-b", Proposal("p1")),
+    )
 
-    assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
-    assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
-    assert [candidate.proposal.instruction for candidate in candidates] == proposals
-    assert _select(candidates, schema).candidate_id == 0
+    candidates = LocalBackend(
+        ctx, candidate_runner=candidate_runner,
+    ).run_candidates(CandidateBatchRequest(7, plans))
+
+    assert workspace.added == [
+        ("7-c0", "parent-a"), ("7-c1", "parent-b"),
+    ]
+    assert workspace.removed == ["7-c0", "7-c1"]
+    assert [request.parent_sha for request in seen] == [
+        "parent-a", "parent-b",
+    ]
+    assert [candidate.candidate_id for candidate in candidates] == [0, 1]
 
 
-def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path, capsys):
+def test_local_pipeline_retains_eval_failure(tmp_path: Path, monkeypatch):
     class FakeWorkspace:
         def add_worktree(self, round_id, parent_sha):
             return tmp_path / str(round_id)
@@ -505,24 +501,37 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
         workspace=FakeWorkspace(), executor_agent=object(),
         runtime=object(),
     )
-    candidates = _run_candidates(ctx, ["p0"], 2, "parent")
+    candidates = LocalBackend(ctx).run_candidates(CandidateBatchRequest(
+        2,
+        (CandidatePlan(0, "parent", Proposal("p0")),),
+    ))
 
     assert candidates[0].status is CandidateStatus.EVAL_FAILED
     assert candidates[0].eligible is False
     assert "eval exploded" in candidates[0].evaluation.text
 
 
-def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
-    def fail_worker(_ctx, candidate_id, *_args, **_kwargs):
-        raise RuntimeError(f"worker {candidate_id} exploded")
+def test_local_parallel_normalizes_each_runner_failure(tmp_path: Path, capsys):
+    class FakeWorkspace:
+        def add_worktree(self, worktree_id, parent_sha):
+            return tmp_path / worktree_id
 
-    monkeypatch.setattr(loop_mod, "_run_one_candidate", fail_worker)
-    candidates = _run_candidates(
-        RunContext(cfg={"max_workers": 2}),
-        ["p0", "p1"],
+        def remove_worktree(self, worktree_id):
+            pass
+
+    def fail_worker(request):
+        raise RuntimeError(f"worker {request.candidate_id} exploded")
+
+    candidates = LocalBackend(
+        RunContext(cfg={"max_workers": 2}, workspace=FakeWorkspace()),
+        candidate_runner=fail_worker,
+    ).run_candidates(CandidateBatchRequest(
         3,
-        "parent",
-    )
+        (
+            CandidatePlan(0, "parent", Proposal("p0")),
+            CandidatePlan(1, "parent", Proposal("p1")),
+        ),
+    ))
 
     assert [candidate.status for candidate in candidates] == [
         CandidateStatus.WORKER_FAILED, CandidateStatus.WORKER_FAILED,
@@ -532,17 +541,24 @@ def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
     assert "candidate r3-c1 worker failed: worker 1 exploded" in out
 
 
-def test_run_candidates_normalizes_serial_worker_failure(monkeypatch, capsys):
-    monkeypatch.setattr(
-        loop_mod, "_run_one_candidate",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("serial worker exploded")
-        ),
-    )
+def test_local_serial_normalizes_runner_failure(tmp_path: Path, capsys):
+    class FakeWorkspace:
+        def add_worktree(self, worktree_id, parent_sha):
+            return tmp_path / worktree_id
 
-    candidates = _run_candidates(
-        RunContext(cfg={"max_workers": 1}), ["p0"], 4, "parent",
-    )
+        def remove_worktree(self, worktree_id):
+            pass
+
+    def fail_worker(request):
+        raise RuntimeError("serial worker exploded")
+
+    candidates = LocalBackend(
+        RunContext(cfg={"max_workers": 1}, workspace=FakeWorkspace()),
+        candidate_runner=fail_worker,
+    ).run_candidates(CandidateBatchRequest(
+        4,
+        (CandidatePlan(0, "parent", Proposal("p0")),),
+    ))
 
     assert candidates[0].status is CandidateStatus.WORKER_FAILED
     assert candidates[0].parent_sha == "parent"
@@ -803,9 +819,11 @@ def _run_loop_integration(
         def cleanup_proposer_orphans(self):
             pass
 
-        def run_candidates(self, *, proposals: list[str], round_id: int,
-                           parent_sha: str, journal=None) -> tuple[CandidateResult, ...]:
-            assert proposals == ["test another sparse gather"]
+        def run_candidates(self, request, *, journal=None) -> tuple[CandidateResult, ...]:
+            assert [
+                plan.proposal.instruction for plan in request.candidates
+            ] == ["test another sparse gather"]
+            assert request.candidates[0].parent_sha == "seed-sha"
             # The inflight journal carries structured proposal metadata, NOT
             # annotations. finding_id is no longer threaded through the
             # execution layer — the proposer owns the finding lifecycle
@@ -1014,9 +1032,7 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         def cleanup_proposer_orphans(self):
             pass
 
-        def run_candidates(self, *, proposals: list[str], round_id: int,
-                           parent_sha: str, journal=None,
-                           finding_ids=None) -> list[dict]:
+        def run_candidates(self, request, *, journal=None) -> list[dict]:
             return fail_if_executor_runs()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,

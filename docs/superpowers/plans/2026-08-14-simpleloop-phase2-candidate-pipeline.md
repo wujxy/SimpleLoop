@@ -625,7 +625,7 @@ git commit -m "refactor: make candidate worker a transport adapter"
 - Consumes: `CandidateBatchRequest`, configured candidate ports, and existing RoundJournal.
 - Produces: typed backend batch interface; Local serial/parallel execution with no `loop.py` import; HEPJob manifests projected from independently parented plans.
 
-- [ ] **Step 1: Write failing Local mixed-parent and cleanup tests**
+- [x] **Step 1: Write failing Local mixed-parent and cleanup tests**
 
 ```python
 def test_local_batch_uses_each_plan_parent_and_preserves_order(tmp_path, monkeypatch):
@@ -661,7 +661,7 @@ Define `FakeWorkspace` and `FakeContext` beside these tests as minimal records: 
 
 Update fake backends to accept `run_candidates(request, *, journal=None)`.
 
-- [ ] **Step 2: Run focused backend tests and verify signature failures**
+- [x] **Step 2: Run focused backend tests and verify signature failures**
 
 ```bash
 python -m pytest -q tests/test_parallel_candidates.py tests/test_hepjob_backend.py
@@ -669,7 +669,7 @@ python -m pytest -q tests/test_parallel_candidates.py tests/test_hepjob_backend.
 
 Expected: failures because current backends require `proposals`, `round_id`, and `parent_sha` keyword arguments.
 
-- [ ] **Step 3: Migrate all backend calls together**
+- [x] **Step 3: Migrate all backend calls together**
 
 Change `ExecutionBackend.run_candidates()` to the typed request. In `loop.py` construct:
 
@@ -701,7 +701,7 @@ _run_one_candidate
 _candidate_failure
 ```
 
-- [ ] **Step 4: Verify Local, HEPJob, runtime, and telemetry behavior**
+- [x] **Step 4: Verify Local, HEPJob, runtime, and telemetry behavior**
 
 ```bash
 python -m pytest -q tests/test_parallel_candidates.py tests/test_hepjob_backend.py tests/test_runtime.py tests/test_telemetry.py
@@ -709,7 +709,7 @@ python -m pytest -q tests/test_parallel_candidates.py tests/test_hepjob_backend.
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit backend migration**
+- [x] **Step 5: Commit backend migration**
 
 ```bash
 git add simpleloop/execution simpleloop/loop.py tests/test_parallel_candidates.py tests/test_hepjob_backend.py tests/test_runtime.py tests/test_telemetry.py

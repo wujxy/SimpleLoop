@@ -3,13 +3,9 @@ the proposer runs as a subprocess (``simpleloop.proposer_lane_worker``), the
 same worker HEPJob submits via condor — so a proposer crash no longer takes
 down the frontend and the two backends are symmetric.
 
-Candidate dispatch itself stays in loop._run_candidates (its serial and
-ThreadPool paths); this adapter only exists so loop.py can treat both backends
-uniformly. Candidate runs never persist in-flight state, so the journal is
-accepted and ignored; the proposer subprocess records its PID in
-inflight_proposer.json so cleanup_proposer_orphans can reap it after a crash.
-The deferred loop import avoids a module cycle (loop imports execution for the
-backend factory)."""
+Candidate runs never persist in-flight state, so the journal is accepted and
+ignored. The backend owns candidate worktree and thread lifecycles; candidate
+business semantics live in ``simpleloop.candidate.run_candidate_guarded``."""
 from __future__ import annotations
 
 import json
@@ -18,12 +14,29 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 from . import proposer_lanes as pl
 from .base import ExecutionBackend, InfraRoundError
-from ..candidate import CandidateResult
+from ..candidate import (
+    CandidateBatchRequest,
+    CandidateRequest,
+    CandidateResult,
+    candidate_failure_from_request,
+    run_candidate_guarded,
+)
+from ..persistence.candidate_trace import HandoffCandidateTrace
+from ..stages.artifacts import GitArtifactWorkspace
+from ..stages.evaluator import EvaluationConfig, HarnessEvaluator
+from ..stages.executor import AgentExecutor, ExecutorConfig
+from ..stages.gate import GateSpec
 from ..stages.proposer import ProposalBatch, ProposerRequest
+
+
+def stamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -41,19 +54,118 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 class LocalBackend(ExecutionBackend):
-    def __init__(self, ctx, *, lane_runner=None):
+    def __init__(self, ctx, *, lane_runner=None, candidate_runner=None):
         self.ctx = ctx
         # DI seam: tests inject a fake ``(spec, result_dir) -> LaneRunner`` to
         # avoid spawning a real subprocess. Production leaves this None so
         # run_proposer_lanes uses _popen_lane (the real worker subprocess).
         self._lane_runner = lane_runner
+        self._candidate_runner = candidate_runner or self._run_pipeline
 
-    def run_candidates(self, *, proposals: list[str], round_id: int,
-                       parent_sha: str, journal=None,
-                       ) -> tuple[CandidateResult, ...]:
-        from .. import loop as loop_mod
-        return loop_mod._run_candidates(
-            self.ctx, proposals, round_id, parent_sha,
+    def run_candidates(
+        self,
+        request: CandidateBatchRequest,
+        *,
+        journal=None,
+    ) -> tuple[CandidateResult, ...]:
+        plans = request.candidates
+        max_workers = min(
+            self.ctx.cfg.get("max_workers", 1),
+            max(1, len(plans)),
+        )
+        if max_workers <= 1 or len(plans) <= 1:
+            return tuple(
+                self._run_plan(request.round_id, plan)
+                for plan in plans
+            )
+        results: list[CandidateResult | None] = [None] * len(plans)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._run_plan, request.round_id, plan): index
+                for index, plan in enumerate(plans)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                results[index] = future.result()
+        return tuple(result for result in results if result is not None)
+
+    def _run_plan(self, round_id, plan) -> CandidateResult:
+        worktree_id = f"{round_id}-c{plan.candidate_id}"
+        worktree = None
+        request = None
+        try:
+            worktree = self.ctx.workspace.add_worktree(
+                worktree_id, plan.parent_sha,
+            )
+            request = CandidateRequest(
+                round_id,
+                plan.candidate_id,
+                plan.parent_sha,
+                plan.proposal,
+                Path(worktree),
+            )
+            return self._candidate_runner(request)
+        except Exception as exc:
+            if request is None:
+                request = CandidateRequest(
+                    round_id,
+                    plan.candidate_id,
+                    plan.parent_sha,
+                    plan.proposal,
+                    Path(worktree) if worktree else Path("."),
+                )
+            print(
+                f"[{stamp()}] candidate r{round_id}-c{plan.candidate_id} "
+                f"worker failed: {exc}",
+                flush=True,
+            )
+            return candidate_failure_from_request(
+                request,
+                f"candidate worker failed: {exc}",
+                gate_spec=self._candidate_gate_spec(),
+            )
+        finally:
+            if worktree is not None:
+                self.ctx.workspace.remove_worktree(worktree_id)
+
+    def _candidate_gate_spec(self) -> GateSpec:
+        schema = self.ctx.cfg.get("metrics") or {}
+        objective = schema.get("objective") or {}
+        return GateSpec(
+            str(objective.get("key") or "OBJECTIVE"),
+            tuple(
+                str(item["key"])
+                for item in (schema.get("gates") or ())
+                if item.get("key")
+            ),
+        )
+
+    def _run_pipeline(self, request: CandidateRequest) -> CandidateResult:
+        cfg = self.ctx.cfg
+        gate_spec = self._candidate_gate_spec()
+        return run_candidate_guarded(
+            request,
+            executor=AgentExecutor(
+                self.ctx.executor_agent,
+                ExecutorConfig(
+                    str(cfg.get("goal") or ""),
+                    gate_block=str(getattr(self.ctx, "gate_lines", "")),
+                    prompt_dir=getattr(self.ctx, "prompt_dir", None),
+                ),
+            ),
+            artifacts=GitArtifactWorkspace(self.ctx.workspace),
+            evaluator=HarnessEvaluator(
+                self.ctx.runtime,
+                EvaluationConfig(
+                    tuple(str(command) for command in cfg.get("eval_commands", ())),
+                    gate_spec.objective_key,
+                    gate_spec.gate_keys,
+                    int(cfg.get("eval_timeout_seconds", 600)),
+                    int(cfg.get("eval_output_cap_chars", 16000)),
+                ),
+            ),
+            gate_spec=gate_spec,
+            trace=HandoffCandidateTrace(getattr(self.ctx, "run_dir", None)),
         )
 
     def run_proposer_lanes(self, request: ProposerRequest) -> ProposalBatch:
@@ -61,7 +173,6 @@ class LocalBackend(ExecutionBackend):
         ``simpleloop.proposer_lane_worker`` HEPJob submits via condor — then
         collect its ``result.json``. The Host never imports or runs proposer
         code in-process; a proposer crash no longer takes down the frontend."""
-        from ..loop import stamp
         from ..proposer_lane_worker import ProposerLaneSpec
 
         ctx, cfg = self.ctx, self.ctx.cfg
@@ -100,7 +211,6 @@ class LocalBackend(ExecutionBackend):
         worker reads the incumbent self-repo itself via SelfRepo(deps.run_dir),
         so only the manifest + spawn + collect differ from run_proposer_lanes
         (the self-review reader/collector, not the lane ones)."""
-        from ..loop import stamp
         from ..proposer_lane_worker import ProposerLaneSpec
 
         ctx, cfg = self.ctx, self.ctx.cfg
@@ -141,8 +251,6 @@ class LocalBackend(ExecutionBackend):
         ``start_new_session=True`` puts the worker in its own process group so
         ``os.killpg`` reaches its ``claude``/apptainer grandchildren on timeout.
         """
-        from ..loop import stamp
-
         ctx, cfg = self.ctx, self.ctx.cfg
         manifest = str(Path(result_dir) / "manifest.json")
         out_path, err_path = Path(result_dir) / "job.out", Path(result_dir) / "job.err"
@@ -220,7 +328,6 @@ class LocalBackend(ExecutionBackend):
         cfg = self.ctx.cfg
         runtime = self.ctx.runtime
         workspace = self.ctx.workspace
-        from ..loop import stamp
         import subprocess
 
         print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]})...",

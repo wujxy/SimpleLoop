@@ -20,19 +20,48 @@ from types import SimpleNamespace
 
 import pytest
 
-from simpleloop.candidate import CandidateStatus
+from simpleloop.candidate import (
+    CandidateBatchRequest,
+    CandidatePlan,
+    CandidateStatus,
+)
 from simpleloop.execution import hepjob
 from simpleloop.execution.base import InfraRoundError
 from simpleloop.execution.hepjob import HEPJobBackend
 from simpleloop.loop import INFLIGHT_NAME, _InflightJournal
 from simpleloop.persistence.artifacts import ProtocolError
-from simpleloop.stages.proposer import ProposerRequest
+from simpleloop.stages.proposer import Proposal, ProposerRequest
 
 # condor JobStatus codes
 IDLE, RUNNING, HELD = 1, 2, 5
 
 def _fake_proposal(text="p") -> str:
     return text
+
+
+def _batch(proposals=None, *, round_id=0, parent_sha="p"):
+    values = proposals or [_fake_proposal()]
+    return CandidateBatchRequest(
+        round_id,
+        tuple(
+            CandidatePlan(index, parent_sha, Proposal(value))
+            for index, value in enumerate(values)
+        ),
+    )
+
+
+def test_prepare_projects_typed_plan_with_its_own_parent(tmp_path):
+    backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
+    plan = CandidatePlan(4, "branch-parent", Proposal("try branch"))
+
+    job = backend._prepare(plan, round_id=7)
+
+    manifest = json.loads(
+        (job.result_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["candidate_id"] == 4
+    assert manifest["parent_sha"] == "branch-parent"
+    assert manifest["proposal"] == "try branch"
 
 
 def _journal(tmp_path, round_id=0, parent_sha="p") -> _InflightJournal:
@@ -158,8 +187,9 @@ def _drive(tmp_path, monkeypatch, query_lines, *, proposals=None,
     if seed_fn:
         seed_fn(result_dir)
     cands = backend.run_candidates(
-        proposals=proposals or [_fake_proposal()],
-        round_id=0, parent_sha="p", journal=_journal(tmp_path))
+        _batch(proposals, round_id=0, parent_sha="p"),
+        journal=_journal(tmp_path),
+    )
     return backend, ctx, cands
 
 
@@ -171,7 +201,9 @@ def _job_json(tmp_path, candidate_id=0) -> dict:
 
 def test_read_result_requires_current_status_field(tmp_path):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
-    job = backend._prepare(0, _fake_proposal(), 0, "parent")
+    job = backend._prepare(
+        CandidatePlan(0, "parent", Proposal(_fake_proposal())), 0,
+    )
     (job.result_dir / "result.json").write_text(
         json.dumps({
             "candidate": 0,
@@ -188,7 +220,9 @@ def test_read_result_requires_current_status_field(tmp_path):
 
 def test_read_result_requires_current_gate_facts(tmp_path):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
-    job = backend._prepare(0, _fake_proposal(), 0, "parent")
+    job = backend._prepare(
+        CandidatePlan(0, "parent", Proposal(_fake_proposal())), 0,
+    )
     (job.result_dir / "result.json").write_text(
         json.dumps({
             "candidate": 0,
@@ -208,7 +242,9 @@ def test_candidate_manifest_carries_active_prompt_directory(tmp_path):
     ctx.prompt_dir = tmp_path / "self_improvement" / "prompts"
     backend = HEPJobBackend(ctx, _hep_cfg(tmp_path))
 
-    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    job = backend._prepare(
+        CandidatePlan(0, "p", Proposal(_fake_proposal())), 0,
+    )
     manifest = json.loads((job.result_dir / "manifest.json").read_text())
 
     assert manifest["prompt_dir"] == str(ctx.prompt_dir)
@@ -289,8 +325,9 @@ def test_held_exhausts_attempts(tmp_path, monkeypatch):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, max_attempts=1))
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
-            proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-            journal=_journal(tmp_path))
+            _batch(round_id=0, parent_sha="p"),
+            journal=_journal(tmp_path),
+        )
     assert (tmp_path / INFLIGHT_NAME).exists()  # retained for --continue
 
 
@@ -305,8 +342,9 @@ def test_running_timeout(tmp_path, monkeypatch):
                             run_timeout_seconds=-1))
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
-            proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-            journal=_journal(tmp_path))
+            _batch(round_id=0, parent_sha="p"),
+            journal=_journal(tmp_path),
+        )
 
 
 def test_lost_then_retry_then_success(tmp_path, monkeypatch):
@@ -329,8 +367,9 @@ def test_lost_then_retry_then_success(tmp_path, monkeypatch):
     ctx = _Ctx(tmp_path)
     backend = HEPJobBackend(ctx, _hep_cfg(tmp_path))
     cands = backend.run_candidates(
-        proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-        journal=_journal(tmp_path))
+        _batch(round_id=0, parent_sha="p"),
+        journal=_journal(tmp_path),
+    )
     assert cands[0].status is CandidateStatus.COMPLETED
     assert _job_json(tmp_path)["attempt"] == 2
 
@@ -350,8 +389,9 @@ def test_malformed_result_is_infra(tmp_path, monkeypatch):
     seed(result_dir)
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
-            proposals=[_fake_proposal()], round_id=0, parent_sha="p",
-            journal=_journal(tmp_path))
+            _batch(round_id=0, parent_sha="p"),
+            journal=_journal(tmp_path),
+        )
 
 
 def test_query_failure_does_not_kill_job(tmp_path, monkeypatch):
@@ -374,7 +414,9 @@ def test_resume_from_inflight(tmp_path, monkeypatch):
     backend._round_id = 0
     backend._parent_sha = "p"
     backend._journal = journal
-    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    job = backend._prepare(
+        CandidatePlan(0, "p", Proposal(_fake_proposal())), 0,
+    )
     backend._submit(job)
     backend._save([job])
     assert (tmp_path / INFLIGHT_NAME).exists()
@@ -419,7 +461,9 @@ def test_ihep_real_group_derived_from_accounting_group(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
-    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    job = backend._prepare(
+        CandidatePlan(0, "p", Proposal(_fake_proposal())), 0,
+    )
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     # accounting_group "JUNO.juno.default" -> +IHEP_RealGroup = "juno"
@@ -434,7 +478,9 @@ def test_explicit_ihep_group_overrides_derivation(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, ihep_group="customgrp"))
-    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    job = backend._prepare(
+        CandidatePlan(0, "p", Proposal(_fake_proposal())), 0,
+    )
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert '+IHEP_RealGroup = "customgrp"' in sub
@@ -447,7 +493,9 @@ def test_cpu_model_emits_requirements(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, cpu_model="zen4"))
-    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    job = backend._prepare(
+        CandidatePlan(0, "p", Proposal(_fake_proposal())), 0,
+    )
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert "Requirements = CpuFamily==25 && CpuModelNumber==17" in sub
@@ -460,7 +508,9 @@ def test_no_cpu_model_omits_requirements(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(hepjob.time, "sleep", lambda _s: None)
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
-    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    job = backend._prepare(
+        CandidatePlan(0, "p", Proposal(_fake_proposal())), 0,
+    )
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert "Requirements" not in sub
@@ -475,7 +525,9 @@ def test_machine_constraint_appended_to_requirements(tmp_path, monkeypatch):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(
         tmp_path, cpu_model="icelake",
         machine_constraint='Machine == "slot1@herdws001.ihep.ac.cn"'))
-    job = backend._prepare(0, _fake_proposal(), 0, "p")
+    job = backend._prepare(
+        CandidatePlan(0, "p", Proposal(_fake_proposal())), 0,
+    )
     backend._submit(job)
     sub = (job.result_dir / "job.sub").read_text()
     assert ('Requirements = CpuFamily==6 && CpuModelNumber==106 '
@@ -492,5 +544,10 @@ def test_collect_filters_infra_keeps_business(tmp_path, monkeypatch):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path, max_attempts=1))
     with pytest.raises(InfraRoundError):
         backend.run_candidates(
-            proposals=[_fake_proposal("p0"), _fake_proposal("p1")],
-            round_id=0, parent_sha="p", journal=_journal(tmp_path))
+            _batch(
+                [_fake_proposal("p0"), _fake_proposal("p1")],
+                round_id=0,
+                parent_sha="p",
+            ),
+            journal=_journal(tmp_path),
+        )

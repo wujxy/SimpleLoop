@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from simpleloop import loop as loop_mod
-from simpleloop.candidate_worker import CandidateSpec, candidate_failure
+from simpleloop.candidate import CandidateRequest, candidate_failure_from_request
 from simpleloop.loop import RunContext, _finalize_candidates
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
+from simpleloop.stages.proposer import Proposal
 from round_helpers import append_round
 
 
@@ -244,8 +246,8 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "baseline eval", {"SPEED_MS": 100.0}
 
-        def run_candidates(self, *, proposals: list[str], round_id: int,
-                           parent_sha: str, journal=None) -> list[dict]:
+        def run_candidates(self, request, *, journal=None) -> list[dict]:
+            parent_sha = request.candidates[0].parent_sha
             return [{
                 "candidate": 0,
                 "proposal": "test",
@@ -342,11 +344,15 @@ def test_finalize_candidates_ingests_usage_and_stamps_snapshots():
     ctx = RunContext(cfg={}, telemetry=tracker)
     candidates = tuple(
         replace(
-            candidate_failure(
-                candidate_id,
-                CandidateSpec(0, candidate_id, "parent", f"p{candidate_id}"),
+            candidate_failure_from_request(
+                CandidateRequest(
+                    0,
+                    candidate_id,
+                    "parent",
+                    Proposal(f"p{candidate_id}"),
+                    Path("."),
+                ),
                 "test",
-                "parent",
             ),
             usage=(usage,),
         )

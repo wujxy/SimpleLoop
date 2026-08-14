@@ -37,7 +37,7 @@ from pathlib import Path
 
 from .. import candidate_worker
 from .. import proposer_lane_worker
-from ..candidate import CandidateResult
+from ..candidate import CandidateBatchRequest, CandidatePlan, CandidateResult
 from ..candidate_worker import stamp
 from ..container import runtime as runtime_mod
 from . import proposer_lanes as pl
@@ -203,17 +203,18 @@ class HEPJobBackend(ExecutionBackend):
                 except Exception:
                     pass
 
-    def run_candidates(self, *, proposals: list[str], round_id: int,
-                       parent_sha: str,
-                       journal: RoundJournal | None = None,
-                       ) -> tuple[CandidateResult, ...]:
-        self._round_id = round_id
-        self._parent_sha = parent_sha
+    def run_candidates(
+        self,
+        request: CandidateBatchRequest,
+        *,
+        journal: RoundJournal | None = None,
+    ) -> tuple[CandidateResult, ...]:
+        self._round_id = request.round_id
         self._journal = journal
         self._ensure_job_env()
         jobs = []
-        for i, proposal in enumerate(proposals):
-            job = self._prepare(i, proposal, round_id, parent_sha)
+        for plan in request.candidates:
+            job = self._prepare(plan, request.round_id)
             self._submit(job)
             jobs.append(job)
         self._save(jobs)
@@ -351,23 +352,30 @@ class HEPJobBackend(ExecutionBackend):
         # Return success to indicate completion
         return {}
 
-    def _prepare(self, candidate_id: int, proposal: str,
-                 round_id: int, parent_sha: str) -> _Job:
-        worktree_id = f"{round_id}-c{candidate_id}"
+    def _prepare(self, plan: CandidatePlan, round_id: int) -> _Job:
+        worktree_id = f"{round_id}-c{plan.candidate_id}"
         result_dir = (self.run_dir / "rounds" / f"r{round_id}"
-                      / "candidates" / f"c{candidate_id}")
+                      / "candidates" / f"c{plan.candidate_id}")
         result_dir.mkdir(parents=True, exist_ok=True)
-        worktree = self.ctx.workspace.add_worktree(worktree_id, parent_sha)
-        job = _Job(candidate_id=candidate_id,
+        worktree = self.ctx.workspace.add_worktree(
+            worktree_id, plan.parent_sha,
+        )
+        job = _Job(candidate_id=plan.candidate_id,
                    worktree_id=worktree_id, result_dir=result_dir)
-        self._write_manifest(job, proposal, round_id, parent_sha, worktree)
+        self._write_manifest(job, plan, round_id, worktree)
         return job
 
-    def _write_manifest(self, job: _Job, proposal: str, round_id: int,
-                        parent_sha: str, worktree: Path) -> None:
+    def _write_manifest(
+        self,
+        job: _Job,
+        plan: CandidatePlan,
+        round_id: int,
+        worktree: Path,
+    ) -> None:
         spec = candidate_worker.CandidateSpec(
             round_id=round_id, candidate_id=job.candidate_id,
-            parent_sha=parent_sha, proposal=proposal,
+            parent_sha=plan.parent_sha,
+            proposal=plan.proposal.instruction,
             run_dir=str(self.run_dir),
             worktree_path=str(worktree), result_dir=str(job.result_dir),
             prompt_dir=str(getattr(self.ctx, "prompt_dir", None) or ""),
@@ -529,13 +537,14 @@ class HEPJobBackend(ExecutionBackend):
             job.note = note
             print(f"[{stamp()}] candidate {label}: {note}; retrying as "
                   f"attempt {job.attempt}", flush=True)
-            # Never reuse a possibly-dirty worktree: rebuild from parent_sha.
-            self.ctx.workspace.remove_worktree(job.worktree_id)
-            worktree = self.ctx.workspace.add_worktree(
-                job.worktree_id, self._parent_sha)
             spec = candidate_worker.CandidateSpec.from_dict(
                 json.loads((job.result_dir / "manifest.json").read_text(
                     encoding="utf-8")))
+            # Never reuse a possibly-dirty worktree. The manifest is the
+            # retry authority because one batch may contain different parents.
+            self.ctx.workspace.remove_worktree(job.worktree_id)
+            worktree = self.ctx.workspace.add_worktree(
+                job.worktree_id, spec.parent_sha)
             spec.attempt = job.attempt
             spec.worktree_path = str(worktree)
             (job.result_dir / "manifest.json").write_text(

@@ -16,7 +16,7 @@ own round-level harness state:
 """
 from __future__ import annotations
 
-from ..candidate import CandidateResult
+from ..candidate import CandidateBatchRequest, CandidateResult
 from ..stages.proposer import ProposalBatch, ProposerRequest
 
 
@@ -43,10 +43,12 @@ class RoundJournal:
 
 
 class ExecutionBackend:
-    def run_candidates(self, *, proposals: list[str], round_id: int,
-                       parent_sha: str,
-                       journal: "RoundJournal | None" = None,
-                       ) -> tuple[CandidateResult, ...]:
+    def run_candidates(
+        self,
+        request: CandidateBatchRequest,
+        *,
+        journal: "RoundJournal | None" = None,
+    ) -> tuple[CandidateResult, ...]:
         raise NotImplementedError
 
     def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:

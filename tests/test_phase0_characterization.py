@@ -4,8 +4,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from simpleloop.candidate import EvaluationResult, ExecutionResult
-from simpleloop.candidate_worker import CandidateDeps, CandidateSpec, run_candidate
+from simpleloop.candidate import (
+    CandidateArtifact,
+    CandidateRequest,
+    EvaluationResult,
+    ExecutionResult,
+    run_candidate,
+)
 from simpleloop.persistence.artifacts import (
     decode_candidate_result,
     encode_candidate_result,
@@ -17,7 +22,8 @@ from simpleloop.execution.proposer_lanes import (
 from simpleloop.harness.store import Store
 from simpleloop.loop import _InflightJournal, _load_inflight
 from simpleloop.round import RoundResult
-from simpleloop.stages.proposer import Abstention, ProposalBatch
+from simpleloop.stages.gate import GateSpec
+from simpleloop.stages.proposer import Abstention, Proposal, ProposalBatch
 from simpleloop.stages.selector import Selection
 
 
@@ -42,46 +48,51 @@ def _write_result(tmp_path: Path, name: str) -> Path:
     return result_dir
 
 
-def test_candidate_result_shape(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(
-        "simpleloop.candidate_worker.AgentExecutor.execute",
-        lambda *args, **kwargs: ExecutionResult("EXECUTED"),
-    )
-    monkeypatch.setattr(
-        "simpleloop.candidate_worker.HarnessEvaluator.evaluate",
-        lambda *args, **kwargs: EvaluationResult(
+def test_candidate_result_shape(tmp_path: Path):
+    class Executor:
+        def execute(self, request):
+            return ExecutionResult("EXECUTED")
+
+    class Artifacts:
+        def inspect(self, worktree):
+            return (Path("src/cache.cc"),)
+
+        def commit(self, request):
+            return CandidateArtifact(
+                request.parent_sha, "child", request.changed_paths,
+            )
+
+    class Evaluator:
+        def evaluate(self, request):
+            return EvaluationResult(
             "SPEED_MS=90\nCORRECTNESS=PASS",
             {"SPEED_MS": 90.0, "CORRECTNESS": True},
             (0,),
-        ),
-    )
-    class FakeWorkspace:
-        def changed_paths(self, worktree):
-            return ["src/cache.cc"]
+            )
 
-        def commit(self, worktree, round_id, paths):
-            return "child"
+    class Trace:
+        def record_execution(self, *args):
+            pass
 
-    deps = CandidateDeps(
-        cfg={
-            "goal": "make it faster",
-            "eval_commands": ["evaluate"],
-            "metrics": SCHEMA,
-        },
-        run_dir=tmp_path,
-        runtime=object(),
-        workspace=FakeWorkspace(),
-        executor_agent=object(),
-    )
-    spec = CandidateSpec(
+        def record_evaluation(self, *args):
+            pass
+
+    request = CandidateRequest(
         round_id=2,
         candidate_id=1,
         parent_sha="parent",
-        proposal="cache the transform",
-        worktree_path=str(tmp_path / "worktree"),
+        proposal=Proposal("cache the transform"),
+        worktree=tmp_path / "worktree",
     )
 
-    assert encode_candidate_result(run_candidate(deps, spec)) == load(
+    assert encode_candidate_result(run_candidate(
+        request,
+        executor=Executor(),
+        artifacts=Artifacts(),
+        evaluator=Evaluator(),
+        gate_spec=GateSpec("SPEED_MS", ("CORRECTNESS",)),
+        trace=Trace(),
+    )) == load(
         "candidate-result.json"
     )
 

@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import socket
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Callable
 
 from . import config as config_mod
@@ -26,10 +25,7 @@ from .candidate import (
     CandidateTrace,
     EvaluationResult,
     ExecutionResult,
-    GateDecision,
-    GateResult,
     candidate_failure_from_request,
-    run_candidate as run_candidate_pipeline,
     run_candidate_guarded,
 )
 from .container.runtime import ApptainerRuntime, world_mount_map
@@ -187,90 +183,6 @@ def build_ports(
     )
 
 
-# Temporary Phase 2 adapter for LocalBackend until Task 5 gives the backend
-# explicit ports. It delegates to the same shared pipeline and owns no
-# candidate status logic.
-@dataclass
-class CandidateDeps:
-    cfg: dict
-    run_dir: Path
-    runtime: ApptainerRuntime
-    workspace: Workspace
-    executor_agent: Agent
-    prompt_dir: Path | None = None
-    gate_lines: str = ""
-
-
-def build_deps(
-    cfg: dict,
-    run_dir: str | Path,
-    usage_observer=None,
-    prompt_dir: str | Path | None = None,
-) -> CandidateDeps:
-    ports = build_ports(cfg, run_dir, usage_observer, prompt_dir)
-    assert isinstance(ports.executor, AgentExecutor)
-    assert isinstance(ports.artifacts, GitArtifactWorkspace)
-    assert isinstance(ports.evaluator, HarnessEvaluator)
-    return CandidateDeps(
-        cfg=cfg,
-        run_dir=Path(run_dir),
-        runtime=ports.evaluator.runtime,
-        workspace=ports.artifacts.workspace,
-        executor_agent=ports.executor.agent,
-        prompt_dir=Path(prompt_dir) if prompt_dir else None,
-        gate_lines=ports.executor.config.gate_block,
-    )
-
-
-def _ports_from_deps(deps: CandidateDeps) -> CandidatePorts:
-    spec = _gate_spec(deps.cfg.get("metrics"))
-    return CandidatePorts(
-        executor=AgentExecutor(
-            deps.executor_agent,
-            ExecutorConfig(
-                goal=str(deps.cfg["goal"]),
-                gate_block=deps.gate_lines,
-                prompt_dir=deps.prompt_dir,
-            ),
-        ),
-        artifacts=GitArtifactWorkspace(deps.workspace),
-        evaluator=HarnessEvaluator(
-            deps.runtime,
-            _evaluation_config(deps.cfg),
-        ),
-        gate_spec=spec,
-        trace=HandoffCandidateTrace(deps.run_dir),
-    )
-
-
-def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> CandidateResult:
-    ports = _ports_from_deps(deps)
-    return run_candidate_pipeline(
-        spec.to_request(),
-        executor=ports.executor,
-        artifacts=ports.artifacts,
-        evaluator=ports.evaluator,
-        gate_spec=ports.gate_spec,
-        trace=ports.trace,
-    )
-
-
-def _eligible(
-    sha: str | None,
-    gate_passed: bool,
-    metrics: dict,
-    metrics_schema: dict | None,
-) -> bool:
-    if not sha or not gate_passed or not metrics_schema:
-        return False
-    objective = metrics.get(metrics_schema["objective"]["key"])
-    return bool(
-        isinstance(objective, (int, float))
-        and not isinstance(objective, bool)
-        and math.isfinite(objective)
-    )
-
-
 def _run_baseline_eval(
     ports: CandidatePorts,
     spec: CandidateSpec,
@@ -294,68 +206,6 @@ def _run_baseline_eval(
         status=CandidateStatus.BASELINE,
         execution=ExecutionResult("BASELINE"),
         artifact=CandidateArtifact(spec.parent_sha, spec.parent_sha),
-        evaluation=evaluation,
-        gate=gate,
-    )
-
-
-def candidate_failure(
-    candidate_id: int,
-    spec: CandidateSpec,
-    reason: str,
-    parent_sha: str,
-    sha: str | None = None,
-    eval_block: str = "",
-    eval_metrics: dict | None = None,
-    changed_paths: list[str] | None = None,
-    gate_results: dict | None = None,
-    metrics_schema: dict | None = None,
-    status: str = "WORKER_FAILED",
-) -> CandidateResult:
-    request = CandidateRequest(
-        spec.round_id,
-        candidate_id,
-        parent_sha,
-        Proposal(spec.proposal),
-        Path(spec.worktree_path),
-    )
-    result = candidate_failure_from_request(
-        request,
-        reason,
-        gate_spec=_gate_spec(metrics_schema),
-        status=CandidateStatus(status),
-    )
-    artifact = (
-        CandidateArtifact(
-            parent_sha,
-            sha,
-            tuple(PurePosixPath(path) for path in (changed_paths or ())),
-        )
-        if sha else None
-    )
-    evaluation = (
-        EvaluationResult(
-            eval_block,
-            eval_metrics or {},
-            error=eval_block or reason,
-        )
-        if sha and (eval_block or eval_metrics) else None
-    )
-    gate = result.gate
-    if gate_results is not None:
-        gate = GateDecision(
-            {
-                name: GateResult(
-                    row.get("passed"), str(row.get("detail") or ""),
-                )
-                for name, row in gate_results.items()
-            },
-            False,
-            False,
-        )
-    return replace(
-        result,
-        artifact=artifact,
         evaluation=evaluation,
         gate=gate,
     )

@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -14,8 +13,11 @@ from pathlib import Path
 import yaml
 
 from .roles.agent import Agent
-from . import candidate_worker
-from .candidate import CandidateResult
+from .candidate import (
+    CandidateBatchRequest,
+    CandidatePlan,
+    CandidateResult,
+)
 from . import config as config_mod
 from .execution import build_backend
 from .execution.base import InfraRoundError, RoundJournal
@@ -369,10 +371,6 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 candidates = ()
                 journal = None
             else:
-                proposal_instructions = [
-                    proposal.instruction
-                    for proposal in proposal_batch.proposals
-                ]
                 proposals_meta = [
                     {
                         "instruction": prop.instruction,
@@ -389,8 +387,17 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                     })
                 try:
                     candidates = ctx.execution_backend.run_candidates(
-                        proposals=proposal_instructions, round_id=round_id,
-                        parent_sha=parent_sha, journal=journal)
+                        CandidateBatchRequest(
+                            round_id,
+                            tuple(
+                                CandidatePlan(index, parent_sha, proposal)
+                                for index, proposal in enumerate(
+                                    proposal_batch.proposals
+                                )
+                            ),
+                        ),
+                        journal=journal,
+                    )
                 except InfraRoundError as exc:
                     # The round is not consumed: inflight_round.json stays on
                     # disk so --continue can resume; exit for human recovery.
@@ -802,110 +809,6 @@ def _finalize_candidates(
             telemetry=ctx.telemetry.snapshot(persist=True),
         ))
     return tuple(finalized)
-
-
-def _run_candidates(ctx: RunContext, proposals: list[str],
-                    round_id: int, parent_sha: str,
-                    ) -> tuple[CandidateResult, ...]:
-    """Run one generation's proposal strings, possibly concurrently."""
-    max_workers = min(ctx.cfg.get("max_workers", 1), max(1, len(proposals)))
-    if max_workers <= 1 or len(proposals) <= 1:
-        return tuple(
-            _run_candidate_guarded(
-                ctx, i, proposal, round_id, parent_sha)
-            for i, proposal in enumerate(proposals)
-        )
-    results: list[CandidateResult | None] = [None] * len(proposals)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_run_candidate_guarded, ctx, i, proposal, round_id,
-                        parent_sha): i
-            for i, proposal in enumerate(proposals)
-        }
-        for future in as_completed(futures):
-            i = futures[future]
-            try:
-                results[i] = future.result()
-            except Exception as exc:
-                # Last-resort guard: candidate failures stay local to the candidate.
-                print(f"[{stamp()}] candidate r{round_id}-c{i} worker failed: {exc}",
-                      flush=True)
-                results[i] = _candidate_failure(
-                    i, proposals[i], f"candidate worker failed: {exc}",
-                    parent_sha, round_id=round_id,
-                    metrics_schema=ctx.metrics_schema)
-    return tuple(r for r in results if r is not None)
-
-
-def _run_candidate_guarded(
-    ctx: RunContext,
-    candidate_id: int,
-    proposal: str,
-    round_id: int,
-    parent_sha: str,
-) -> CandidateResult:
-    try:
-        return _run_one_candidate(
-            ctx, candidate_id, proposal, round_id, parent_sha,
-        )
-    except Exception as exc:
-        print(
-            f"[{stamp()}] candidate r{round_id}-c{candidate_id} "
-            f"worker failed: {exc}",
-            flush=True,
-        )
-        return _candidate_failure(
-            candidate_id, proposal, f"candidate worker failed: {exc}",
-            parent_sha, round_id=round_id,
-            metrics_schema=ctx.metrics_schema,
-        )
-
-
-def _deps_from_ctx(ctx: RunContext) -> candidate_worker.CandidateDeps:
-    """Map the frontend's shared fixtures onto the worker dependency bundle;
-    the local backend runs the exact same business code as a remote worker."""
-    return candidate_worker.CandidateDeps(
-        cfg=ctx.cfg, run_dir=ctx.run_dir, runtime=ctx.runtime,
-        workspace=ctx.workspace, executor_agent=ctx.executor_agent,
-        prompt_dir=ctx.prompt_dir, gate_lines=ctx.gate_lines,
-    )
-
-
-def _run_one_candidate(ctx: RunContext, candidate_id: int,
-                       proposal: str,
-                       round_id: int, parent_sha: str) -> CandidateResult:
-    """LocalBackend's per-candidate path: the backend owns the worktree
-    lifecycle; the business logic lives in candidate_worker.run_candidate."""
-    worktree_id = f"{round_id}-c{candidate_id}"
-    worktree = None
-    try:
-        worktree = ctx.workspace.add_worktree(worktree_id, parent_sha)
-        spec = candidate_worker.CandidateSpec(
-            round_id=round_id, candidate_id=candidate_id,
-            parent_sha=parent_sha, proposal=proposal,
-            run_dir=str(ctx.run_dir),
-            worktree_path=str(worktree),
-            prompt_dir=str(ctx.prompt_dir or ""),
-        )
-        return candidate_worker.run_candidate(_deps_from_ctx(ctx), spec)
-    finally:
-        if worktree is not None:
-            ctx.workspace.remove_worktree(worktree_id)
-
-
-def _candidate_failure(candidate_id: int, proposal: str,
-                       reason: str, parent_sha: str, *, round_id: int = 0,
-                       sha: str | None = None,
-                       eval_block: str = "", eval_metrics: dict | None = None,
-                       changed_paths: list[str] | None = None,
-                       metrics_schema: dict | None = None) -> CandidateResult:
-    spec = candidate_worker.CandidateSpec(
-        round_id=round_id, candidate_id=candidate_id, parent_sha=parent_sha,
-        proposal=proposal)
-    return candidate_worker.candidate_failure(
-        candidate_id, spec, reason, parent_sha, sha=sha,
-        eval_block=eval_block, eval_metrics=eval_metrics,
-        changed_paths=changed_paths, metrics_schema=metrics_schema)
 
 
 def _print_round_performance(
