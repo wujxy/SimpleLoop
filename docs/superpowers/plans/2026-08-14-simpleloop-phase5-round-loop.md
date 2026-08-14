@@ -1,5 +1,9 @@
 # SimpleLoop Phase 5 Round + Loop Vertical Migration Implementation Plan
 
+**Status:** Implemented (2026-08-14)
+
+**Verification:** `517 passed, 1 skipped`; compileall passed; `RunContext` / `WorkerBackend` absent; `simpleloop/execution/` removed; Loop/Round provider guards passed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `RunContext` and the transitional `WorkerBackend` with directly callable typed Round/Loop pipelines, explicit scheduled domain adapters, and one `app.py` Composition Root.
@@ -32,7 +36,7 @@
 - Produces: `JobJournal.transition(expected_stage, stage, round_id, context, jobs) -> JournalRecord`.
 - Produces: `HistoryConflictError` and idempotent/fsynced `Store.append_round(result)`.
 
-- [ ] **Step 1: Write failing persistence tests**
+- [x] **Step 1: Write failing persistence tests**
 
 ```python
 def test_journal_transition_atomically_replaces_expected_stage(tmp_path):
@@ -56,26 +60,26 @@ def test_append_round_is_idempotent_and_conflicts_on_different_content(tmp_path)
         store.append_round(replace(result, parent_sha="different"))
 ```
 
-- [ ] **Step 2: Run tests and verify the missing APIs fail**
+- [x] **Step 2: Run tests and verify the missing APIs fail**
 
 Run: `python -m pytest -q tests/test_job_journal.py tests/test_history_store.py`
 
 Expected: FAIL because `transition` and `HistoryConflictError` do not exist.
 
-- [ ] **Step 3: Implement the minimal durable operations**
+- [x] **Step 3: Implement the minimal durable operations**
 
 `transition` must load exactly one active record, compare stage/round, and call
 the existing atomic `_write` once. `append_round` must project the typed result
 first, reject duplicate/conflicting round ids, append one JSON line, flush, and
 `os.fsync` the file descriptor.
 
-- [ ] **Step 4: Run persistence tests**
+- [x] **Step 4: Run persistence tests**
 
 Run: `python -m pytest -q tests/test_job_journal.py tests/test_history_store.py tests/test_phase0_characterization.py tests/test_views_and_parse.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/persistence/journal.py simpleloop/harness/store.py \
@@ -97,7 +101,7 @@ git commit -m "refactor: make round persistence crash idempotent"
 - Produces: `CandidateBatchResult`, `SelectionPolicy`, `RoundRequest`, `Proposer`, `CandidateRunner`, `RoundRecorder`, `run_round`.
 - Consumes: current `ProposerRequest`, `CandidatePlan`, `CandidateBatchRequest`, `select_candidate`, and `RoundResult`.
 
-- [ ] **Step 1: Write failing Round Pipeline tests**
+- [x] **Step 1: Write failing Round Pipeline tests**
 
 ```python
 def test_round_fans_proposals_into_candidates_and_selects_winner():
@@ -122,26 +126,26 @@ def test_round_abstention_records_and_skips_candidates():
 Also cover proposal recording before candidate execution, no improvement,
 static `require_improvement=False`, evidence refs, and batch telemetry.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `python -m pytest -q tests/test_round_pipeline.py`
 
 Expected: FAIL because `RoundRequest`/`run_round` do not exist.
 
-- [ ] **Step 3: Implement only the typed data flow**
+- [x] **Step 3: Implement only the typed data flow**
 
 `run_round` calls proposer once, records once, skips candidate runner for
 abstention, otherwise enumerates proposals into plans at the incumbent SHA,
 calls candidates once, calls the existing selector, and returns `RoundResult`.
 It performs no I/O, config lookup, printing, or exception normalization.
 
-- [ ] **Step 4: Run Round tests**
+- [x] **Step 4: Run Round tests**
 
 Run: `python -m pytest -q tests/test_round_pipeline.py tests/test_round_contract.py tests/test_parallel_candidates.py -k 'selector or round'`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/candidate.py simpleloop/round.py \
@@ -161,7 +165,7 @@ git commit -m "refactor: add explicit round pipeline"
 - Produces: `LoopState`, `LoopRequest`, `RsiResult`, `LoopResult`, `RoundRunner`, `RsiRunner`, `RoundHistory`, `CheckpointStore`, `LoopObserver`, `run_loop`.
 - Consumes: `RoundRequest`, `RoundResult`, `SelectionPolicy`, and `InfrastructureError`.
 
-- [ ] **Step 1: Write failing Loop Pipeline tests**
+- [x] **Step 1: Write failing Loop Pipeline tests**
 
 ```python
 def test_loop_commits_history_before_clearing_checkpoint():
@@ -192,26 +196,26 @@ def test_loop_infrastructure_failure_does_not_consume_or_clear_round():
 Also cover RSI due branch, KEEP/CHANGE tally, no-winner metrics retention,
 observer-after-clear, and non-infrastructure exception propagation.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `python -m pytest -q tests/test_loop_pipeline.py`
 
 Expected: FAIL because typed Loop APIs do not exist.
 
-- [ ] **Step 3: Replace monolithic loop with the minimal state machine**
+- [x] **Step 3: Replace monolithic loop with the minimal state machine**
 
 Keep only dataclasses, Protocols, no-op observer values if needed, and
 `run_loop`. The module may import domain contracts and `InfrastructureError`;
 it must not import config, YAML, OS, Workspace, Scheduler, reporting, telemetry,
 the proposer package, or concrete providers.
 
-- [ ] **Step 4: Run Loop tests**
+- [x] **Step 4: Run Loop tests**
 
 Run: `python -m pytest -q tests/test_loop_pipeline.py tests/test_round_pipeline.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/loop.py tests/test_loop_pipeline.py
@@ -234,7 +238,7 @@ git commit -m "refactor: reduce loop to typed state progression"
 - Produces: `BaselineRequest`, `BaselineResult`, `ScheduledProposer`, `ScheduledCandidates`, `ScheduledBaseline`.
 - Consumes: Scheduler, JobSupervisor, JobJournal, WorkspaceProvider, Worker envelope/domain codecs, telemetry sink.
 
-- [ ] **Step 1: Write failing generic WorkerJobs tests**
+- [x] **Step 1: Write failing generic WorkerJobs tests**
 
 ```python
 def test_worker_jobs_builds_one_shell_free_worker_job(tmp_path):
@@ -259,32 +263,32 @@ def test_worker_jobs_transitions_from_proposer_to_candidates(tmp_path):
     assert journal.load().stage == "candidates"
 ```
 
-- [ ] **Step 2: Run WorkerJobs tests and verify failure**
+- [x] **Step 2: Run WorkerJobs tests and verify failure**
 
 Run: `python -m pytest -q tests/test_worker_jobs.py`
 
 Expected: FAIL because `scheduling.jobs` does not exist.
 
-- [ ] **Step 3: Implement WorkerJobs without domain logic**
+- [x] **Step 3: Implement WorkerJobs without domain logic**
 
 Construct `WorkerRequest`/`JobSpec` from explicit values and delegate exactly
 once to `JobSupervisor`. Stage transition occurs before supervisor reconciliation;
 new stages use `journal.begin` through the supervisor.
 
-- [ ] **Step 4: Write failing task-adapter tests**
+- [x] **Step 4: Write failing task-adapter tests**
 
 Cover candidate workspace/payload/order, telemetry stamping, proposer replay
 from candidate context, active proposer resume, proposer-to-candidate atomic
 transition, abstention, baseline validation, and partial/all-infrastructure
 classification.
 
-- [ ] **Step 5: Implement scheduled task adapters and run tests**
+- [x] **Step 5: Implement scheduled task adapters and run tests**
 
 Run: `python -m pytest -q tests/test_worker_jobs.py tests/test_scheduled_task.py tests/test_job_supervisor.py tests/test_scheduling_worker.py`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add simpleloop/scheduling/jobs.py simpleloop/scheduling/task.py \
@@ -308,30 +312,30 @@ git commit -m "refactor: expose scheduled task domain adapters"
 - Produces: `ScheduledViability.check(payload) -> Mapping[str, object] | None`.
 - Produces: `LegacyRsiRunner.due(round_id)` and `.run(round_id) -> RsiResult`.
 
-- [ ] **Step 1: Write failing RSI adapter tests**
+- [x] **Step 1: Write failing RSI adapter tests**
 
 Assert declared worker kinds, resume of matching inflight context, usage
 ingestion, validity mapping, and no direct subprocess ownership.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `python -m pytest -q tests/test_scheduled_rsi.py tests/test_rsi_host.py`
 
 Expected: FAIL because the scheduled RSI adapters and `LegacyRsiRunner` do not exist.
 
-- [ ] **Step 3: Implement transport adapters and move current host transition**
+- [x] **Step 3: Implement transport adapters and move current host transition**
 
 Move `_DEFAULT_SELF_REVIEW_DEFER`, self-executor construction injection,
 review ledger update, commitment update, viability invocation, and adoption
 logging behind `LegacyRsiRunner`. Do not change `SelfRepo` formats or adoption.
 
-- [ ] **Step 4: Run RSI tests**
+- [x] **Step 4: Run RSI tests**
 
 Run: `python -m pytest -q tests/test_scheduled_rsi.py tests/test_rsi_host.py tests/test_self_repo.py tests/test_self_review.py`
 
 Expected: PASS with the existing live-model viability skip only.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/scheduling/rsi.py simpleloop/self_repo.py \
@@ -359,37 +363,37 @@ git commit -m "refactor: adapt landed rsi to loop port"
 - Produces: `build_summary(history, metrics_schema, baseline_metrics, baseline_sha, repo, run_dir) -> dict` and `write_summary(run_dir, summary) -> None`.
 - Produces: `AppRequest` and `app.run(request)`.
 
-- [ ] **Step 1: Write failing artifact and summary tests**
+- [x] **Step 1: Write failing artifact and summary tests**
 
 Assert proposal trace/handoff shapes and summary compatibility with current
 `summary.json` fields using explicit arguments rather than `RunContext`.
 
-- [ ] **Step 2: Implement focused artifact/summary modules**
+- [x] **Step 2: Implement focused artifact/summary modules**
 
 Move only the current behavior. Do not import `loop.py` or concrete scheduler
 providers in reporting/persistence modules.
 
-- [ ] **Step 3: Write failing app composition tests**
+- [x] **Step 3: Write failing app composition tests**
 
 Assert config/mode validation occurs before provider work, Local and HEPJob
 compose the same Round/Loop runners with different Scheduler only, resume state
 projection is unchanged, CLI passes an `AppRequest`, and public summary output
 is unchanged.
 
-- [ ] **Step 4: Implement app Composition Root**
+- [x] **Step 4: Implement app Composition Root**
 
 Move lock/config snapshot, proposal loading, provider construction, preflight,
 baseline/resume projection, static proposer, progress observer, and final
 summary from old loop. Compose all services with explicit constructors; do not
 create a context/service-locator object.
 
-- [ ] **Step 5: Run app/reporting tests**
+- [x] **Step 5: Run app/reporting tests**
 
 Run: `python -m pytest -q tests/test_app.py tests/test_static_mode.py tests/test_provenance_export_lock.py tests/test_round_artifacts.py tests/test_summary.py tests/test_cli.py`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add simpleloop/app.py simpleloop/cli.py \
@@ -416,7 +420,7 @@ git commit -m "refactor: compose application around typed pipelines"
 - Consumes: all Phase-5 replacements.
 - Produces: one live app/loop/round/scheduling path with guards against old owners.
 
-- [ ] **Step 1: Add failing architecture guards**
+- [x] **Step 1: Add failing architecture guards**
 
 ```python
 def test_phase5_removes_context_and_execution_bridge():
@@ -433,17 +437,17 @@ def test_loop_and_round_are_provider_free():
                        for item in imports)
 ```
 
-- [ ] **Step 2: Migrate remaining tests/imports and delete owners**
+- [x] **Step 2: Migrate remaining tests/imports and delete owners**
 
 Use `rg` to prove no production consumers, delete the execution package, and
 replace private helper tests with Round/Loop/App/adapter public behavior tests.
 
-- [ ] **Step 3: Update README pipeline and extension boundaries**
+- [x] **Step 3: Update README pipeline and extension boundaries**
 
 Document `app → loop → round → candidate`, explicit ports, scheduling adapters,
 and Phase-6 transitional RSI boundary.
 
-- [ ] **Step 4: Run architecture and full tests**
+- [x] **Step 4: Run architecture and full tests**
 
 Run:
 
@@ -456,7 +460,7 @@ git diff --check
 
 Expected: all pass with only the existing live-model skip.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -473,12 +477,12 @@ git commit -m "refactor: cut over to phase five application pipeline"
 **Interfaces:**
 - Produces: completed implementation and verification record.
 
-- [ ] **Step 1: Mark completed steps and add final evidence**
+- [x] **Step 1: Mark completed steps and add final evidence**
 
 Add `**Status:** Implemented (2026-08-14)` and the fresh pytest count only
 after all production commits and checks succeed.
 
-- [ ] **Step 2: Run final verification**
+- [x] **Step 2: Run final verification**
 
 ```bash
 python -m pytest -q
@@ -494,7 +498,7 @@ git status --short
 Expected: tests/compile pass, searches produce no output, execution directory
 is absent, diff check passes, and status contains only this plan update.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-08-14-simpleloop-phase5-round-loop.md
