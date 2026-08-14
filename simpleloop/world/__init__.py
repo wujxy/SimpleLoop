@@ -17,6 +17,14 @@ from .contracts import (
     WorkspaceProvider,
     WorkspaceSpec,
 )
+from .builder import (
+    World,
+    WorldBuilder,
+    WorldError,
+    WorldSpec,
+    evaluator_world_spec,
+    executor_world_spec,
+)
 
 __all__ = (
     "ChangeSet",
@@ -34,4 +42,10 @@ __all__ = (
     "WorkspaceError",
     "WorkspaceProvider",
     "WorkspaceSpec",
+    "World",
+    "WorldBuilder",
+    "WorldError",
+    "WorldSpec",
+    "evaluator_world_spec",
+    "executor_world_spec",
 )

@@ -244,7 +244,7 @@ git commit -m "refactor: extract apptainer sandbox"
 - Consumes: `SandboxProvider`, `SourceWorkspace`, `SandboxSpec`, `WorldSpec`, and typed mounts.
 - Produces: `WorldBuilder.build(...) -> World`, `executor_world_spec(...)`, and `evaluator_world_spec(...)`.
 
-- [ ] **Step 1: Write failing WorldBuilder safety tests**
+- [x] **Step 1: Write failing WorldBuilder safety tests**
 
 ```python
 def test_executor_world_mounts_base_ro_and_editable_overlay_rw(tmp_path):
@@ -271,23 +271,23 @@ def test_builder_rejects_writable_symlink_escape(tmp_path):
 
 Also test `..`, duplicate targets, evaluator workspace RW, external mounts, and missing sources.
 
-- [ ] **Step 2: Run tests and observe missing builder failure**
+- [x] **Step 2: Run tests and observe missing builder failure**
 
 Run: `python -m pytest -q tests/test_world_builder.py`
 
 Expected: fails because `WorldBuilder` is absent.
 
-- [ ] **Step 3: Implement validation and mount resolution**
+- [x] **Step 3: Implement validation and mount resolution**
 
 `WorldBuilder` must resolve the workspace base to `/work`, validate every relative writable path, create missing declared build directories beneath the workspace, reject symlink escapes, append external mounts, reject duplicate targets, and call `provider.bind()` once. Policy helpers accept resolved values, not a config dict.
 
-- [ ] **Step 4: Run builder and sandbox tests**
+- [x] **Step 4: Run builder and sandbox tests**
 
 Run: `python -m pytest -q tests/test_world_builder.py tests/test_apptainer_sandbox.py`
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/world tests/test_world_builder.py
