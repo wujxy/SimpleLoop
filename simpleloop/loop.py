@@ -23,6 +23,7 @@ from .execution import build_backend
 from .execution.base import InfraRoundError, RoundJournal
 from .harness import evals
 from .reporting import plot as plot_mod
+from .stages.evaluator import BaselineAcceptanceError
 from .stages.proposer import Proposal, ProposalBatch, ProposerRequest
 from .harness import views
 from .harness.handoff import write_handoff
@@ -34,10 +35,6 @@ from .container.runtime import ApptainerRuntime, MountMap, world_mount_map
 from .harness.workspace import Workspace
 from .processes import run_signal_handlers
 from .self_repo import SelfRepo
-
-
-class BaselineAcceptanceError(RuntimeError):
-    """Raised when the configured runtime cannot pass the task baseline."""
 
 
 class RunLockError(RuntimeError):

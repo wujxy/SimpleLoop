@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from proposer.prompts import load_semantic
-from simpleloop.roles import executor
+from simpleloop.stages.executor import (
+    AgentExecutor,
+    ExecutionRequest,
+    ExecutorConfig,
+)
+from simpleloop.stages.proposer import Proposal
 
 
 class CapturingAgent:
@@ -21,14 +26,6 @@ class CapturingAgent:
 
     def run_text(self, prompt, **_kwargs):
         self.prompt = prompt
-        return ""
-
-
-class EmptyWorkspace:
-    def changed_paths(self, _worktree):
-        return []
-
-    def diff(self, _parent, _sha):
         return ""
 
 
@@ -50,13 +47,14 @@ def test_executor_assembles_active_semantics_and_safety(tmp_path: Path):
     (prompt_dir / "executor.md").write_text("ACTIVE EXECUTOR", encoding="utf-8")
     agent = CapturingAgent()
 
-    result = executor.execute(
-        agent, proposal="replace lookup", goal="faster",
-        workspace=EmptyWorkspace(),
-        worktree=tmp_path, round_id=0, prompt_dir=prompt_dir,
+    result = AgentExecutor(
+        agent,
+        ExecutorConfig(goal="faster", prompt_dir=prompt_dir),
+    ).execute(
+        ExecutionRequest(0, 0, Proposal("replace lookup"), tmp_path),
     )
 
-    assert result.reason == "executor made no changes"
+    assert result.status == "EXECUTED"
     assert agent.prompt.startswith("ACTIVE EXECUTOR")
     assert "Direction to implement:\nreplace lookup" in agent.prompt
     # editable/frozen are no longer injected into the executor prompt — the

@@ -62,3 +62,47 @@ def test_current_round_pipeline_does_not_index_candidate_dicts():
             ):
                 violations.append((function.name, node.lineno, node.value.id))
     assert violations == []
+
+
+def test_candidate_execution_modules_do_not_import_loop():
+    for relative in (
+        "simpleloop/candidate.py",
+        "simpleloop/candidate_worker.py",
+        "simpleloop/execution/local.py",
+        "simpleloop/execution/hepjob.py",
+        "simpleloop/stages/executor.py",
+        "simpleloop/stages/evaluator.py",
+        "simpleloop/stages/gate.py",
+    ):
+        imports = imported_modules(ROOT / relative)
+        assert "loop" not in imports
+        assert "simpleloop.loop" not in imports
+
+
+def test_loop_does_not_define_candidate_execution_helpers():
+    tree = ast.parse(
+        (ROOT / "simpleloop/loop.py").read_text(encoding="utf-8")
+    )
+    names = {
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert not names.intersection({
+        "_run_candidates",
+        "_run_candidate_guarded",
+        "_deps_from_ctx",
+        "_run_one_candidate",
+        "_candidate_failure",
+    })
+
+
+def test_candidate_pipeline_has_no_context_or_config_bundle():
+    source = (ROOT / "simpleloop/candidate.py").read_text(encoding="utf-8")
+    assert "RunContext" not in source
+    assert "CandidateDeps" not in source
+    assert ".cfg" not in source
+
+
+def test_migrated_candidate_owners_are_removed():
+    assert not (ROOT / "simpleloop/roles/executor.py").exists()
+    assert not (ROOT / "simpleloop/harness/gate.py").exists()

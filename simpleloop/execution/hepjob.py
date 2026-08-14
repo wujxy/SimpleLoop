@@ -26,7 +26,6 @@ this backend only ever sees and produces the opaque jobs table.
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import shlex
@@ -43,8 +42,9 @@ from ..container import runtime as runtime_mod
 from . import proposer_lanes as pl
 from .base import ExecutionBackend, InfraRoundError, RoundJournal
 from ..config import _CPU_MODEL_REQUIREMENTS
-from ..loop import BaselineAcceptanceError
 from ..persistence.artifacts import ProtocolError, decode_candidate_result
+from ..stages.evaluator import BaselineAcceptanceError, validate_baseline
+from ..stages.gate import GateSpec
 from ..stages.proposer import ProposalBatch, ProposerRequest
 
 
@@ -121,9 +121,6 @@ class HEPJobBackend(ExecutionBackend):
 
         Returns (eval_block, metrics). Raises BaselineAcceptanceError on failure.
         """
-        from ..loop import BaselineAcceptanceError, stamp
-        from ..harness import evals
-
         baseline_job_id = "baseline"
         result_dir = self.run_dir / "baseline"
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -162,33 +159,25 @@ class HEPJobBackend(ExecutionBackend):
                 raise BaselineAcceptanceError(
                     f"baseline result.json is malformed: {exc}")
 
-            eval_block = result.evaluation.text if result.evaluation else ""
+            if result.evaluation is None:
+                raise BaselineAcceptanceError(
+                    "baseline result is missing its evaluation"
+                )
+            eval_block = result.evaluation.text
             metrics = dict(result.metrics)
 
-            # Validate baseline metrics
-            import math
             metrics_schema = self.ctx.cfg.get("metrics")
             if metrics_schema:
-                objective_key = metrics_schema["objective"]["key"]
-                objective_value = metrics.get(objective_key)
-                if (
-                    isinstance(objective_value, bool)
-                    or not isinstance(objective_value, (int, float))
-                    or not math.isfinite(objective_value)
-                ):
-                    raise BaselineAcceptanceError(
-                        f"baseline objective {objective_key} is missing or not finite:\n"
-                        f"baseline metrics: {metrics}")
-
-                failed_gates = [
-                    gate["key"]
-                    for gate in metrics_schema.get("gates", [])
-                    if metrics.get(gate["key"]) is not True
-                ]
-                if failed_gates:
-                    raise BaselineAcceptanceError(
-                        f"baseline gate(s) did not pass: {', '.join(failed_gates)}:\n"
-                        f"baseline metrics: {metrics}")
+                validate_baseline(
+                    result.evaluation,
+                    GateSpec(
+                        str(metrics_schema["objective"]["key"]),
+                        tuple(
+                            str(item["key"])
+                            for item in metrics_schema.get("gates", ())
+                        ),
+                    ),
+                )
 
             # Remove the baseline worktree
             self.ctx.workspace.remove_worktree(baseline_job_id)

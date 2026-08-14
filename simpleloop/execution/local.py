@@ -24,12 +24,19 @@ from ..candidate import (
     CandidateBatchRequest,
     CandidateRequest,
     CandidateResult,
+    EvaluationResult,
     candidate_failure_from_request,
     run_candidate_guarded,
 )
+from ..harness import evals
 from ..persistence.candidate_trace import HandoffCandidateTrace
 from ..stages.artifacts import GitArtifactWorkspace
-from ..stages.evaluator import EvaluationConfig, HarnessEvaluator
+from ..stages.evaluator import (
+    BaselineAcceptanceError,
+    EvaluationConfig,
+    HarnessEvaluator,
+    validate_baseline,
+)
 from ..stages.executor import AgentExecutor, ExecutorConfig
 from ..stages.gate import GateSpec
 from ..stages.proposer import ProposalBatch, ProposerRequest
@@ -322,14 +329,9 @@ class LocalBackend(ExecutionBackend):
 
         Returns (eval_block, metrics). Raises BaselineAcceptanceError on failure.
         """
-        from ..harness import evals
-        from ..loop import BaselineAcceptanceError
-
         cfg = self.ctx.cfg
         runtime = self.ctx.runtime
         workspace = self.ctx.workspace
-        import subprocess
-
         print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]})...",
               flush=True)
         wt = None
@@ -376,35 +378,20 @@ class LocalBackend(ExecutionBackend):
         metrics_schema: dict,
     ) -> None:
         """Reject an unusable baseline before any optimization agent is called."""
-        import math
-        from ..loop import BaselineAcceptanceError
-
-        failed_codes = [code for code in result.returncodes if code != 0]
-        if failed_codes:
-            raise BaselineAcceptanceError(
-                "baseline evaluation command failed with exit "
-                f"{failed_codes[0]}:\n{result.text[:8000]}"
-            )
-
-        objective = metrics_schema["objective"]["key"]
-        value = result.metrics.get(objective)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
-            raise BaselineAcceptanceError(
-                f"baseline objective {objective} is missing or not finite:\n"
-                f"{result.text[:8000]}"
-            )
-
-        failed_gates = [
-            gate["key"]
-            for gate in metrics_schema.get("gates", [])
-            if result.metrics.get(gate["key"]) is not True
-        ]
-        if failed_gates:
-            raise BaselineAcceptanceError(
-                "baseline gate(s) did not pass: "
-                f"{', '.join(failed_gates)}:\n{result.text[:8000]}"
-            )
+        schema = metrics_schema or {}
+        objective = schema.get("objective") or {}
+        validate_baseline(
+            EvaluationResult(
+                result.text,
+                result.metrics,
+                tuple(result.returncodes),
+            ),
+            GateSpec(
+                str(objective.get("key") or "OBJECTIVE"),
+                tuple(
+                    str(item["key"])
+                    for item in schema.get("gates", ())
+                    if item.get("key")
+                ),
+            ),
+        )

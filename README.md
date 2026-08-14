@@ -116,8 +116,8 @@ Insight generation entirely.
 Every attempt is recorded, including failed and rejected attempts. Gate results
 are applied in one ordered pipeline after implementation:
 
-1. `PATHS` checks changed paths before commit.
-2. The Harness commits path-valid work and runs every eval command.
+1. `PATHS` records that the prepared writable world was used.
+2. The Harness commits changed work and runs every eval command.
 3. `EVAL_COMMANDS` and configured physical/correctness gates are normalized.
 4. Only `gate_passed: true` attempts with a numeric objective are `eligible`.
 5. The best eligible objective wins; candidate id is the deterministic tie
@@ -133,14 +133,17 @@ that factual history and can inspect the repository and diffs itself.
 
 | Area | Responsibility |
 | --- | --- |
-| `roles/proposer.py` | factual context → open experiment proposals |
-| `roles/executor.py` | one proposal → complete implementation → SHA |
-| `candidate_worker.py` | candidate execution and factual result assembly |
-| `harness/gate.py` | path, eval-command, and configured gate normalization |
+| `stages/proposer.py` | typed proposer input/output boundary |
+| `stages/executor.py` | one proposal → implementation result |
+| `candidate.py` | shared typed candidate pipeline and result assembly |
+| `candidate_worker.py` | standalone transport/composition entrypoint |
+| `stages/gate.py` | eval-command and configured gate normalization |
+| `stages/evaluator.py` | evaluator port, adapter, and baseline policy |
 | `harness/evals.py` | evaluator execution and `KEY=VALUE` metric parsing |
 | `harness/store.py` | factual JSONL history and objective selection |
 | `harness/workspace.py` | isolated worktrees and Harness-owned commits |
 | `reporting/plot.py` | 2×3 factual progress overview |
 
-The path gate is an early safety stage, not a competing acceptance system.
-Final admission is the conjunction of all Harness gates.
+Writable paths are enforced by the prepared container world. `PATHS` remains
+an always-pass compatibility result; final admission is the conjunction of the
+evaluation gates.

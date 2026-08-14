@@ -1,6 +1,6 @@
 # SimpleLoop Phase 2 Candidate Pipeline Implementation Plan
 
-**Status:** Planned on `refactor/phase0-phase1-typed-contracts`.
+**Status:** Implemented on `refactor/phase0-phase1-typed-contracts`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -738,7 +738,7 @@ git commit -m "refactor: move candidate batching into backends"
 - Consumes: shared `validate_baseline()`, Phase 2 pipeline, and compatibility fixtures.
 - Produces: zero Local/HEPJob imports of `loop.py`, one owner per candidate stage, executable architecture guards, and a completed plan record.
 
-- [ ] **Step 1: Add failing architecture guards**
+- [x] **Step 1: Add failing architecture guards**
 
 ```python
 def test_candidate_execution_modules_do_not_import_loop():
@@ -769,7 +769,7 @@ def test_candidate_pipeline_does_not_read_context_or_config_dicts():
     assert ".cfg" not in source
 ```
 
-- [ ] **Step 2: Run architecture tests and confirm remaining imports fail**
+- [x] **Step 2: Run architecture tests and confirm remaining imports fail**
 
 ```bash
 python -m pytest -q tests/test_architecture_boundaries.py
@@ -777,7 +777,7 @@ python -m pytest -q tests/test_architecture_boundaries.py
 
 Expected: fails on current baseline error/timestamp imports until cleanup completes.
 
-- [ ] **Step 3: Use the shared baseline validator and remove old imports**
+- [x] **Step 3: Use the shared baseline validator and remove old imports**
 
 Convert Local `EvalResult` to typed `EvaluationResult`, then call:
 
@@ -792,7 +792,7 @@ HEPJob calls the same function on the baseline `CandidateResult.evaluation`. Mov
 
 Delete `BaselineAcceptanceError` from `loop.py`, import it from `stages.evaluator` where CLI-facing handling needs it, and remove `roles/executor.py` after all imports use `stages.executor`. Remove migrated eval/gate implementations only when `rg` proves no production consumer remains; retain `objective_delta()` and metric parsing in the smallest module still serving reporting and evaluator.
 
-- [ ] **Step 4: Run complete verification**
+- [x] **Step 4: Run complete verification**
 
 ```bash
 python -m pytest -q
@@ -804,7 +804,7 @@ git diff --check
 
 Expected: pytest passes with the established environment skip only; compileall exits 0; both `rg` commands produce no output; diff check exits 0.
 
-- [ ] **Step 5: Mark this plan implemented and commit Phase 2 completion**
+- [x] **Step 5: Mark this plan implemented and commit Phase 2 completion**
 
 Change the plan header to:
 
