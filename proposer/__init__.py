@@ -15,13 +15,10 @@ into this package as ``runtime.py``, ``child_processes.py``, and
 ``run_dir/self/repo/`` is self-sufficient and is what the run executes.
 """
 
-# The Host↔proposer contract version this self speaks. The Host validates it at
-# viability time (`proposer_lane_worker --check --contract-version …`): a
-# self-change that needs a NEW contract must bump this, and that candidate then
-# FAILS viability, because the Host only speaks one version (contract §11 —
-# changing the contract is a Kernel change, not a natural side-effect of
-# self-modification). The Host's expected value lives in
-# ``simpleloop.self_repo.EXPECTED_CONTRACT_VERSION``; this declaration is the
-# self's side of the agreement.
+# A self-declared version string. Purely informational — emitted in self-review
+# results for observability and free for the self to change. Nothing enforces it:
+# viability is a behavior-level smoke test (can the self still emit a proposal?),
+# NOT a contract-version gate, so the self may evolve its own protocol freely as
+# long as it keeps functioning in the loop.
 CONTRACT_VERSION = "proposer-cli-v0"
 

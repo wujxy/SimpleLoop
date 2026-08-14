@@ -1,11 +1,10 @@
-"""S3a/S3b tests: run-local self-repo lifecycle + worker redirect + viability check.
+"""S3a/S3b tests: run-local self-repo lifecycle + worker redirect + viability smoke test.
 
 Covers the SelfRepo snapshot/state machine, the proposer_lane_worker
-``_redirect_self_repo`` bootstrap, and the S3b viability ``--check`` (healthy self
-passes; deliberately broken candidates fail at boot / contract / continuity /
-protocol-produce). The end-to-end falsification test (edit the snapshot, see it take
-effect in a real round) is a manual/round-driven check, not reproducible here without
-the model API.
+``_redirect_self_repo`` bootstrap, and the S3b viability smoke test: the verdict logic
+(``_classify_smoke``) is unit-tested deterministically; a boot-death candidate (the
+worker dies at import before the model) is an offline integration test; the
+healthy-self-passes path runs a real model episode and is left as a manual e2e.
 """
 from __future__ import annotations
 
@@ -16,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.self_repo import SelfRepo, ViabilityResult, check_viability
+from simpleloop.self_repo import (
+    SelfRepo, ViabilityResult, check_viability, _classify_smoke)
 from simpleloop.proposer_lane_worker import _redirect_self_repo
 
 
@@ -193,12 +193,14 @@ def _git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-# === S3b: viability --check ===============================================
+# === S3b: viability smoke test =============================================
 #
-# Each test snapshots a fresh self-repo into its own tmp_path/self/repo, optionally
-# mutates one proposer source file (a deliberate break), then runs the offline
-# viability subprocess. check_viability spawns a real worker process (no model), so
-# these are integration tests.
+# Viability is a single behavior-level gate (RSI §8 revised): run the candidate as a
+# normal task-mode lane (goal + empty workspace) and check it reaches COMPLETED — "can
+# this self still participate in the loop". The verdict logic (_classify_smoke) is pure
+# and unit-tested deterministically; the boot-death case is an offline integration test
+# (the worker dies at import, before the model); the healthy-self-passes path runs a
+# real model episode and is left as a manual e2e.
 
 
 def _candidate(run_dir: Path) -> Path:
@@ -208,91 +210,88 @@ def _candidate(run_dir: Path) -> Path:
     return sr.repo
 
 
+def _dummy_resolved_config(run_dir: Path) -> None:
+    """check_viability copies run_dir/config.resolved.json into a temp smoke run_dir.
+    A stub suffices: the boot-death worker dies at import before reading it."""
+    (Path(run_dir) / "config.resolved.json").write_text(
+        json.dumps({"goal": "smoke", "repo_path": str(run_dir)}), encoding="utf-8")
+
+
 def _append(repo: Path, relpath: str, text: str) -> None:
     """Append text to a file under the snapshotted proposer package (a deliberate break)."""
     target = repo / "proposer" / relpath
     target.write_text(target.read_text(encoding="utf-8") + text, encoding="utf-8")
 
 
-def test_viability_healthy_self_passes(tmp_path: Path):
-    repo = _candidate(tmp_path)
-    res = check_viability(repo, tmp_path)
-    assert res.viable is True
-    assert res.exit_code == 0
-    assert "[check] OK" in res.stdout
+# --- _classify_smoke verdict logic (pure; no subprocess, no model) --------
 
+def test_classify_completed_submit_is_viable():
+    res = _classify_smoke(
+        {"status": "COMPLETED", "outcome": "submit",
+         "proposals": [{"instruction": "x"}]},
+        exit_code=0)
+    assert res.viable is True
+    assert "COMPLETED" in res.detail and "n_proposals=1" in res.detail
+
+
+def test_classify_completed_abstain_is_viable():
+    # abstention is normal loop participation — the machinery works, it just had
+    # nothing to propose on the smoke input.
+    res = _classify_smoke(
+        {"status": "COMPLETED", "outcome": "abstain", "proposals": []},
+        exit_code=0)
+    assert res.viable is True
+
+
+def test_classify_lane_failed_is_not_viable():
+    res = _classify_smoke(
+        {"status": "LANE_FAILED", "outcome": "error", "proposals": [],
+         "explanation": "research() raised: boom"},
+        exit_code=0)
+    assert res.viable is False
+    assert "boom" in res.detail
+
+
+def test_classify_no_result_is_not_viable_boot_death():
+    res = _classify_smoke(None, exit_code=1, stderr_tail="SyntaxError: invalid syntax")
+    assert res.viable is False
+    assert "boot" in res.detail or "import" in res.detail
+    assert "SyntaxError" in res.detail  # stderr tail surfaced for diagnostics
+
+
+def test_classify_non_dict_result_is_not_viable():
+    res = _classify_smoke("not a dict", exit_code=0)  # type: ignore[arg-type]
+    assert res.viable is False
+
+
+# --- spawn path (integration) ---------------------------------------------
 
 def test_viability_fails_on_syntax_error_boot(tmp_path: Path):
     repo = _candidate(tmp_path)
-    # an unparseable module -> proposer.scientist fails to import -> the worker dies
-    # at module load (boot), before _run_check runs.
+    _dummy_resolved_config(tmp_path)
+    # an unparseable scientist.py -> `from proposer.scientist import ...` dies at worker
+    # module load (boot), before main()/model -> no result.json -> not viable.
     _append(repo, "scientist.py", "\n!!! unparseable syntax error !!!\n")
     res = check_viability(repo, tmp_path)
     assert res.viable is False
-    assert res.exit_code != 0
+    assert "boot" in res.detail or "import" in res.detail
 
 
-def test_viability_fails_on_wrong_contract_version(tmp_path: Path):
+def test_viability_missing_config_returns_not_viable(tmp_path: Path):
+    # no config.resolved.json -> check_viability cannot build the smoke run_dir
     repo = _candidate(tmp_path)
-    _append(repo, "__init__.py", '\nCONTRACT_VERSION = "proposer-cli-v1"\n')
     res = check_viability(repo, tmp_path)
     assert res.viable is False
-    assert res.exit_code != 0
-    assert "contract" in res.stderr.lower()
+    assert "config.resolved.json" in res.detail
 
 
-def test_viability_fails_on_broken_continuity_reader(tmp_path: Path):
+@pytest.mark.skip(reason="healthy-self viability runs a real model episode; run "
+                         "manually with a live config + model token")
+def test_viability_healthy_self_passes(tmp_path: Path):
     repo = _candidate(tmp_path)
-    # import succeeds, but load_or_create raises when called -> the continuity
-    # assertion (not boot) catches it.
-    _append(repo, "scientist_session.py",
-            "\n\ndef _broken_load(cls, *a, **k):\n"
-            "    raise RuntimeError('continuity reader broken')\n"
-            "ScientistSession.load_or_create = classmethod(_broken_load)\n")
-    res = check_viability(repo, tmp_path)
-    assert res.viable is False
-    assert res.exit_code != 0
-    assert "continuity" in res.stderr.lower()
-
-
-def test_viability_fails_on_broken_protocol_produce(tmp_path: Path):
-    repo = _candidate(tmp_path)
-    # import succeeds, but ResearchProposal construction raises -> the protocol-produce
-    # assertion (not boot) catches it. (Frozen dataclasses allow __init__ reassignment;
-    # frozen only blocks attribute *set* on instances.)
-    _append(repo, "memory/models.py",
-            "\n\ndef _broken_init(self, *a, **k):\n"
-            "    raise RuntimeError('protocol produce broken: cannot construct')\n"
-            "ResearchProposal.__init__ = _broken_init\n")
-    res = check_viability(repo, tmp_path)
-    assert res.viable is False
-    assert res.exit_code != 0
-    assert "protocol produce" in res.stderr.lower()
-
-
-def test_viability_never_mutates_the_run_it_checks(tmp_path: Path):
-    """The continuity load runs on a TEMP COPY — a viability check must not write to
-    the run_dir it is evaluating."""
-    repo = _candidate(tmp_path)
-    prop_dir = tmp_path / "proposer"
-    prop_dir.mkdir()
-    session = prop_dir / "session.jsonl"
-    notebook = prop_dir / "notebook.md"
-    meta = prop_dir / "meta.json"
-    session.write_text('{"role":"user","content":"seed"}\n', encoding="utf-8")
-    notebook.write_text("# my notebook\n", encoding="utf-8")
-    meta.write_text(json.dumps({"scientist_id": "abc"}), encoding="utf-8")
-    before = {p: p.read_text(encoding="utf-8")
-              for p in (session, notebook, meta)}
-
+    _dummy_resolved_config(tmp_path)
     res = check_viability(repo, tmp_path)
     assert res.viable is True
-
-    after = {p: p.read_text(encoding="utf-8") for p in (session, notebook, meta)}
-    assert before == after  # run_dir/proposer/ untouched
-    # and no new files appeared in run_dir/proposer (e.g. no meta.json rewrite)
-    assert sorted(p.name for p in prop_dir.iterdir()) == ["meta.json", "notebook.md",
-                                                          "session.jsonl"]
 
 
 # === S3c.2: commitment + self-review ledger ================================
@@ -333,5 +332,128 @@ def test_append_review_and_last_review_round(tmp_path: Path):
     assert r0["adopted"] is None and r0["viable"] is None  # S3d fields null
     assert r1["round"] == 10 and r1["decision"] == "CHANGE"
     assert r1["change"]["target"] == "prompt"
+
+
+# === S3d: self-execution + adoption (transition) ===========================
+#
+# transition() = worktree @ active SHA -> self-executor edits -> commit candidate
+# -> check_viability (smoke) -> adopt (ff-merge + advance active_self_sha) or keep.
+# The self-executor is a claude-p Agent; here a fake stands in (writes a file to the
+# worktree), and check_viability is monkeypatched so the verdict is deterministic
+# (the real smoke runs a model episode — see the skipped healthy-self test).
+
+
+def _self_change() -> dict:
+    return {"target": "prompt", "intent": "sharpen coverage",
+            "instruction": "add a coverage preamble to the charter",
+            "evidence_refs": ["proposer/scientist.py"]}
+
+
+class _FakeExecAgent:
+    """Stands in for the claude-p Agent: run_text 'edits' one file in the worktree."""
+    def __init__(self, relpath: str = "proposer/prompts/proposer.md",
+                 text: str = "# touched by self-exec\n"):
+        self.relpath, self.text, self.calls = relpath, text, []
+
+    def run_text(self, prompt: str, *, cwd, label: str = "agent") -> str:
+        self.calls.append((str(cwd), label))
+        target = Path(cwd) / self.relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.text, encoding="utf-8")
+        return "done"
+
+
+def _patch_viability(monkeypatch, viable: bool, detail: str = "smoke"):
+    monkeypatch.setattr(
+        "simpleloop.self_repo.check_viability",
+        lambda candidate_repo, run_dir: ViabilityResult(viable, detail))
+
+
+def test_transition_adopts_when_viable(tmp_path: Path, monkeypatch):
+    sr = SelfRepo(tmp_path); sr.setup(resume=False)
+    old_sha = sr.active_self_sha
+    _patch_viability(monkeypatch, True, "smoke COMPLETED")
+    tr = sr.transition(agent=_FakeExecAgent(), self_change=_self_change(),
+                       run_dir=tmp_path)
+    assert tr.adopted is True and tr.viable is True
+    assert tr.candidate_self_sha and tr.candidate_self_sha != old_sha
+    assert sr.active_self_sha == tr.candidate_self_sha          # advanced
+    # the active working tree now carries the executor's edit
+    assert (sr.repo / "proposer" / "prompts" / "proposer.md").read_text(
+        encoding="utf-8") == "# touched by self-exec\n"
+
+
+def test_transition_keeps_incumbent_when_not_viable(tmp_path: Path, monkeypatch):
+    sr = SelfRepo(tmp_path); sr.setup(resume=False)
+    old_sha = sr.active_self_sha
+    _patch_viability(monkeypatch, False, "smoke LANE_FAILED: boom")
+    tr = sr.transition(agent=_FakeExecAgent(), self_change=_self_change(),
+                       run_dir=tmp_path)
+    assert tr.adopted is False and tr.viable is False
+    assert tr.candidate_self_sha is not None      # a candidate WAS produced…
+    assert sr.active_self_sha == old_sha          # …but the incumbent was kept
+    # active working tree NOT updated (edit lived only in the removed worktree)
+    assert (sr.repo / "proposer" / "prompts" / "proposer.md").read_text(
+        encoding="utf-8") != "# touched by self-exec\n"
+
+
+def test_transition_no_change_when_executor_edits_nothing(tmp_path: Path,
+                                                           monkeypatch):
+    sr = SelfRepo(tmp_path); sr.setup(resume=False)
+    _patch_viability(monkeypatch, True)  # should NOT be reached
+
+    class _NoEdit:
+        def run_text(self, prompt, *, cwd, label="agent"):
+            return "done"
+
+    tr = sr.transition(agent=_NoEdit(), self_change=_self_change(), run_dir=tmp_path)
+    assert tr.candidate_self_sha is None and tr.adopted is False
+    assert "no changes" in tr.detail
+
+
+def test_transition_keeps_incumbent_on_executor_error(tmp_path: Path, monkeypatch):
+    sr = SelfRepo(tmp_path); sr.setup(resume=False)
+    old_sha = sr.active_self_sha
+
+    class _Crash:
+        def run_text(self, prompt, *, cwd, label="agent"):
+            raise RuntimeError("claude timed out")
+
+    tr = sr.transition(agent=_Crash(), self_change=_self_change(), run_dir=tmp_path)
+    assert tr.candidate_self_sha is None and tr.adopted is False
+    assert sr.active_self_sha == old_sha
+    assert "executor failed" in tr.detail
+
+
+def test_transition_no_instruction_is_a_noop(tmp_path: Path):
+    sr = SelfRepo(tmp_path); sr.setup(resume=False)
+    old_sha = sr.active_self_sha
+    tr = sr.transition(agent=_FakeExecAgent(),
+                       self_change={"target": "prompt"}, run_dir=tmp_path)
+    assert tr.candidate_self_sha is None and tr.adopted is False
+    assert "no instruction" in tr.detail
+    assert sr.active_self_sha == old_sha
+
+
+def test_self_repo_worktree_edit_commit_adopt_mechanics(tmp_path: Path):
+    """The git primitives directly, without the agent/smoke: worktree at the active
+    SHA carries the proposer source; an edit + commit + adopt advances the active
+    self and updates its working tree."""
+    sr = SelfRepo(tmp_path); sr.setup(resume=False)
+    old = sr.active_self_sha
+    wt = sr._add_self_worktree(old)
+    try:
+        assert (wt / "proposer" / "__init__.py").is_file()    # worktree at active SHA
+        (wt / "proposer" / "prompts" / "proposer.md").write_text(
+            "X", encoding="utf-8")
+        assert sr._self_worktree_has_changes(wt) is True
+        cand = sr._commit_self_worktree(wt, "S(n+1): prompt")
+        assert cand != old
+        sr._adopt(cand)
+        assert sr.active_self_sha == cand
+        assert (sr.repo / "proposer" / "prompts" / "proposer.md").read_text(
+            encoding="utf-8") == "X"
+    finally:
+        sr._remove_self_worktree(wt)
 
 

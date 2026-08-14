@@ -23,13 +23,11 @@ import argparse
 import dataclasses
 import json
 import os
-import shutil
 import socket
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from . import config as config_mod
 from .candidate_worker import write_result
@@ -54,7 +52,8 @@ def _redirect_self_repo() -> None:
 
     Two resolution paths, in precedence order:
       - ``--self-repo <path>`` (S3b): the explicit candidate self-repo, used by the
-        viability ``--check`` mode. Takes precedence.
+        viability smoke test (``check_viability`` spawns a task-mode lane pointed at the
+        candidate). Takes precedence.
       - ``--manifest <path>`` (S3a): a lane manifest whose ``run_dir`` locates the
         incumbent active self at ``<run_dir>/self/repo``. Used in normal task mode.
 
@@ -84,7 +83,7 @@ def _redirect_self_repo() -> None:
 
 _redirect_self_repo()
 
-import proposer  # the loaded self (redirected above); reads CONTRACT_VERSION
+import proposer  # the loaded self (redirected above to --self-repo / the run's self)
 from proposer.runtime import ApptainerRuntime, world_mount_map
 from .harness import views
 from .harness.workspace import Workspace
@@ -299,70 +298,6 @@ def run_lane(deps: ProposerLaneDeps, spec: ProposerLaneSpec) -> dict:
     return _lane_result_to_dict(lane_result)
 
 
-def _run_check(self_repo: str | Path, run_dir: str | Path,
-               expected_version: str) -> int:
-    """S3b viability self-check. Runs offline (no model, no network) against the
-    CANDIDATE proposer — which ``_redirect_self_repo`` already loaded from
-    ``--self-repo`` at module import time, so reaching here means boot (1) passed.
-
-    Asserts:
-      (2) contract version — ``proposer.CONTRACT_VERSION`` == the Host's expected.
-      (3) continuity load — the candidate can read run_dir/proposer/ continuity
-          without crashing (exercised on a TEMP COPY so the check never mutates the
-          run it is evaluating).
-      (4) protocol produce — the candidate can construct a legal output skeleton
-          (one synthetic proposal + an abstain) and serialize it, without the model.
-
-    Exit 0 = viable; 1 = broken self (each failure printed to stderr as
-    ``[check] FAIL: …``). Per contract §8 / RSI §19: capability ("is it stronger")
-    is NOT in scope — that is later real task progress.
-    """
-    import proposer  # the candidate (loaded by the redirect above)
-    errors: list[str] = []
-
-    # (2) contract version
-    declared = getattr(proposer, "CONTRACT_VERSION", None)
-    if declared != expected_version:
-        errors.append(
-            f"contract version mismatch: proposer declares {declared!r}, "
-            f"Host expects {expected_version!r}")
-
-    # (3) continuity load — on a temp copy of run_dir/proposer, side-effect-free
-    try:
-        from proposer.scientist_session import ScientistSession
-        from proposer.scientist import SCIENTIST_PROMPT_VERSION
-        with TemporaryDirectory() as td:
-            probe_run = Path(td)
-            src = Path(run_dir) / "proposer"
-            if src.is_dir():
-                shutil.copytree(src, probe_run / "proposer")
-            ScientistSession.load_or_create(
-                probe_run, 0, prompt_version=SCIENTIST_PROMPT_VERSION)
-    except Exception as exc:  # noqa: BLE001 — any failure = broken continuity reader
-        errors.append(f"continuity load failed: {exc}")
-
-    # (4) protocol produce — legal output skeletons from the candidate's data model
-    try:
-        from proposer.memory.models import NewFindingTarget, ResearchProposal
-        from proposer.orchestrator import LaneResult
-        probe = ResearchProposal(
-            "viability probe", NewFindingTarget(question="probe"), (), None)
-        LaneResult(lane_id=0, proposals=(probe,), outcome="submit")  # submit skeleton
-        LaneResult(lane_id=0, proposals=(), outcome="abstain",       # abstain skeleton
-                   abstain_reason="viability check")
-        json.dumps(dataclasses.asdict(probe))                        # serializable
-    except Exception as exc:  # noqa: BLE001 — any failure = broken output schema
-        errors.append(f"protocol produce failed: {exc}")
-
-    if errors:
-        for err in errors:
-            print(f"[check] FAIL: {err}", file=sys.stderr, flush=True)
-        return 1
-    print(f"[check] OK: viable (contract={declared}, self_repo={Path(self_repo)})",
-          flush=True)
-    return 0
-
-
 def _self_review_result_to_dict(spec: ProposerLaneSpec, result) -> dict:
     """SelfReviewResult -> the self-mode result.json shape (RSI S3c). Distinct
     from the lane shape; consumed only by the Host self-review path (S3c.2)."""
@@ -445,43 +380,27 @@ def _self_review_failure_result(spec: ProposerLaneSpec, reason: str) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Standalone worker entry. Two modes:
+    """Standalone worker entry: run one proposer lane from ``--manifest``. Exit 0
+    whenever a terminal result could be written (business failures included);
+    non-zero only when the manifest/result path is unusable — infrastructure-grade
+    failure.
 
-    - ``--check`` (S3b): viability self-check on a candidate self-repo. Exit 0 =
-      viable, 1 = broken self. Does not run a lane and writes no result.json.
-    - lane mode (default): run one proposer lane from ``--manifest``. Exit 0 whenever
-      a terminal result could be written (business failures included); non-zero only
-      when the manifest/result path is unusable — infrastructure-grade failure.
+    ``--self-repo`` is consumed at module-import time by ``_redirect_self_repo`` (to
+    point ``import proposer`` at a candidate self for the viability smoke test); it is
+    registered here only so argparse does not reject it — ``main`` never reads it.
     """
     parser = argparse.ArgumentParser(prog="proposer_lane_worker")
     parser.add_argument("--manifest", default=None,
-                        help="Path to the proposer-lane manifest JSON (lane mode).")
+                        help="Path to the proposer-lane manifest JSON.")
     parser.add_argument("--job-id", default=None,
                         help="Scheduler job id (recorded in result.execution).")
-    parser.add_argument("--check", action="store_true",
-                        help="Viability self-check mode (S3b). Requires --self-repo, "
-                             "--run-dir, --contract-version. Writes no result.")
     parser.add_argument("--self-repo", default=None,
-                        help="Candidate self-repo root (contains proposer/) to check.")
-    parser.add_argument("--run-dir", default=None,
-                        help="Run dir (for continuity load during --check).")
-    parser.add_argument("--contract-version", default=None,
-                        help="Contract version the Host expects (checked against "
-                             "proposer.CONTRACT_VERSION during --check).")
+                        help="Candidate self-repo root (consumed by the import-time "
+                             "redirect; not used by main).")
     args = parser.parse_args(argv)
 
-    if args.check:
-        missing = [n for n, v in (("--self-repo", args.self_repo),
-                                  ("--run-dir", args.run_dir),
-                                  ("--contract-version", args.contract_version))
-                   if not v]
-        if missing:
-            parser.error("--check requires " + ", ".join(missing))
-        return _run_check(args.self_repo, args.run_dir, args.contract_version)
-
     if not args.manifest:
-        parser.error("--manifest is required in lane mode "
-                     "(or use --check for the viability self-check)")
+        parser.error("--manifest is required")
 
     usage: list = []
     spec_dict: dict = {}

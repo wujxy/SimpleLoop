@@ -12,7 +12,7 @@ import pytest
 
 from simpleloop.execution.proposer_lanes import read_self_review_result
 from simpleloop.loop import _run_self_review_round, _starting_state
-from simpleloop.self_repo import SelfRepo
+from simpleloop.self_repo import SelfRepo, ViabilityResult
 
 
 # --- read_self_review_result (the self-mode result.json reader) ------------
@@ -67,7 +67,13 @@ def _host_ctx(run_dir: Path, payload: dict) -> SimpleNamespace:
     sr = SelfRepo(run_dir)
     sr.setup(resume=False)
     eb = SimpleNamespace(run_self_review=lambda *, round_id: payload)
-    return SimpleNamespace(self_repo=sr, execution_backend=eb)
+    # A no-op self-executor so the CHANGE path runs transition but produces no
+    # candidate (the defer logic is what's under test in those cases). The
+    # full adoption path has its own test with a real-editing fake + mocked smoke.
+    noop_exec = SimpleNamespace(run_text=lambda *a, **k: "")
+    return SimpleNamespace(
+        self_repo=sr, execution_backend=eb, run_dir=run_dir,
+        self_executor_agent=noop_exec)
 
 
 def _keep_payload(sha: str, *, defer: int = 5) -> dict:
@@ -119,6 +125,43 @@ def test_run_self_review_round_change_uses_default_defer(tmp_path: Path):
     rec = json.loads(ctx.self_repo.reviews_path.read_text().strip())
     assert rec["decision"] == "CHANGE"
     assert rec["change"]["target"] == "prompt"
+
+
+def test_run_self_review_round_change_drives_full_adoption(tmp_path, monkeypatch):
+    """S3d: a CHANGE drives the full transition — self-executor edits -> candidate
+    -> smoke -> adopt — and the reviews.jsonl record carries candidate/viable/
+    adopted. check_viability is mocked so the verdict is deterministic (the real
+    smoke runs a model episode)."""
+    sr = SelfRepo(tmp_path)
+    sr.setup(resume=False)
+    old_sha = sr.active_self_sha
+    monkeypatch.setattr(
+        "simpleloop.self_repo.check_viability",
+        lambda candidate_repo, run_dir: ViabilityResult(True, "smoke COMPLETED"))
+
+    class _EditingAgent:
+        def run_text(self, prompt, *, cwd, label="agent"):
+            (Path(cwd) / "proposer" / "prompts" / "proposer.md").write_text(
+                "# self-revised\n", encoding="utf-8")
+            return "done"
+
+    ctx = SimpleNamespace(
+        self_repo=sr,
+        execution_backend=SimpleNamespace(
+            run_self_review=lambda *, round_id: _change_payload(sr.active_self_sha)),
+        self_executor_agent=_EditingAgent(),
+        run_dir=tmp_path,
+    )
+
+    decision = _run_self_review_round(ctx, round_id=8)
+
+    assert decision == "CHANGE"
+    rec = json.loads(sr.reviews_path.read_text().strip())
+    assert rec["decision"] == "CHANGE"
+    assert rec["candidate_self_sha"] is not None
+    assert rec["viable"] is True and rec["adopted"] is True
+    assert sr.active_self_sha == rec["candidate_self_sha"]   # active advanced
+    assert sr.active_self_sha != old_sha
 
 
 # --- _starting_state resume fix (self-review rounds don't write history) ---

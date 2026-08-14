@@ -15,11 +15,12 @@ Three physical layers (contract §2.4 / RSI impl-design §1):
     run_dir/self/reviews.jsonl (S3c, not created here)
 
 S3a implements the lifecycle (snapshot S0 + state + fresh/continue). S3b adds the
-viability authority: ``check_viability`` spawns ``proposer_lane_worker --check`` on a
-candidate self to prove it can still boot/load-continuity/produce-output offline (RSI
-§19: viability is immediate). Later slices grow this module further: S3c mode switch +
-commitment, S3d ``transition`` (self-executor → candidate → viability → adopt, advancing
-``active_self_sha``).
+viability authority: ``check_viability`` smoke-tests a candidate self by running it as a
+normal task-mode proposer lane (the run's real goal + a throwaway empty workspace) and
+checking it reaches a COMPLETED terminal — the loop contract in miniature, and the ONLY
+adoption gate (RSI §8: protect the *loop*, not the *self*). Later slices grow this
+module further: S3c mode switch + commitment, S3d ``transition`` (self-executor →
+candidate → viability → adopt, advancing ``active_self_sha``).
 
 This module is Host/Kernel code: it must never be importable from the ``proposer``
 package, and never modified by a self-change. It deliberately does NOT import
@@ -34,6 +35,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 # state.json schema. mode / next_self_review_round are written now and consumed only
 # in S3c (mode switch + commitment scheduler) — frozen as part of the v0 schema
@@ -42,12 +44,12 @@ _SCHEMA_VERSION = 1
 _DEFAULT_MODE = "task"
 _DEFAULT_NEXT_REVIEW = None  # null until the first self-review sets a commitment (S3c)
 
-# The single proposer-CLI contract version the Host speaks. The proposer declares its
-# own side as ``proposer.CONTRACT_VERSION``; viability (``check_viability``) asserts
-# they match. Changing this is a Kernel change (contract §11), not a self-modification.
-EXPECTED_CONTRACT_VERSION = "proposer-cli-v0"
-# Hard ceiling for the offline viability subprocess (it never calls the model).
-_VIABILITY_TIMEOUT_SECONDS = 120
+# Smoke-test budget: a small episode is enough — we only need the candidate to reach a
+# terminal (submit or abstain), not research depth. Model-dependent by design: the smoke
+# test IS the loop contract in miniature (goal in -> result out), so it runs a real
+# (short) research episode. See ``check_viability``.
+_SMOKE_SCIENTIST_STEPS = 20
+_SMOKE_TIMEOUT_SECONDS = 600
 
 
 def _stamp() -> str:
@@ -196,11 +198,14 @@ class SelfRepo:
 
     def append_review(
         self, round_id: int, *, payload: dict, next_review_round: int,
+        candidate_self_sha: str | None = None,
+        viable: bool | None = None,
+        adopted: bool | None = None,
     ) -> None:
-        """Append one self-review record to run_dir/self/reviews.jsonl. The S3d
-        fields (candidate_self_sha / viable / adopted) are null until adoption
-        exists; ``change`` is the payload's self_change (target/intent/
-        instruction/evidence_refs) or None for KEEP."""
+        """Append one self-review record to run_dir/self/reviews.jsonl. For a
+        CHANGE, S3d fills ``candidate_self_sha`` / ``viable`` / ``adopted`` from
+        the transition outcome; for a KEEP they stay null. ``change`` is the
+        payload's self_change (target/intent/instruction/evidence_refs) or None."""
         self.root.mkdir(parents=True, exist_ok=True)
         record = {
             "round": round_id,
@@ -209,9 +214,9 @@ class SelfRepo:
             "diagnosis": payload.get("diagnosis"),
             "keep_reason": payload.get("keep_reason"),
             "change": payload.get("self_change"),
-            "candidate_self_sha": None,   # S3d
-            "viable": None,               # S3d
-            "adopted": None,              # S3d
+            "candidate_self_sha": candidate_self_sha,
+            "viable": viable,
+            "adopted": adopted,
             "next_review_round": next_review_round,
         }
         with self.reviews_path.open("a", encoding="utf-8") as fh:
@@ -253,60 +258,293 @@ class SelfRepo:
                 f"{completed.stderr.strip()}")
         return completed.stdout.strip()
 
+    @staticmethod
+    def _git_at(path: str | Path, *args: str) -> str:
+        """``git -C <path>`` for an arbitrary path (a self-repo worktree). The
+        class's own ``_git`` operates on ``self.repo``; worktree ops need a
+        different cwd."""
+        completed = subprocess.run(
+            ["git", "-C", str(path), *args],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"self-repo git {' '.join(args)} failed: "
+                f"{completed.stderr.strip()}")
+        return completed.stdout.strip()
 
-# ---- viability authority (S3b) -----------------------------------------
-# Not yet wired into adoption — S3d's transition authority will call this on a
-# self-executor candidate before advancing active_self_sha. Built + verified in
-# isolation here.
+    # ---- self-execution + adoption (S3d) ------------------------------------
+    # The Host half of a CHANGE: open a throwaway worktree of self/repo at the
+    # active SHA, let the self-executor edit it, commit a candidate, smoke-test it
+    # (check_viability), and adopt (fast-forward self/repo's branch + advance
+    # active_self_sha) or keep the incumbent. The active working tree is never
+    # touched until adoption, so a failed/broken candidate cannot corrupt it.
+
+    def _add_self_worktree(self, sha: str) -> Path:
+        wt_root = self.root / "worktrees"
+        wt_root.mkdir(parents=True, exist_ok=True)
+        wt = wt_root / f"sr-{sha[:10]}"
+        if wt.exists():
+            shutil.rmtree(wt)
+        self._git("worktree", "prune")  # drop stale admin metadata
+        completed = subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "--detach",
+             str(wt), sha],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"self-repo worktree add failed: {completed.stderr.strip()}")
+        return wt
+
+    def _self_worktree_has_changes(self, wt: Path) -> bool:
+        completed = subprocess.run(
+            ["git", "-C", str(wt), "status", "--porcelain"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        return bool(completed.stdout.strip())
+
+    def _commit_self_worktree(self, wt: Path, message: str) -> str:
+        self._git_at(wt, "add", "-A")
+        self._git_at(
+            wt, "-c", "user.name=SimpleLoop-RSI",
+            "-c", "user.email=rsi@simpleloop.local",
+            "commit", "--quiet", "-m", message)
+        return self._git_at(wt, "rev-parse", "HEAD")
+
+    def _remove_self_worktree(self, wt: Path) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(wt)],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "prune"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _adopt(self, candidate_sha: str) -> None:
+        """Fast-forward self/repo's branch to the candidate and record it in
+        state.json (preserving the commitment). The candidate descends from the
+        active SHA, so ``merge --ff-only`` is always a fast-forward."""
+        self._git("merge", "--ff-only", candidate_sha)
+        state = self._read_state()
+        self._write_state(
+            candidate_sha,
+            next_self_review_round=state.get("next_self_review_round"))
+
+    def transition(self, *, agent, self_change: dict, run_dir: str | Path,
+                   label: str = "self-exec") -> "TransitionResult":
+        """Apply a self_change, smoke-test the candidate, adopt if viable (S3d).
+
+        The self-executor (``agent`` — a claude-p ``Agent`` reused from the task
+        executor) edits a throwaway worktree of self/repo at the active SHA under a
+        contained mount (only ``proposer/`` writable; everything else read-only).
+        On any failure — no instruction, executor error, no change, or a non-viable
+        candidate — the incumbent self is preserved untouched. Returns the outcome
+        for the reviews.jsonl ledger. See ``check_viability`` for the one gate.
+        """
+        sc = self_change or {}
+        instruction = sc.get("instruction")
+        if not instruction:
+            return TransitionResult(None, False, False, "self_change has no instruction")
+        old_sha = self.active_self_sha
+        wt = self._add_self_worktree(old_sha)
+        try:
+            try:
+                agent.run_text(_self_exec_prompt(sc), cwd=wt, label=label)
+            except Exception as exc:  # noqa: BLE001 — any executor failure keeps incumbent
+                return TransitionResult(None, False, False, f"executor failed: {exc}")
+            if not self._self_worktree_has_changes(wt):
+                return TransitionResult(None, False, False, "executor made no changes")
+            target = sc.get("target") or "self-change"
+            candidate = self._commit_self_worktree(wt, f"S(n+1): {target}")
+            vr = check_viability(wt, run_dir)
+            if vr.viable:
+                self._adopt(candidate)
+                return TransitionResult(candidate, True, True, vr.detail)
+            return TransitionResult(candidate, False, False, vr.detail)
+        finally:
+            self._remove_self_worktree(wt)
+
+
+# ---- viability authority (S3b, revised: behavior-level smoke test) --------
+# The ONLY adoption gate, and it protects the LOOP, not the SELF. The question is not
+# "is this a healthy/contract-conforming self" (that would cage evolution) but "can
+# this self still participate in the loop" — i.e. given a goal + a workspace, does it
+# still emit a valid lane result? Behavior-level, not schema-level: the candidate is
+# free to change anything — contract version, continuity format, output schema, even
+# its own control loop — as long as the externally observable behavior (goal in ->
+# result out) still holds. If a change breaks that, the smoke run produces no result
+# (boot/import death) or a LANE_FAILED (research() raised) and the candidate is
+# rejected; a clean submit OR abstain both pass — abstention is normal loop
+# participation, and the self is free to degrade itself (the task signal, not the
+# harness, teaches it to recover). Not wired into adoption until S3d.
 
 
 @dataclass(frozen=True)
 class ViabilityResult:
-    """Outcome of a viability check on a candidate self-repo.
+    """Outcome of a viability smoke-test on a candidate self-repo.
 
-    ``viable`` is the single boolean the adoption authority cares about; ``stderr``
-    carries the worker's ``[check] FAIL: …`` lines (or an import-time traceback for a
-    boot failure) for diagnostics.
+    ``viable`` is the single boolean the adoption authority cares about; ``detail``
+    carries the verdict reason (COMPLETED outcome + proposal count, or why it failed)
+    for the adoption ledger / diagnostics.
     """
 
     viable: bool
-    exit_code: int
-    stdout: str
-    stderr: str
+    detail: str
+
+
+def _classify_smoke(result: dict | None, *, exit_code: int | None,
+                    stderr_tail: str = "") -> ViabilityResult:
+    """Pure verdict on a smoke run's ``result.json`` (or its absence).
+
+    - no result / not a dict -> not viable: the worker died before writing one, i.e.
+      the candidate proposer package failed to boot/import (a SyntaxError / ImportError
+      at module load — the process exits before ``main()`` ever runs).
+    - ``status == "COMPLETED"`` -> viable: research() reached a terminal (submit or
+      abstain). Both mean the candidate can participate in the loop.
+    - any other status (``LANE_FAILED`` …) -> not viable: research() raised.
+
+    Factored out so the verdict logic is unit-testable without spawning a subprocess.
+    """
+    if not isinstance(result, dict):
+        tail = f"\n--- worker stderr tail ---\n{stderr_tail}" if stderr_tail else ""
+        return ViabilityResult(
+            False,
+            f"smoke worker exited rc={exit_code} without writing a result — "
+            f"the candidate proposer failed to boot/import{tail}")
+    status = result.get("status")
+    if status == "COMPLETED":
+        return ViabilityResult(
+            True,
+            f"smoke COMPLETED (outcome={result.get('outcome')}, "
+            f"n_proposals={len(result.get('proposals') or [])})")
+    tail = f"\n--- worker stderr tail ---\n{stderr_tail}" if stderr_tail else ""
+    return ViabilityResult(
+        False,
+        f"smoke status={status}: research() raised — "
+        f"{result.get('explanation') or result.get('abstain_reason')}{tail}")
+
+
+def _tail(path: Path, n: int = 2000) -> str:
+    """Last ~n chars of a file (the worker's job.err), for failed-candidate diagnostics."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-n:]
+    except OSError:
+        return ""
+
+
+def _empty_git_workspace(path: Path) -> str:
+    """A valid-but-empty git repo with one initial commit, so the candidate's research
+    probes (``git log``/``show``/…) don't fail for *environmental* reasons and falsely
+    reject a healthy self. Returns the empty-commit SHA (a usable ``base_sha``)."""
+    for args in (
+        ["git", "-C", str(path), "init", "--quiet"],
+        ["git", "-C", str(path), "config", "--local", "user.name", "smoke"],
+        ["git", "-C", str(path), "config", "--local", "user.email", "smoke@local"],
+        ["git", "-C", str(path), "commit", "--quiet", "--allow-empty", "-m", "smoke"],
+    ):
+        subprocess.run(args, check=False, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    out = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
+                         text=True, stdout=subprocess.PIPE, check=False)
+    return out.stdout.strip() or ""
 
 
 def check_viability(candidate_repo: str | Path, run_dir: str | Path) -> ViabilityResult:
-    """Spawn ``proposer_lane_worker --check`` on a candidate self-repo and return its
-    verdict. The worker redirects ``import proposer`` to ``candidate_repo`` (via
-    ``--self-repo``) and runs the offline assertions (boot / contract version /
-    continuity load / protocol produce). Exit 0 = viable; non-zero = broken self.
+    """Smoke-test a candidate self-repo: run it as a normal task-mode proposer lane on
+    the run's real goal + a throwaway empty workspace, and return whether it reached a
+    COMPLETED terminal. See the module/section notes for the semantics.
 
-    Offline + deterministic by construction: the check subprocess never calls the
-    model (it only exercises import + continuity read + data-model construction), so
-    no network is needed. ``run_dir`` supplies the incumbent continuity the candidate
-    must still be able to read.
+    Isolation: the smoke run gets a TEMP run_dir carrying only a copy of the real
+    run's ``config.resolved.json`` (so goal / runtime / repo paths are real) but FRESH
+    proposer memory and an EMPTY workspace — it never writes to the real run's proposer
+    state. ``candidate_repo`` is loaded via the worker's ``--self-repo`` redirect.
     """
-    argv = [
-        sys.executable, "-m", "simpleloop.proposer_lane_worker",
-        "--check",
-        "--self-repo", str(candidate_repo),
-        "--run-dir", str(run_dir),
-        "--contract-version", EXPECTED_CONTRACT_VERSION,
-    ]
-    try:
-        proc = subprocess.run(
-            argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            check=False, timeout=_VIABILITY_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
+    run_dir = Path(run_dir)
+    resolved = run_dir / "config.resolved.json"
+    if not resolved.is_file():
         return ViabilityResult(
-            viable=False, exit_code=-1, stdout="",
-            stderr=f"viability check timed out after {_VIABILITY_TIMEOUT_SECONDS}s: "
-                   f"{exc}",
-        )
-    return ViabilityResult(
-        viable=proc.returncode == 0,
-        exit_code=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-    )
+            False, f"no config.resolved.json in {run_dir} — cannot smoke-test")
+
+    candidate = str(Path(candidate_repo).resolve())
+    with TemporaryDirectory() as base:
+        smoke_run, result_dir = Path(base), Path(base) / "result"
+        result_dir.mkdir()
+        shutil.copy2(resolved, smoke_run / "config.resolved.json")
+        smoke_ws = smoke_run / "ws"
+        smoke_ws.mkdir()
+        base_sha = _empty_git_workspace(smoke_ws)
+        # Mirrors ProposerLaneSpec.to_dict() (mode="task"); the worker reads it via
+        # ProposerLaneSpec.from_dict, which tolerates extra/missing fields.
+        manifest = {
+            "lane_id": 0, "round_id": 0, "base_sha": base_sha,
+            "run_dir": str(smoke_run), "workspace_path": str(smoke_ws),
+            "result_dir": str(result_dir), "prompt_dir": "",
+            "proposal_slots": 1, "scientist_steps": _SMOKE_SCIENTIST_STEPS,
+            "attempt": 1, "mode": "task",
+        }
+        (result_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        argv = [sys.executable, "-m", "simpleloop.proposer_lane_worker",
+                "--self-repo", candidate,
+                "--manifest", str(result_dir / "manifest.json")]
+        err_path = result_dir / "job.err"
+        with open(err_path, "w") as err:
+            try:
+                proc = subprocess.run(
+                    argv, stdout=subprocess.DEVNULL, stderr=err,
+                    check=False, timeout=_SMOKE_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                return ViabilityResult(
+                    False, f"smoke run timed out after {_SMOKE_TIMEOUT_SECONDS}s")
+
+        result = None
+        rpath = result_dir / "result.json"
+        if rpath.is_file():
+            try:
+                decoded = json.loads(rpath.read_text(encoding="utf-8"))
+                result = decoded if isinstance(decoded, dict) else None
+            except (OSError, json.JSONDecodeError):
+                result = None
+        return _classify_smoke(
+            result, exit_code=proc.returncode, stderr_tail=_tail(err_path))
+
+
+# ---- self-execution + adoption (S3d) --------------------------------------
+# TransitionResult + the self-executor prompt. The transition logic itself lives
+# on SelfRepo (it owns the self-repo git lifecycle and calls check_viability);
+# this is the result type it returns and the prompt it feeds the reused executor.
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    """Outcome of a self-change transition (S3d). ``candidate_self_sha`` is None
+    when the executor produced no usable change (no instruction / error / no
+    edit); ``viable``/``adopted`` reflect the smoke test + adoption decision."""
+
+    candidate_self_sha: str | None
+    viable: bool
+    adopted: bool
+    detail: str
+
+
+def _self_exec_prompt(self_change: dict) -> str:
+    """Build the self-executor's prompt from a self_change (target/intent/
+    instruction). The executor edits ``proposer/`` in its worktree; the writable
+    boundary is enforced by the contained mount (only proposer/ rw), not by this
+    text — maximum freedom, the smoke test is the only gate."""
+    sc = self_change or {}
+    return f"""You are modifying the Scientist — the ``proposer/`` package, your own source.
+A self-review diagnosed that the "{sc.get('target') or '?'}" layer limits progress toward the Goal.
+
+Intent:
+{sc.get('intent') or ''}
+
+Change to make:
+{sc.get('instruction') or ''}
+
+Edit the ``proposer/`` source files in this worktree. Everything outside it is
+read-only; do not run git or touch ``.git`` — the harness inspects and commits your
+file changes. When the edit is complete, stop.
+"""

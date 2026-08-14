@@ -30,7 +30,7 @@ from .harness import views
 from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
 from .reporting.telemetry import RunTelemetry
-from .container.runtime import ApptainerRuntime, world_mount_map
+from .container.runtime import ApptainerRuntime, MountMap, world_mount_map
 from .harness.workspace import Workspace
 from .processes import run_signal_handlers
 from .self_repo import SelfRepo
@@ -83,6 +83,7 @@ class RunContext:
     store: Store | None = None
     telemetry: RunTelemetry | None = None
     executor_agent: Agent | None = None
+    self_executor_agent: Agent | None = None
     prompt_dir: Path | None = None
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
@@ -663,21 +664,66 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
 _DEFAULT_SELF_REVIEW_DEFER = 8
 
 
+def _get_self_executor(ctx: RunContext) -> Agent:
+    """The self-executor: the same claude-p Agent as the task executor, but under
+    a contained mount that exposes only the self-worktree (the whole worktree
+    read-only, ``proposer/`` writable) so it can edit the proposer source without
+    seeing or corrupting the rest of the run. Built lazily — only when a CHANGE
+    actually happens (RSI S3d)."""
+    if ctx.self_executor_agent is None:
+        executor = ctx.cfg["roles"]["executor"]
+        ctx.self_executor_agent = Agent(
+            runtime=ctx.runtime, command="claude",
+            timeout_seconds=ctx.cfg.get("agent_timeout_seconds", 3600),
+            allowed_tools="Read,Edit,Write,Bash",
+            max_output_tokens=ctx.cfg.get("agent_max_output_tokens", 64000),
+            model=executor["model"],
+            base_url=executor["base_url"],
+            usage_observer=ctx.telemetry.record_usage,
+            mounts=MountMap(rw=("proposer",)),
+        )
+    return ctx.self_executor_agent
+
+
 def _run_self_review_round(ctx: RunContext, round_id: int) -> str:
-    """Run one RSI self-review round (S3c.2): invoke the proposer in self mode,
-    record the decision in reviews.jsonl, and write the next commitment back to
-    state.json. Returns the decision ("KEEP"|"CHANGE"). Does NOT touch the task
-    incumbent, prior_metrics, or history.jsonl — the caller `continue`s past the
-    task-round body."""
+    """Run one RSI self-review round: invoke the proposer in self mode, record the
+    decision in reviews.jsonl, and write the next commitment back to state.json.
+    On CHANGE (S3d) the Host also applies the self_change via the self-executor,
+    smoke-tests the candidate, and adopts it if viable — filling the ledger's
+    candidate_self_sha / viable / adopted. Returns the decision ("KEEP"|"CHANGE").
+    Does NOT touch the task incumbent, prior_metrics, or history.jsonl — the caller
+    ``continue``s past the task-round body."""
     payload = ctx.execution_backend.run_self_review(round_id=round_id)
+    decision = payload.get("decision") or "KEEP"
     defer = payload.get("next_review_after_rounds")
     if not isinstance(defer, int) or isinstance(defer, bool) or defer < 1:
         defer = _DEFAULT_SELF_REVIEW_DEFER
     next_review_round = round_id + defer
+
+    candidate_sha = viable = adopted = None
+    if decision == "CHANGE" and payload.get("self_change"):
+        tr = ctx.self_repo.transition(
+            agent=_get_self_executor(ctx),
+            self_change=payload["self_change"],
+            run_dir=ctx.run_dir,
+            label=f"self-exec r{round_id}")
+        candidate_sha, viable, adopted = (
+            tr.candidate_self_sha, tr.viable, tr.adopted)
+        if tr.adopted:
+            outcome = "adopted"
+        elif tr.candidate_self_sha:
+            outcome = f"rejected ({tr.detail})"
+        else:
+            outcome = f"no candidate ({tr.detail})"
+        print(f"[{stamp()}] [rsi] self-change r{round_id + 1}: {outcome}"
+              + (f" candidate={tr.candidate_self_sha[:10]}"
+                 if tr.candidate_self_sha else ""), flush=True)
+
     ctx.self_repo.append_review(
-        round_id, payload=payload, next_review_round=next_review_round)
+        round_id, payload=payload, next_review_round=next_review_round,
+        candidate_self_sha=candidate_sha, viable=viable, adopted=adopted)
     ctx.self_repo.update_commitment(next_self_review_round=next_review_round)
-    return payload.get("decision") or "KEEP"
+    return decision
 
 
 def _summary(ctx: RunContext, run_dir_path: Path) -> dict:
