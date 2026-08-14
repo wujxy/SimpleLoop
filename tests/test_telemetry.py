@@ -11,6 +11,7 @@ from simpleloop.candidate_worker import CandidateSpec, candidate_failure
 from simpleloop.loop import RunContext, _finalize_candidates
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
+from round_helpers import append_round
 
 
 class Clock:
@@ -313,7 +314,7 @@ def test_store_persists_candidate_and_generation_telemetry(tmp_path):
     candidate_snapshot = {"worktime_seconds": 2.0, "processed_tokens": 10}
     generation_snapshot = {"worktime_seconds": 3.0, "processed_tokens": 12}
 
-    store.append_generation(
+    append_round(store,
         0,
         parent_sha="base",
         selected_candidate=0,

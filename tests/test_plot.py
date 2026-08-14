@@ -11,6 +11,7 @@ from simpleloop.reporting import plot as plot_mod
 from simpleloop.reporting.plot import build_series
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry
+from round_helpers import append_round
 
 
 _RESEARCHER = {
@@ -227,7 +228,7 @@ def test_atomic_replace_failure_preserves_previous_png(monkeypatch, tmp_path):
 
 def test_refresh_progress_plot_uses_persisted_history(monkeypatch, tmp_path):
     store = Store(tmp_path, metrics_schema=SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
             "candidate": 0, "proposal": "proposal", "sha": "sha",
@@ -271,7 +272,7 @@ def test_refresh_progress_plot_swallows_history_read_failure(monkeypatch, tmp_pa
 def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     run_dir = tmp_path / "run"
     store = Store(run_dir, metrics_schema=SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
             "candidate": 0, "proposal": "proposal", "sha": "sha",
@@ -577,7 +578,7 @@ def test_refresh_progress_plot_passes_persisted_context(
     monkeypatch, tmp_path,
 ):
     store = Store(tmp_path, metrics_schema=SCHEMA_NO_GATES)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
             "candidate": 0, "proposal": "proposal", "sha": "sha",
@@ -619,7 +620,7 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
 ):
     run_dir = tmp_path / "run"
     store = Store(run_dir, metrics_schema=SCHEMA_NO_GATES)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha",
         candidates=[{
             "candidate": 0, "proposal": "proposal", "sha": "sha",
@@ -727,7 +728,7 @@ def test_plot_command_redraws_overview_offline(tmp_path, capsys):
     # a run dir as the loop leaves it: history.jsonl + telemetry.json
     run_dir = tmp_path / "run"
     store = Store(run_dir, metrics_schema=SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=1, selected_sha="winner",
         candidates=HISTORY[0]["candidates"],
         telemetry=HISTORY[0]["telemetry"],

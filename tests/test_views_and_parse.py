@@ -8,6 +8,7 @@ import pytest
 from simpleloop.harness import views
 from simpleloop.harness import store as store_mod
 from simpleloop.harness.store import Store
+from round_helpers import append_round
 
 
 # --- Store: factual fields remain persisted in history ---
@@ -36,7 +37,7 @@ def test_store_persists_only_factual_candidate_fields(tmp_path: Path):
         "selected": False,
     }
 
-    store.append_generation(
+    append_round(store,
         0,
         parent_sha="parent",
         selected_candidate=0,
@@ -52,10 +53,10 @@ def test_store_persists_only_factual_candidate_fields(tmp_path: Path):
                 & row["candidates"][0].keys())
 
 
-def test_append_generation_records_abstained_round(tmp_path: Path):
+def test_append_round_records_abstained_round(tmp_path: Path):
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
 
-    store.append_generation(
+    append_round(store,
         0,
         parent_sha="parent",
         selected_candidate=None,
@@ -77,12 +78,12 @@ def test_append_generation_records_abstained_round(tmp_path: Path):
     }
 
 
-def test_append_generation_omits_abstention_key_for_normal_round(
+def test_append_round_omits_abstention_key_for_normal_round(
     tmp_path: Path,
 ):
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
 
-    store.append_generation(
+    append_round(store,
         0,
         parent_sha="parent",
         selected_candidate=None,
@@ -93,9 +94,9 @@ def test_append_generation_omits_abstention_key_for_normal_round(
     assert "abstention" not in store.history()[0]
 
 
-def test_append_generation_records_deliberation_telemetry(tmp_path: Path):
+def test_append_round_records_deliberation_telemetry(tmp_path: Path):
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
-    store.append_generation(
+    append_round(store,
         0,
         parent_sha="parent",
         selected_candidate=None,
@@ -111,9 +112,9 @@ def test_append_generation_records_deliberation_telemetry(tmp_path: Path):
     assert row["deliberation_telemetry"]["verification_status"] == "supported"
 
 
-def test_append_generation_omits_telemetry_when_absent(tmp_path: Path):
+def test_append_round_omits_telemetry_when_absent(tmp_path: Path):
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=None,
         selected_sha=None, candidates=[],
     )
@@ -155,10 +156,10 @@ def test_store_rejects_nonfinite_objective(objective: float):
 # --- Store: changed_paths persisted (landing-state signal for the proposer) ---
 
 def test_store_persists_changed_paths(tmp_path: Path):
-    """append_generation stores changed_paths so the proposer can see what each
+    """append_round stores changed_paths so the proposer can see what each
     round touched without running git."""
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=0, selected_sha="sha0",
         candidates=[{
             "candidate": 0, "proposal": "p0", "sha": "sha0",
@@ -174,7 +175,7 @@ def test_store_persists_candidate_acceptance_and_resulting_base(tmp_path: Path):
     """A rejected implementation keeps its candidate SHA while the accepted
     base stays on the prior commit."""
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="baseline", selected_candidate=None, selected_sha=None,
         candidates=[{
             "candidate": 0, "proposal": "p0", "sha": "candidate0",
@@ -194,7 +195,7 @@ def test_store_changed_paths_default_empty(tmp_path: Path):
     back as an empty list, not a missing key — the proposer can rely on the
     field always being present."""
     store = Store(tmp_path, metrics_schema=_STORE_SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha="parent", selected_candidate=None, selected_sha=None,
         candidates=[{
             "candidate": 0, "proposal": "p0", "sha": "sha0",

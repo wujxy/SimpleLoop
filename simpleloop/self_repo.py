@@ -188,7 +188,7 @@ class SelfRepo:
 
     # ---- self-review ledger (RSI S3c.2) ------------------------------------
     # Host-owned, Host-appended; the proposer reads it read-only (contract §9.2 /
-    # semantics §15). Mirrors harness/store.py:append_generation's open-append-one-
+    # semantics §15). Mirrors harness/store.py:append_round's open-append-one-
     # line pattern (no tmp-replace, no per-write flock — the run-level flock at
     # loop._acquire_run_lock serializes).
 

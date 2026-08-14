@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import fcntl
 import json
-import math
 import os
 import shutil
 import socket
@@ -26,7 +25,8 @@ from .stages.proposer import Proposal, ProposalBatch, ProposerRequest
 from .harness import views
 from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate
-from .persistence.artifacts import encode_candidate_result
+from .round import RoundResult
+from .stages.selector import select_candidate
 from .reporting.telemetry import RunTelemetry
 from .container.runtime import ApptainerRuntime, MountMap, world_mount_map
 from .harness.workspace import Workspace
@@ -312,8 +312,6 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             continue
 
         inflight = _load_inflight(ctx.run_dir)
-        abstention = None
-        deliberation_telemetry = None
         if inflight is not None:
             if inflight.get("round_id") != round_id:
                 raise ValueError(
@@ -329,10 +327,24 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 ctx.run_dir / INFLIGHT_NAME,
                 meta={k: v for k, v in inflight.items() if k != "jobs"})
             proposals_meta = inflight.get("proposals") or []
-            proposals_batch = [
-                str(item["instruction"])
-                if isinstance(item, dict) else str(item)
+            proposal_batch = ProposalBatch(tuple(
+                Proposal(
+                    instruction=(
+                        str(item["instruction"])
+                        if isinstance(item, dict) else str(item)
+                    ),
+                    evidence_refs=tuple(
+                        str(ref)
+                        for ref in (
+                            item.get("evidence_refs") or ()
+                            if isinstance(item, dict) else ()
+                        )
+                    ),
+                )
                 for item in proposals_meta
+            ))
+            proposal_instructions = [
+                proposal.instruction for proposal in proposal_batch.proposals
             ]
             try:
                 candidates = ctx.execution_backend.resume_round(
@@ -345,36 +357,31 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                       "--continue again.", flush=True)
                 return _summary(ctx, run_dir_path)
         else:
-            proposal_result = _next_proposals(
+            proposal_batch = _next_proposals(
                 ctx, static_proposals, round_id, parent_sha)
-            _write_proposer_trace(ctx, round_id, proposal_result)
+            _write_proposer_trace(ctx, round_id, proposal_batch)
             _write_proposals_handoff(ctx, round_id, parent_sha,
-                                     proposal_result)
-            deliberation_telemetry = dict(proposal_result.telemetry)
-            if proposal_result.abstained:
+                                     proposal_batch)
+            if proposal_batch.abstained:
                 # Zero-candidate round: the Scientist judged no experiment
                 # worth its execution cost. Skip the executor entirely and
                 # record the abstention so --continue counts the round as
                 # consumed and the next round can see why nothing ran.
-                abstention = {
-                    "reason": proposal_result.abstention.reason,
-                    "blocking_unknown": (
-                        proposal_result.abstention.blocking_unknown
-                    ),
-                }
                 print(f"[{stamp()}] proposer abstained round {round_id + 1}: "
-                      f"{proposal_result.abstention.reason}", flush=True)
+                      f"{proposal_batch.abstention.reason}", flush=True)
                 candidates = ()
                 journal = None
             else:
-                abstention = None
-                proposals_batch = [p.instruction for p in proposal_result.proposals]
+                proposal_instructions = [
+                    proposal.instruction
+                    for proposal in proposal_batch.proposals
+                ]
                 proposals_meta = [
                     {
                         "instruction": prop.instruction,
                         "evidence_refs": list(prop.evidence_refs),
                     }
-                    for prop in proposal_result.proposals
+                    for prop in proposal_batch.proposals
                 ]
                 journal = _InflightJournal(
                     ctx.run_dir / INFLIGHT_NAME,
@@ -385,7 +392,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                     })
                 try:
                     candidates = ctx.execution_backend.run_candidates(
-                        proposals=proposals_batch, round_id=round_id,
+                        proposals=proposal_instructions, round_id=round_id,
                         parent_sha=parent_sha, journal=journal)
                 except InfraRoundError as exc:
                     # The round is not consumed: inflight_round.json stays on
@@ -397,30 +404,38 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                           "re-propose).", flush=True)
                     return _summary(ctx, run_dir_path)
         candidates = _finalize_candidates(ctx, tuple(candidates))
-        if static_proposals is not None:
-            # Controlled-experiment rule: hard gates alone decide, so a
-            # regressing-but-valid experiment still advances the chain.
-            first = candidates[0] if candidates else None
-            winner = first if first and first.eligible and first.sha else None
-        else:
-            winner = _select_winner(
-                candidates,
-                ctx.metrics_schema,
-                prior_metrics=prior_metrics,
-            )
-        if abstention is None:
+        objective = ctx.metrics_schema["objective"]
+        prior_value = (prior_metrics or {}).get(objective["key"])
+        selection = select_candidate(
+            candidates=candidates,
+            objective_key=objective["key"],
+            lower_is_better=objective["lower_is_better"],
+            incumbent_value=(
+                float(prior_value)
+                if isinstance(prior_value, (int, float))
+                and not isinstance(prior_value, bool) else None
+            ),
+            require_improvement=static_proposals is None,
+        )
+        winner = next(
+            (
+                candidate for candidate in candidates
+                if candidate.candidate_id == selection.candidate_id
+            ),
+            None,
+        )
+        if proposal_batch.abstention is None:
             _print_round_performance(
                 round_id, candidates, ctx.metrics_schema, prior_metrics,
             )
-        selected_candidate = winner.candidate_id if winner else None
-        selected_sha = winner.sha if winner else None
-        next_base_sha = selected_sha or parent_sha
+        selected_candidate = selection.candidate_id
+        selected_sha = selection.sha
         if winner:
             print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
                   f"{selected_sha[:10]}", flush=True)
             prior_metrics = dict(winner.metrics) or prior_metrics
         else:
-            if abstention is not None:
+            if proposal_batch.abstention is not None:
                 reason = "proposer abstained (no experiment worth its cost)"
             else:
                 reason = ("candidate rejected by hard gates"
@@ -428,24 +443,19 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                           else "no eligible candidate improved the incumbent")
             print(f"[{stamp()}] {reason}; parent stays {parent_sha[:10]}",
                   flush=True)
-        ctx.store.append_generation(
-            round_id, parent_sha=parent_sha,
-            selected_candidate=selected_candidate, selected_sha=selected_sha,
-            candidates=[
-                encode_candidate_result(
-                    candidate,
-                    selected=candidate.candidate_id == selected_candidate,
-                )
-                for candidate in candidates
-            ],
-            abstention=abstention,
-            deliberation_telemetry=deliberation_telemetry,
+        round_result = RoundResult(
+            round_id=round_id,
+            parent_sha=parent_sha,
+            proposals=proposal_batch,
+            candidates=candidates,
+            selection=selection,
             telemetry=ctx.telemetry.snapshot(persist=True),
         )
+        ctx.store.append_round(round_result)
         if journal is not None:
             journal.clear()
         _refresh_progress_plot(ctx.store, ctx.telemetry.plot_context())
-        parent_sha = next_base_sha
+        parent_sha = round_result.next_sha
 
     summary = _summary(ctx, run_dir_path)
     print(f"\n[{stamp()}] done. best={summary['best_sha']}", flush=True)
@@ -901,37 +911,6 @@ def _candidate_failure(candidate_id: int, proposal: str,
         changed_paths=changed_paths, metrics_schema=metrics_schema)
 
 
-def _select_winner(candidates: tuple[CandidateResult, ...],
-                   metrics_schema: dict,
-                   prior_metrics: dict | None = None) -> CandidateResult | None:
-    """Select an eligible candidate only when it improves the incumbent
-    (deliberately no score-based fallback — the harness owns the objective)."""
-    obj = metrics_schema["objective"]
-    key = obj["key"]
-    eligible_cands = [
-        candidate for candidate in candidates
-        if candidate.eligible and candidate.sha
-        and isinstance(candidate.metrics.get(key), (int, float))
-        and not isinstance(candidate.metrics.get(key), bool)
-        and math.isfinite(candidate.metrics[key])
-    ]
-    if not eligible_cands:
-        return None
-    lower = obj["lower_is_better"]
-    direction = 1 if lower else -1
-    winner = min(eligible_cands, key=lambda c: (
-        direction * c.metrics[key],
-        c.candidate_id,
-    ))
-    prior_value = (prior_metrics or {}).get(key)
-    if isinstance(prior_value, (int, float)):
-        winner_value = winner.metrics[key]
-        improved = winner_value < prior_value if lower else winner_value > prior_value
-        if not improved:
-            return None
-    return winner
-
-
 def _print_round_performance(
     round_id: int,
     candidates: tuple[CandidateResult, ...],
@@ -941,7 +920,20 @@ def _print_round_performance(
     """Print the best gate-passing harness result against the round parent."""
     obj = metrics_schema["objective"]
     key = obj["key"]
-    best = _select_winner(candidates, metrics_schema)
+    selection = select_candidate(
+        candidates=candidates,
+        objective_key=key,
+        lower_is_better=obj["lower_is_better"],
+        incumbent_value=None,
+        require_improvement=False,
+    )
+    best = next(
+        (
+            candidate for candidate in candidates
+            if candidate.candidate_id == selection.candidate_id
+        ),
+        None,
+    )
     if best is None:
         result = f"{key}=unavailable (no eligible candidate)"
     else:

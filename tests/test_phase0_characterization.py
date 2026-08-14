@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 
 from simpleloop.candidate_worker import CandidateDeps, CandidateSpec, run_candidate
-from simpleloop.persistence.artifacts import encode_candidate_result
+from simpleloop.persistence.artifacts import (
+    decode_candidate_result,
+    encode_candidate_result,
+)
 from simpleloop.execution.proposer_lanes import (
     read_lane_result,
     read_self_review_result,
@@ -14,6 +17,9 @@ from simpleloop.harness.evals import EvalResult
 from simpleloop.harness.store import Store
 from simpleloop.loop import _InflightJournal, _load_inflight
 from simpleloop.roles.executor import ExecResult
+from simpleloop.round import RoundResult
+from simpleloop.stages.proposer import Abstention, ProposalBatch
+from simpleloop.stages.selector import Selection
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "phase0"
@@ -92,15 +98,50 @@ def test_self_review_result_shape(tmp_path: Path):
 
 def test_history_round_shape(tmp_path: Path):
     store = Store(tmp_path, metrics_schema=SCHEMA)
-    store.append_generation(
-        2,
+    candidate = decode_candidate_result(load("candidate-result.json"))
+    store.append_round(RoundResult(
+        round_id=2,
         parent_sha="parent",
-        selected_candidate=1,
-        selected_sha="child",
-        candidates=[load("candidate-result.json")],
-    )
+        proposals=ProposalBatch((candidate.proposal,)),
+        candidates=(candidate,),
+        selection=Selection(1, "child", "selected"),
+    ))
 
     assert store.history() == [load("history-round.json")]
+
+
+def test_abstained_round_projection(tmp_path: Path):
+    store = Store(tmp_path, metrics_schema=SCHEMA)
+    store.append_round(RoundResult(
+        round_id=3,
+        parent_sha="parent",
+        proposals=ProposalBatch(
+            (),
+            Abstention("no useful experiment", "missing profile"),
+            telemetry={"steps": 2},
+        ),
+        candidates=(),
+        selection=Selection(None, None, "no_eligible_candidate"),
+        telemetry={"worktime_seconds": 1.0},
+    ))
+
+    assert store.history() == [{
+        "round": 3,
+        "parent_sha": "parent",
+        "selected_candidate": None,
+        "selected_sha": None,
+        "proposal": "",
+        "metrics": {},
+        "changed_paths": [],
+        "base_sha": "parent",
+        "candidates": [],
+        "telemetry": {"worktime_seconds": 1.0},
+        "abstention": {
+            "reason": "no useful experiment",
+            "blocking_unknown": "missing profile",
+        },
+        "deliberation_telemetry": {"steps": 2},
+    }]
 
 
 def test_inflight_round_shape(tmp_path: Path):

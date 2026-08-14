@@ -21,12 +21,14 @@ from proposer.memory import MemoryService
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.roles.executor import ExecResult
 from simpleloop.harness.evals import EvalResult
-from simpleloop.loop import RunContext, _run_candidates, _select_winner
+from simpleloop.loop import RunContext, _run_candidates
 from simpleloop.execution import proposer_lanes
 from simpleloop.execution.base import InfraRoundError
 from simpleloop.execution.local import LocalBackend
 from simpleloop.harness.store import Store, best_candidate
 from simpleloop.stages.proposer import Proposal, ProposalBatch, ProposerRequest
+from simpleloop.stages.selector import select_candidate
+from round_helpers import append_round
 
 
 EXAMPLES = Path(__file__).parents[1] / "examples"
@@ -67,6 +69,21 @@ def _typed(rows: list[dict]) -> tuple[CandidateResult, ...]:
             telemetry=row.get("telemetry") or {},
         ))
     return tuple(results)
+
+
+def _select(candidates, schema, prior_metrics=None):
+    objective = schema["objective"]
+    prior = (prior_metrics or {}).get(objective["key"])
+    return select_candidate(
+        candidates=tuple(candidates),
+        objective_key=objective["key"],
+        lower_is_better=objective["lower_is_better"],
+        incumbent_value=(
+            float(prior)
+            if isinstance(prior, (int, float)) and not isinstance(prior, bool)
+            else None
+        ),
+    )
 
 
 def _example_yaml(relative_path: str) -> dict:
@@ -184,7 +201,7 @@ def test_selector_uses_objective_and_filters_ineligible_candidates():
         {"candidate": 3, "sha": "winner", "gate_passed": True, "eligible": True,
          "metrics": {"SPEED_MS": 650.0, "CORRECTNESS": True, "EVAL_RESULT": True}},
     ]
-    assert _select_winner(_typed(candidates), schema).sha == "winner"
+    assert _select(_typed(candidates), schema).sha == "winner"
 
 
 def test_selector_uses_only_eligibility_objective_and_candidate_order():
@@ -201,7 +218,7 @@ def test_selector_uses_only_eligibility_objective_and_candidate_order():
          "gate_passed": False, "eligible": False,
          "metrics": {"SPEED_MS": 400.0, "CORRECTNESS": False}},
     ]
-    assert _select_winner(_typed(candidates), schema).sha == "a"
+    assert _select(_typed(candidates), schema).sha == "a"
 
 
 @pytest.mark.parametrize(
@@ -231,11 +248,11 @@ def test_selector_keeps_incumbent_when_no_candidate_improves_objective(
         for i, value in enumerate(candidate_values)
     ]
 
-    assert _select_winner(
+    assert _select(
         _typed(candidates),
         schema,
         prior_metrics={"OBJECTIVE": prior_value},
-    ) is None
+    ).sha is None
 
 
 @pytest.mark.parametrize(
@@ -266,13 +283,13 @@ def test_selector_advances_only_when_best_candidate_improves_objective(
         for i, value in enumerate(candidate_values)
     ]
 
-    selected = _select_winner(
+    selected = _select(
         _typed(candidates),
         schema,
         prior_metrics={"OBJECTIVE": prior_value},
     )
 
-    assert selected is not None
+    assert selected.sha is not None
     assert selected.sha == winner
 
 
@@ -288,7 +305,7 @@ def test_selector_uses_best_candidate_when_prior_objective_is_missing():
          "metrics": {"OBJECTIVE": 10.0, "CORRECTNESS": True}},
     ]
 
-    assert _select_winner(
+    assert _select(
         _typed(candidates), schema, prior_metrics={}
     ).sha == "fast"
 
@@ -343,7 +360,7 @@ def test_store_records_generation_candidates_and_proposer_view(tmp_path: Path):
          "metrics": {"SPEED_MS": 500.0, "CORRECTNESS": True},
          "changed_paths": ["b.cc"], "selected": True},
     ]
-    store.append_generation(0, parent_sha="base", selected_candidate=1,
+    append_round(store, 0, parent_sha="base", selected_candidate=1,
                             selected_sha="b", candidates=candidates)
     rows = store.history()
     assert rows[0]["selected_sha"] == "b"
@@ -363,7 +380,7 @@ def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Pat
         "metrics": {"SPEED_MS": 100.0, "CORRECTNESS": True},
         "selected": True,
     }
-    store.append_generation(
+    append_round(store,
         0,
         parent_sha="baseline",
         selected_candidate=0,
@@ -376,7 +393,7 @@ def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Pat
         "metrics": {"SPEED_MS": 120.0, "CORRECTNESS": True},
         "selected": False,
     }
-    store.append_generation(
+    append_round(store,
         1,
         parent_sha="best",
         selected_candidate=None,
@@ -445,7 +462,7 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
     assert [candidate.proposal.instruction for candidate in candidates] == proposals
-    assert _select_winner(candidates, schema).candidate_id == 0
+    assert _select(candidates, schema).candidate_id == 0
 
 
 def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path, capsys):
@@ -670,7 +687,7 @@ def _run_loop_integration(
 ):
     run_dir = tmp_path / "run"
     seed = Store(run_dir, metrics_schema=_SCHEMA)
-    seed.append_generation(
+    append_round(seed,
         0,
         parent_sha="baseline-sha",
         selected_candidate=0,
@@ -820,7 +837,6 @@ def _run_loop_integration(
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
-    monkeypatch.setattr(loop_mod, "_select_winner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loop_mod, "_refresh_progress_plot", lambda *_args: None)
 
     loop_mod.run(

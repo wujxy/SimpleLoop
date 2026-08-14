@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 
 from . import memory as memory_mod
+from ..persistence.artifacts import encode_candidate_result
+from ..round import RoundResult
 
 def eligible(candidate: dict, metrics_schema: dict) -> bool:
     """Return whether a candidate may enter objective selection."""
@@ -62,66 +64,54 @@ class Store:
         """Read all rounds back (for the proposer's prompt)."""
         return memory_mod.read_history(self.path)
 
-    def append_generation(self, round_id: int, *, parent_sha: str,
-                          selected_candidate: int | None,
-                          selected_sha: str | None,
-                          candidates: list[dict],
-                          abstention: dict | None = None,
-                          deliberation_telemetry: dict | None = None,
-                          telemetry: dict | None = None) -> None:
-        """Record a self-loop generation with multiple candidate attempts.
+    def append_round(self, result: RoundResult) -> None:
+        """Project one typed terminal round into the legacy JSONL format.
 
         Every candidate row carries a stable ``experiment_id`` (``r<N>c<M>``).
         finding↔experiment attribution is NOT stored here — the Kernel ledger
         carries no finding semantics; the proposer re-derives attribution at
         read time by joining its own findings.jsonl refs against these
         experiment_ids (join-from-history, contract §2.5).
-        ``abstention`` (``reason`` + optional ``blocking_unknown``) marks a
-        zero-candidate round the Proposer deliberately abstained from.
-        ``deliberation_telemetry`` records behavioral facts only (steps, action
-        counts, verification outcome); the non-authoritative full trajectory
-        lives in proposer_traces/, never here.
+        Proposer abstention and deliberation telemetry come from the same
+        ``ProposalBatch`` that drove execution. The non-authoritative full
+        trajectory lives in proposer_traces/, never here.
         """
         normalized = []
-        for i, c in enumerate(candidates):
-            candidate_id = c.get("candidate", i)
-            experiment_id = c.get("experiment_id") or f"r{round_id}c{candidate_id}"
-            normalized.append({
-                "candidate": candidate_id,
-                "experiment_id": experiment_id,
-                "proposal": c.get("proposal") or "",
-                "parent_sha": c.get("parent_sha") or parent_sha,
-                "sha": c.get("sha"),
-                "status": c.get("status"),
-                "eval_block": (c.get("eval_block") or "")[:self.history_eval_cap],
-                "metrics": c.get("metrics") or {},
-                "changed_paths": c.get("changed_paths") or [],
-                "gates": c.get("gates") or {},
-                "gate_passed": c.get("gate_passed"),
-                "eligible": eligible(c, self.metrics_schema),
-                "selected": candidate_id == selected_candidate,
-                "telemetry": dict(c.get("telemetry") or {}),
-            })
+        for candidate in result.candidates:
+            row = encode_candidate_result(
+                candidate,
+                selected=(
+                    candidate.candidate_id == result.selection.candidate_id
+                ),
+            )
+            row["eval_block"] = str(row["eval_block"])[:self.history_eval_cap]
+            row.pop("self_report")
+            row["telemetry"] = dict(candidate.telemetry)
+            normalized.append(row)
         selected = next((c for c in normalized if c["selected"]), None)
         record = {
-            "round": round_id,
-            "parent_sha": parent_sha,
-            "selected_candidate": selected_candidate,
-            "selected_sha": selected_sha,
+            "round": result.round_id,
+            "parent_sha": result.parent_sha,
+            "selected_candidate": result.selection.candidate_id,
+            "selected_sha": result.selection.sha,
             "proposal": selected.get("proposal", "") if selected else "",
             "metrics": selected.get("metrics", {}) if selected else {},
             "changed_paths": selected.get("changed_paths", []) if selected else [],
-            "base_sha": selected_sha or parent_sha,
+            "base_sha": result.next_sha,
             "candidates": normalized,
-            "telemetry": dict(telemetry or {}),
+            "telemetry": dict(result.telemetry),
         }
-        if abstention is not None:
+        if result.proposals.abstention is not None:
             record["abstention"] = {
-                "reason": str(abstention.get("reason") or ""),
-                "blocking_unknown": abstention.get("blocking_unknown"),
+                "reason": result.proposals.abstention.reason,
+                "blocking_unknown": (
+                    result.proposals.abstention.blocking_unknown
+                ),
             }
-        if deliberation_telemetry:
-            record["deliberation_telemetry"] = dict(deliberation_telemetry)
+        if result.proposals.telemetry:
+            record["deliberation_telemetry"] = dict(
+                result.proposals.telemetry
+            )
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

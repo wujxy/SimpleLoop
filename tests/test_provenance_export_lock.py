@@ -14,6 +14,7 @@ from simpleloop import loop as loop_mod
 from simpleloop.harness import export as export_mod
 from simpleloop.harness.store import Store
 from simpleloop.harness.workspace import Workspace
+from round_helpers import append_round
 
 SCHEMA = {
     "objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -191,7 +192,7 @@ def _seed_run(tmp_path: Path):
     sha = ws.commit(wt, "0-c0", ["file.txt"])
     ws.remove_worktree("0-c0")
     store = Store(run_dir, metrics_schema=SCHEMA)
-    store.append_generation(
+    append_round(store,
         0, parent_sha=baseline, selected_candidate=0, selected_sha=sha,
         candidates=[{
             "candidate": 0, "proposal": "speed it up", "sha": sha,
@@ -272,7 +273,7 @@ def test_export_head_and_best_reject_empty_runs(tmp_path: Path):
     baseline = ws.baseline_sha()
     store = Store(run_dir, metrics_schema=SCHEMA)
     # one round, no commit: chain never advances, nothing eligible
-    store.append_generation(
+    append_round(store,
         0, parent_sha=baseline, selected_candidate=None, selected_sha=None,
         candidates=[{"candidate": 0, "proposal": "p", "sha": None,
                      "status": "NO_CHANGE", "metrics": {},
