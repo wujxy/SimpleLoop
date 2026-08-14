@@ -9,6 +9,10 @@ from typing import Protocol
 from ..world import SourceWorkspace
 
 
+class NoSelfChangeError(RuntimeError):
+    pass
+
+
 class SelfDecisionKind(str, Enum):
     KEEP = "KEEP"
     CHANGE = "CHANGE"

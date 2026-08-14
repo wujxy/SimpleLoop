@@ -7,14 +7,15 @@ from pathlib import Path, PurePosixPath
 
 from ..world import CommitRequest, SourceWorkspace, WorkspaceSpec
 from ..world.git import GitWorkspaceProvider
-from .models import SelfCandidate, SelfCommitRequest, SelfRevision
+from .models import (
+    NoSelfChangeError,
+    SelfCandidate,
+    SelfCommitRequest,
+    SelfRevision,
+)
 
 
 class SelfBodyError(RuntimeError):
-    pass
-
-
-class NoSelfChangeError(SelfBodyError):
     pass
 
 
