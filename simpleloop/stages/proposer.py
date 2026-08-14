@@ -40,6 +40,16 @@ class ProposalBatch:
         return not self.proposals
 
 
+class StaticProposer:
+    """Expose a fixed experiment list through the normal proposer port."""
+
+    def __init__(self, instructions: Sequence[str]):
+        self.instructions = tuple(instructions)
+
+    def propose(self, request: ProposerRequest) -> ProposalBatch:
+        return ProposalBatch((Proposal(self.instructions[request.round_id]),))
+
+
 def decode_lane_proposals(
     rows: Sequence[Mapping[str, object]],
 ) -> tuple[Proposal, ...]:

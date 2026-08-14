@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from simpleloop.loop import _starting_state
+from simpleloop.app import _starting_state
 from simpleloop.self_repo import LegacyRsiRunner, SelfRepo, ViabilityResult
 
 
@@ -120,35 +120,27 @@ def _task_history(n: int) -> list[dict]:
     ]
 
 
-def _resume_ctx(tmp_path: Path, history: list[dict], last_self) -> SimpleNamespace:
-    sr = SelfRepo(tmp_path)
-    sr.setup(resume=False)
-    if last_self is not None:
-        sr.append_review(last_self, payload=_keep_payload("x", defer=1),
-                         next_review_round=last_self + 1)
-    return SimpleNamespace(
-        self_repo=sr,
-        store=SimpleNamespace(history=lambda: history),
-        workspace=SimpleNamespace(baseline_sha=lambda: "abcdef1234"),
-        execution_backend=SimpleNamespace(
-            eval_baseline=lambda *, baseline_sha: ("", {"OBJ": 1.0})),
+def _resume_start(history: list[dict], last_self):
+    return _starting_state(
+        continue_run=True, stop_round=10, history=history,
+        baseline_sha="abcdef1234", last_self_review=last_self,
+        baseline=SimpleNamespace(evaluate=lambda request: SimpleNamespace(
+            metrics={"OBJ": 1.0},
+        )),
         telemetry=SimpleNamespace(),
-        baseline_metrics={},
     )
 
 
 def test_starting_state_resume_after_self_review(tmp_path: Path):
     # task rounds 0-4 in history (5 lines) + a self-review at round 5
-    ctx = _resume_ctx(tmp_path, _task_history(5), last_self=5)
-    start = _starting_state(ctx, continue_run=True, n_rounds=10)
+    start = _resume_start(_task_history(5), last_self=5)
     assert start is not None
-    start_round, parent_sha, _prior = start
-    assert start_round == 6  # NOT len(history)=5 — the self-review at r5 consumed a slot
-    assert parent_sha == "sha4"  # from the last TASK round (self-review didn't move it)
+    state, _baseline = start
+    assert state.next_round == 6
+    assert state.incumbent_sha == "sha4"
 
 
 def test_starting_state_resume_without_self_review_is_unchanged(tmp_path: Path):
     # no self-reviews → resume == len(history) (the historical behavior)
-    ctx = _resume_ctx(tmp_path, _task_history(5), last_self=None)
-    start = _starting_state(ctx, continue_run=True, n_rounds=10)
-    assert start[0] == 5
+    state, _baseline = _resume_start(_task_history(5), last_self=None)
+    assert state.next_round == 5

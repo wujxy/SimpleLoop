@@ -10,9 +10,10 @@ import pytest
 import yaml
 
 from simpleloop import config as config_mod
-from simpleloop import loop as loop_mod
+from simpleloop import app as app_mod
 from simpleloop.harness import export as export_mod
 from simpleloop.harness.store import Store
+from simpleloop.reporting.summary import write_summary
 from simpleloop.world import CommitRequest, WorkspaceSpec
 from simpleloop.world.git import GitWorkspaceProvider
 from round_helpers import append_round
@@ -97,7 +98,7 @@ def test_write_config_snapshot_roundtrip_and_orig_once(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    loop_mod._write_config_snapshot(cfg, config_path, run_dir)
+    app_mod._write_config_snapshot(cfg, config_path, run_dir)
     assert config_mod.load_resolved(run_dir) == cfg
     orig = run_dir / "config.orig.yaml"
     assert orig.read_text() == config_path.read_text()
@@ -106,7 +107,7 @@ def test_write_config_snapshot_roundtrip_and_orig_once(tmp_path: Path):
     # resolved snapshot but never the original copy.
     bumped = dict(cfg, max_rounds=9)
     config_path.write_text(config_path.read_text() + "# edited\n")
-    loop_mod._write_config_snapshot(bumped, config_path, run_dir)
+    app_mod._write_config_snapshot(bumped, config_path, run_dir)
     assert config_mod.load_resolved(run_dir)["max_rounds"] == 9
     assert "# edited" not in orig.read_text()
 
@@ -114,7 +115,7 @@ def test_write_config_snapshot_roundtrip_and_orig_once(tmp_path: Path):
 def test_snapshot_serializes_path_values(tmp_path: Path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    loop_mod._write_config_snapshot(
+    app_mod._write_config_snapshot(
         {"repo_path": tmp_path / "source", "metrics": SCHEMA},
         tmp_path / "no-such-config.yaml", run_dir)
     resolved = config_mod.load_resolved(run_dir)
@@ -125,16 +126,16 @@ def test_snapshot_serializes_path_values(tmp_path: Path):
 # ---- run_dir lock -----------------------------------------------------------
 
 def test_run_lock_excludes_second_holder(tmp_path: Path):
-    fd = loop_mod._acquire_run_lock(tmp_path)
+    fd = app_mod._acquire_run_lock(tmp_path)
     assert fd is not None
     holder = json.loads((tmp_path / ".lock").read_text())
     assert holder["pid"] > 0 and holder["host"]
-    with pytest.raises(loop_mod.RunLockError, match="locked by another"):
-        loop_mod._acquire_run_lock(tmp_path)
-    loop_mod._release_run_lock(fd)
-    fd2 = loop_mod._acquire_run_lock(tmp_path)
+    with pytest.raises(app_mod.RunLockError, match="locked by another"):
+        app_mod._acquire_run_lock(tmp_path)
+    app_mod._release_run_lock(fd)
+    fd2 = app_mod._acquire_run_lock(tmp_path)
     assert fd2 is not None
-    loop_mod._release_run_lock(fd2)
+    app_mod._release_run_lock(fd2)
 
 
 # ---- summary.json + export --------------------------------------------------
@@ -207,16 +208,16 @@ def _seed_run(tmp_path: Path):
             "gate_passed": True, "eligible": True, "selected": True,
         }])
     cfg = {"metrics": SCHEMA, "baseline_ref": "HEAD", "repo_path": str(src)}
-    loop_mod._write_config_snapshot(cfg, tmp_path / "absent.yaml", run_dir)
+    app_mod._write_config_snapshot(cfg, tmp_path / "absent.yaml", run_dir)
     return src, run_dir, ws, store, baseline, sha
 
 
 def test_summary_writes_summary_json(tmp_path: Path):
     _, run_dir, ws, store, baseline, sha = _seed_run(tmp_path)
-    ctx = loop_mod.RunContext(
-        cfg={"metrics": SCHEMA}, run_dir=run_dir, workspace=ws, store=store,
-        baseline_metrics={"SPEED_MS": 100.0, "CORRECTNESS": True})
-    summary = loop_mod._summary(ctx, run_dir)
+    summary = write_summary(
+        run_dir=run_dir, store=store, workspace=ws, metrics_schema=SCHEMA,
+        baseline_metrics={"SPEED_MS": 100.0, "CORRECTNESS": True},
+    )
     assert summary["best_sha"] == sha
     assert summary["best_objective"] == 90.0
     assert summary["baseline_objective"] == 100.0
@@ -229,12 +230,10 @@ def test_summary_writes_summary_json(tmp_path: Path):
 def test_summary_rebuilds_best_fields_from_history_on_resume(tmp_path: Path):
     _, run_dir, ws, _, _, sha = _seed_run(tmp_path)
     resumed_store = Store(run_dir, metrics_schema=SCHEMA)
-    ctx = loop_mod.RunContext(
-        cfg={"metrics": SCHEMA}, run_dir=run_dir, workspace=ws,
-        store=resumed_store,
+    summary = write_summary(
+        run_dir=run_dir, store=resumed_store, workspace=ws,
+        metrics_schema=SCHEMA, baseline_metrics={},
     )
-
-    summary = loop_mod._summary(ctx, run_dir)
 
     assert summary["best_sha"] == sha
     assert summary["best_round"] == 0
@@ -283,7 +282,7 @@ def test_export_head_and_best_reject_empty_runs(tmp_path: Path):
                      "status": "NO_CHANGE", "metrics": {},
                      "gate_passed": False, "eligible": False,
                      "selected": False}])
-    loop_mod._write_config_snapshot(
+    app_mod._write_config_snapshot(
         {"metrics": SCHEMA, "baseline_ref": "HEAD", "repo_path": str(src)},
         tmp_path / "absent.yaml", run_dir)
     with pytest.raises(export_mod.ExportError, match="no eligible best"):

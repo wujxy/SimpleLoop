@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import loop
+from . import app
 from . import config as config_mod
 from .harness import memory
 from .container.image import ImageBuildError, build_image
@@ -253,20 +253,20 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "run":
         try:
             cfg = config_mod.load(args.config)
-            summary = loop.run(
+            summary = app.run(
                 args.config, args.run_dir, proposals=args.proposals,
                 continue_run=args.continue_run,
             )
         except config_mod.ConfigError as exc:
             print(f"Config error: {exc}", file=sys.stderr)
             raise SystemExit(1)
-        except loop.RunLockError as exc:
+        except app.RunLockError as exc:
             print(f"Lock error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         except SandboxPreflightError as exc:
             print(f"Runtime error: {exc}", file=sys.stderr)
             raise SystemExit(1)
-        except loop.BaselineAcceptanceError as exc:
+        except app.BaselineAcceptanceError as exc:
             print(f"Baseline error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         except ValueError as exc:

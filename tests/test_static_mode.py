@@ -1,7 +1,8 @@
 """Static-proposal mode input validation."""
 from __future__ import annotations
 
-from simpleloop import loop as loop_mod
+from simpleloop import app as app_mod
+from simpleloop.stages.proposer import ProposerRequest, StaticProposer
 import pytest
 SCHEMA = {
     "objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -28,11 +29,11 @@ def _config(tmp_path, max_rounds=99):
 
 
 def test_static_mode_rejects_continue_combination(monkeypatch, tmp_path):
-    monkeypatch.setattr(loop_mod.config_mod, "load",
+    monkeypatch.setattr(app_mod.config_mod, "load",
                         lambda _path: _config(tmp_path))
     try:
-        loop_mod.run("config.yaml", tmp_path / "run",
-                     proposals=["p0"], continue_run=True)
+        app_mod.run("config.yaml", tmp_path / "run",
+                    proposals=["p0"], continue_run=True)
     except ValueError as exc:
         assert "--continue" in str(exc)
     else:
@@ -40,15 +41,16 @@ def test_static_mode_rejects_continue_combination(monkeypatch, tmp_path):
 
 
 def test_agent_mode_requires_researcher_before_context(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        loop_mod, "_build_context",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("context must not be built")
-        ),
-    )
-
-    with pytest.raises(loop_mod.config_mod.ConfigError, match="researcher"):
-        loop_mod._run_locked(
+    with pytest.raises(app_mod.config_mod.ConfigError, match="researcher"):
+        app_mod._run_locked(
             _config(tmp_path), tmp_path / "run", proposals=None,
             continue_run=False,
         )
+
+
+def test_static_proposer_has_explicit_request_to_proposal_mapping():
+    proposer = StaticProposer(("first", "second"))
+
+    result = proposer.propose(ProposerRequest(1, "goal", "base"))
+
+    assert [proposal.instruction for proposal in result.proposals] == ["second"]
