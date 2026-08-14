@@ -422,9 +422,15 @@ class LegacyRsiRunner:
         self.self_repo.update_commitment(
             next_self_review_round=next_review_round)
 
-        # Lazy import keeps the RSI substrate independent of orchestration.
-        from .loop import RsiResult
-        return RsiResult(round_id=round_id, decision=decision)
+        return RsiRunResult(round_id=round_id, decision=decision)
+
+
+@dataclass(frozen=True)
+class RsiRunResult:
+    """Structural result consumed by the loop's ``RsiRunner`` port."""
+
+    round_id: int
+    decision: str
 
 
 # ---- viability authority (S3b, revised: behavior-level smoke test) --------

@@ -22,7 +22,7 @@ def imported_modules(path: Path) -> set[str]:
 def test_host_pipeline_does_not_import_proposer_package():
     for relative in (
         "simpleloop/loop.py",
-        "simpleloop/execution/backend.py",
+        "simpleloop/app.py",
         "simpleloop/scheduling/worker.py",
         "simpleloop/stages/proposer.py",
     ):
@@ -69,7 +69,7 @@ def test_candidate_execution_modules_do_not_import_loop():
     for relative in (
         "simpleloop/candidate.py",
         "simpleloop/scheduling/handlers/candidate.py",
-        "simpleloop/execution/backend.py",
+        "simpleloop/scheduling/task.py",
         "simpleloop/stages/executor.py",
         "simpleloop/stages/evaluator.py",
         "simpleloop/stages/gate.py",
@@ -116,8 +116,25 @@ def test_legacy_scheduling_owners_are_removed():
         "simpleloop/execution/local.py",
         "simpleloop/execution/hepjob.py",
         "simpleloop/execution/proposer_lanes.py",
+        "simpleloop/execution/backend.py",
+        "simpleloop/execution/__init__.py",
     ):
         assert not (ROOT / relative).exists(), relative
+
+
+def test_phase5_removes_context_backend_and_keeps_loop_provider_free():
+    production = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "simpleloop").rglob("*.py")
+    )
+    assert "RunContext" not in production
+    assert "WorkerBackend" not in production
+    assert not (ROOT / "simpleloop/execution").exists()
+    loop_source = (ROOT / "simpleloop/loop.py").read_text(encoding="utf-8")
+    for concrete in (
+        "config", "Apptainer", "GitWorkspace", "RunTelemetry", "HEPJob",
+    ):
+        assert concrete not in loop_source
 
 
 def test_phase4_has_one_result_protocol_and_one_inflight_journal():

@@ -206,7 +206,7 @@ def test_store_changed_paths_default_empty(tmp_path: Path):
 
 
 def test_resume_chain_skips_rejected_tail_and_uses_last_accepted_metrics():
-    from simpleloop import loop as loop_mod
+    from simpleloop import app as loop_mod
 
     history = [
         {"round": 0, "selected_candidate": 0, "selected_sha": "good",
@@ -223,7 +223,7 @@ def test_resume_chain_skips_rejected_tail_and_uses_last_accepted_metrics():
 
 
 def test_resume_chain_falls_back_to_baseline_when_no_candidate_was_accepted():
-    from simpleloop import loop as loop_mod
+    from simpleloop import app as loop_mod
 
     history = [
         {"round": 0, "selected_candidate": None, "selected_sha": None,

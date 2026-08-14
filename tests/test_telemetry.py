@@ -7,9 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop import loop as loop_mod
+from simpleloop import app as loop_mod
 from simpleloop.candidate import CandidateRequest, candidate_failure_from_request
-from simpleloop.loop import RunContext, _finalize_candidates
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
 from simpleloop.stages.proposer import Proposal
@@ -209,143 +208,6 @@ def test_missing_resume_state_keeps_resource_axes_unavailable(tmp_path):
 
 # ---- loop wiring persists telemetry (merged from test_run_telemetry.py) ----
 
-def test_fresh_run_wires_agents_and_persists_fixed_baseline(
-    monkeypatch, tmp_path,
-):
-    run_dir = tmp_path / "run"
-    config = {
-        "goal": "make it faster",
-        "max_rounds": 0,
-        "candidates_per_round": 1,
-        "max_workers": 1,
-        "agent_timeout_seconds": 10,
-        "roles": {
-            "researcher": {
-                "model": "gpt-5.5", "base_url": "https://example.invalid",
-                "command_timeout_seconds": 2,
-                "command_output_cap_chars": 1000,
-            },
-            "executor": {
-                "model": "glm-5", "base_url": "https://example.invalid",
-            },
-        },
-        "repo_path": tmp_path / "source",
-        "baseline_ref": "HEAD",
-        "editable_paths": ["src/**"],
-        "frozen_paths": [],
-        "eval_commands": ["eval"],
-        "metrics": {
-            "objective": {"key": "SPEED_MS", "lower_is_better": True},
-            "gates": [],
-        },
-        "runtime_image": tmp_path / "runtime.sif",
-        "runtime_binds": [],
-    }
-    observers = []
-
-    class FakeRuntime:
-        def __init__(self, **_kwargs):
-            pass
-
-        def summary_lines(self):
-            return ()
-
-        def preflight(self):
-            pass
-
-        def executor_preflight(self, **_kwargs):
-            pass
-
-    class FakeAgent:
-        def __init__(self, **kwargs):
-            observers.append(kwargs.get("usage_observer"))
-
-    class FakeWorkspace:
-        def __init__(self, *, run_dir, **_kwargs):
-            self.repo = run_dir / "repo"
-
-        def setup(self):
-            self.repo.mkdir(parents=True, exist_ok=True)
-
-        def baseline_sha(self):
-            return "baseline"
-
-        def add_worktree(self, worktree_id, _parent_sha):
-            path = self.repo.parent / "worktrees" / worktree_id
-            path.mkdir(parents=True)
-            return path
-
-        def remove_worktree(self, _worktree_id):
-            pass
-
-    class FakeBackend:
-        def __init__(self, ctx):
-            pass
-
-        def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
-            return "baseline eval", {"SPEED_MS": 100.0}
-
-        def run_candidates(self, request, *, journal=None) -> list[dict]:
-            parent_sha = request.candidates[0].parent_sha
-            return [{
-                "candidate": 0,
-                "proposal": "test",
-                "parent_sha": parent_sha,
-                "sha": None,
-                "status": "NO_CHANGE",
-                "metrics": {"SPEED_MS": 95.0},
-                "gates": {},
-                "gate_passed": False,
-                "eligible": False,
-                "telemetry": {"worktime_seconds": 1.0, "processed_tokens": 10},
-            }]
-
-        def resume_round(self, jobs: list[dict], *, round_id: int,
-                         parent_sha: str, journal=None) -> list[dict]:
-            return []
-
-    monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
-    monkeypatch.setattr(loop_mod, "ApptainerSandbox", _FakeSandbox)
-    monkeypatch.setattr(loop_mod, "WorldBuilder", _FakeWorldBuilder)
-    monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
-    monkeypatch.setattr(loop_mod, "GitWorkspaceProvider", _FakeWorkspaceProvider)
-    monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
-
-    loop_mod.run("config.yaml", run_dir)
-
-    # Only the executor agent is wired in-process now (S2a.5a): the proposer
-    # runs as a subprocess, so its model usage arrives in the worker envelope and is
-    # ingested by collect_lane_results, not an in-process observer.
-    # Agents are now candidate-scoped and therefore not constructed in a
-    # zero-round run.
-    assert observers == []
-    state = json.loads((run_dir / "telemetry.json").read_text())
-    assert state["baseline_metrics"] == {"SPEED_MS": 100.0}
-    assert state["baseline_telemetry"]["processed_tokens"] == 0
-
-# ---- store/candidate telemetry integration (merged from test_telemetry_integration.py) ----
-
-class SnapshotTracker:
-    def __init__(self):
-        self.value = 0
-        self.persist_flags = []
-        self.recorded = []
-
-    def record_usage(self, usage):
-        self.recorded.append(usage)
-
-    def snapshot(self, *, persist=False):
-        self.value += 1
-        self.persist_flags.append(persist)
-        return {
-            "worktime_seconds": float(self.value),
-            "processed_tokens": self.value * 10,
-        }
-
-    def plot_context(self):
-        return {}
-
-
 def test_store_persists_candidate_and_generation_telemetry(tmp_path):
     store = Store(tmp_path, metrics_schema={
         "objective": {"key": "SPEED_MS", "lower_is_better": True}, "gates": []})
@@ -368,44 +230,3 @@ def test_store_persists_candidate_and_generation_telemetry(tmp_path):
     row = store.history()[0]
     assert row["telemetry"] == generation_snapshot
     assert row["candidates"][0]["telemetry"] == candidate_snapshot
-
-
-def test_finalize_candidates_ingests_usage_and_stamps_snapshots():
-    """The loop (not the backend) owns telemetry: worker-reported usage is
-    popped from the candidate and recorded, then each candidate gets a
-    persisted snapshot for its history row. On ihep_scale this is the
-    HEPJobBackend usage-ingest path (main removed it because it has no
-    remote backend)."""
-    tracker = SnapshotTracker()
-    ctx = RunContext(cfg={}, telemetry=tracker)
-    candidates = tuple(
-        replace(
-            candidate_failure_from_request(
-                CandidateRequest(
-                    0,
-                    candidate_id,
-                    "parent",
-                    Proposal(f"p{candidate_id}"),
-                    SourceWorkspace("test", Path("."), "parent"),
-                ),
-                "test",
-            ),
-            usage=(usage,),
-        )
-        for candidate_id, usage in enumerate((
-            {"input_tokens": 3, "output_tokens": 1},
-            {"input_tokens": 5, "output_tokens": 2},
-        ))
-    )
-
-    finalized = _finalize_candidates(ctx, candidates)
-
-    assert tracker.recorded == [
-        {"input_tokens": 3, "output_tokens": 1},
-        {"input_tokens": 5, "output_tokens": 2},
-    ]
-    assert all(not candidate.usage for candidate in finalized)
-    assert {
-        candidate.telemetry["worktime_seconds"] for candidate in finalized
-    } == {1.0, 2.0}
-    assert tracker.persist_flags == [True, True]

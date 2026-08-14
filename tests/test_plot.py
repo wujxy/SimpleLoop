@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop import loop as loop_mod
+from simpleloop import app as loop_mod
 from simpleloop.reporting import plot as plot_mod
 from simpleloop.reporting.plot import build_series
 from simpleloop.harness.store import Store

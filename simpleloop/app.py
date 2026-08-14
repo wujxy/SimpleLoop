@@ -160,8 +160,12 @@ def _run_locked(
     _preflight_executor(cfg, workspace, world_builder, sandbox_spec)
 
     jobs = _build_worker_jobs(cfg, run_dir, workspace)
+    baseline_jobs = _build_worker_jobs(
+        cfg, run_dir, workspace,
+        journal_path=run_dir / "baseline" / "inflight.json",
+    )
     baseline = ScheduledBaseline(
-        run_dir=run_dir, workspace=workspace, jobs=jobs,
+        run_dir=run_dir, workspace=workspace, jobs=baseline_jobs,
         telemetry=telemetry, metrics_schema=cfg["metrics"],
     )
     state_and_baseline = _starting_state(
@@ -274,7 +278,10 @@ def _starting_state(
     return LoopState(next_round, incumbent_sha, incumbent_metrics), baseline_metrics
 
 
-def _build_worker_jobs(cfg: Mapping[str, object], run_dir: Path, workspace):
+def _build_worker_jobs(
+    cfg: Mapping[str, object], run_dir: Path, workspace, *,
+    journal_path: str | Path | None = None,
+):
     backend = str(cfg.get("execution_backend") or "local").strip().lower()
     hep = cfg.get("hepjob") or {}
     if backend == "local":
@@ -304,7 +311,7 @@ def _build_worker_jobs(cfg: Mapping[str, object], run_dir: Path, workspace):
         supervisor=JobSupervisor(
             workspace_provider=workspace, poll_seconds=poll_seconds,
         ),
-        journal=JobJournal(run_dir / "inflight.json"),
+        journal=JobJournal(journal_path or run_dir / "inflight.json"),
         policy=WorkerJobPolicy(
             python,
             RetryPolicy(
@@ -456,8 +463,13 @@ def _print_round_performance(
 
 
 def _refresh_progress_plot(store, plot_context=None) -> None:
+    try:
+        history = store.history()
+    except Exception as exc:
+        print(f"[plot] warning: could not read {store.path}: {exc}", flush=True)
+        return
     plot_mod.write_progress_png(
-        store.run_dir, store.history(), store.metrics_schema, plot_context,
+        store.run_dir, history, store.metrics_schema, plot_context,
     )
 
 
