@@ -530,7 +530,9 @@ def main(argv: list[str] | None = None) -> int:
                 round_id=int(spec_dict.get("round_id") or 0),
                 candidate_id=int(spec_dict.get("candidate_id") or 0),
                 parent_sha=str(spec_dict.get("parent_sha") or ""),
-                proposal=str(spec_dict.get("proposal") or ""),
+                proposal=str(
+                    spec_dict.get("proposal") or "<missing proposal>"
+                ),
             ),
             f"worker failed: {exc}",
             str(spec_dict.get("parent_sha") or ""),

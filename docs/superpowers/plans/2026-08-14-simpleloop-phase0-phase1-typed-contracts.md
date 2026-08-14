@@ -1,5 +1,7 @@
 # SimpleLoop Phase 0–1 Typed Contracts Implementation Plan
 
+**Status:** Implemented on `refactor/phase0-phase1-typed-contracts`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Freeze the RSI-enabled behavior, then replace proposer/candidate protocol dictionaries inside the running Kernel with small frozen Request/Result contracts and explicit codecs.
@@ -57,7 +59,7 @@ Phase 1 is complete when:
 
 **Produces:** one canonical root test command.
 
-- [ ] **Step 1: Verify the RSI checkpoint and clean scope**
+- [x] **Step 1: Verify the RSI checkpoint and clean scope**
 
 ```bash
 git merge-base --is-ancestor ebe3661 HEAD
@@ -66,7 +68,7 @@ git status --short
 
 Expected: the first command exits 0; only the pre-existing `.superpowers/` path is untracked before this plan's files.
 
-- [ ] **Step 2: Reproduce both baseline failures**
+- [x] **Step 2: Reproduce both baseline failures**
 
 ```bash
 python -m pytest -q
@@ -75,7 +77,7 @@ python -m pytest tests -q
 
 Expected before repair: root collection fails on `examples/tiny_algo_opt/repo/tests/test_correctness.py`; scoped tests report three `_FakeExp.parent_sha` failures.
 
-- [ ] **Step 3: Restrict pytest discovery to the product test tree**
+- [x] **Step 3: Restrict pytest discovery to the product test tree**
 
 Append to `pyproject.toml`:
 
@@ -84,7 +86,7 @@ Append to `pyproject.toml`:
 testpaths = ["tests"]
 ```
 
-- [ ] **Step 4: Make `_FakeExp` match the production experiment fact set**
+- [x] **Step 4: Make `_FakeExp` match the production experiment fact set**
 
 ```python
 class _FakeExp:
@@ -101,7 +103,7 @@ class _FakeExp:
         self.experiment_id = f"r{rnd}c{cand}"
 ```
 
-- [ ] **Step 5: Verify and commit the clean baseline**
+- [x] **Step 5: Verify and commit the clean baseline**
 
 ```bash
 python -m pytest -q
@@ -131,7 +133,7 @@ Expected at this checkpoint: `517 passed, 1 skipped`, or the same total with onl
 
 **Produces:** immutable v0 examples for every later migration task.
 
-- [ ] **Step 1: Add exact worker fixtures**
+- [x] **Step 1: Add exact worker fixtures**
 
 Use one completed candidate with these facts:
 
@@ -160,13 +162,13 @@ Use one completed candidate with these facts:
 
 Use one completed proposer lane containing `instruction`, `research_target`, `evidence_refs`, and `material_difference`, plus the current `status`, `lane_id`, `round_id`, `outcome`, `reason_kind`, `explanation`, `abstain_reason`, `trace`, and `telemetry` keys.
 
-- [ ] **Step 2: Add exact history, resume, and RSI fixtures**
+- [x] **Step 2: Add exact history, resume, and RSI fixtures**
 
 - `history-round.json`: the current `Store.append_generation()` projection of the candidate above, selected as candidate 1. It must include top-level `round`, `parent_sha`, `selected_candidate`, `selected_sha`, `proposal`, `metrics`, `changed_paths`, `base_sha`, `candidates`, and `telemetry`. The candidate row must include `selected: true` and `telemetry: {}` but omit `self_report`.
 - `inflight-round.json`: round 2, parent `parent`, the proposal's current three fields, and one submitted job containing `candidate_id`, `job_id`, `attempt`, `state`, `note`, `worktree_id`, and `result_dir`.
 - `self-review-result.json`: a valid `mode: "self"` KEEP result with `contract_version`, incumbent self SHA, diagnosis, keep reason, five-round commitment, null change, and `abstained: false`.
 
-- [ ] **Step 3: Write direct characterization tests**
+- [x] **Step 3: Write direct characterization tests**
 
 Create a fixture loader and test the current public boundaries:
 
@@ -206,7 +208,7 @@ def test_inflight_round_shape(tmp_path: Path):
 
 Write the lane and self-review fixtures to `result.json`, then assert `read_lane_result()` and `read_self_review_result()` return exact equality. Align the existing deterministic completed-candidate test with the candidate fixture and assert full equality.
 
-- [ ] **Step 4: Verify no production change and commit Phase 0**
+- [x] **Step 4: Verify no production change and commit Phase 0**
 
 ```bash
 python -m pytest -q tests/test_phase0_characterization.py tests/test_candidate_worker.py
@@ -240,7 +242,7 @@ Expected: all tests pass. If a fixture differs, correct the fixture to the curre
 
 **Produces:** `ProposalBatch` containing only Host-relevant proposal facts.
 
-- [ ] **Step 1: Write red tests for a small, frozen contract**
+- [x] **Step 1: Write red tests for a small, frozen contract**
 
 ```python
 def test_host_proposer_contract_is_small_and_frozen():
@@ -271,7 +273,7 @@ python -m pytest -q tests/test_host_proposer_contract.py
 
 Expected: import failure because the module does not exist.
 
-- [ ] **Step 2: Implement the live contract only**
+- [x] **Step 2: Implement the live contract only**
 
 ```python
 @dataclass(frozen=True)
@@ -319,7 +321,7 @@ def decode_lane_proposals(rows: Sequence[Mapping[str, object]]) -> tuple[Proposa
     )
 ```
 
-- [ ] **Step 3: Convert lane collection and backend signatures**
+- [x] **Step 3: Convert lane collection and backend signatures**
 
 Remove imports of `proposal_from_dict` and `proposer.scientist` from `execution/proposer_lanes.py`. Decode each completed lane once and return:
 
@@ -344,7 +346,7 @@ def run_proposer_lanes(self, request: ProposerRequest) -> ProposalBatch:
 
 Use `request.round_id` and `request.incumbent_sha` to build the unchanged lane workspace and manifest.
 
-- [ ] **Step 4: Remove proposer-owned types from the loop**
+- [x] **Step 4: Remove proposer-owned types from the loop**
 
 Static mode returns `ProposalBatch((Proposal(proposal_text),))`. Normal mode calls:
 
@@ -359,7 +361,7 @@ proposal_batch = ctx.execution_backend.run_proposer_lanes(request)
 
 Update trace/handoff helpers to accept `ProposalBatch`. Host artifacts write only `instruction` and `evidence_refs`. Do not catch proposer package exception classes in `loop.py`; the subprocess boundary already returns Host-level failures.
 
-- [ ] **Step 5: Verify and commit the proposer firewall**
+- [x] **Step 5: Verify and commit the proposer firewall**
 
 ```bash
 python -m pytest -q tests/test_host_proposer_contract.py tests/test_proposer_lanes.py tests/test_parallel_candidates.py -k "proposal or lane or abstain"
@@ -388,7 +390,7 @@ Expected: tests pass and `rg` returns no matches.
 
 **Produces:** one frozen candidate model and one strict wire codec.
 
-- [ ] **Step 1: Write red model and codec tests**
+- [x] **Step 1: Write red model and codec tests**
 
 ```python
 def test_candidate_fixture_round_trips():
@@ -412,7 +414,7 @@ def test_candidate_decoder_rejects_missing_required_key(key):
 
 Also reject unknown status, non-list paths, non-object metrics/gates, malformed gate rows, and non-boolean `gate_passed`/`eligible`.
 
-- [ ] **Step 2: Implement the minimal final candidate facts**
+- [x] **Step 2: Implement the minimal final candidate facts**
 
 ```python
 class CandidateStatus(str, Enum):
@@ -494,7 +496,7 @@ class CandidateResult:
 
 `parent_sha` is deliberately first-class because executor failure and no-change have no artifact but still require lineage in history.
 
-- [ ] **Step 3: Implement strict `decode_candidate_result()`**
+- [x] **Step 3: Implement strict `decode_candidate_result()`**
 
 In `simpleloop/persistence/artifacts.py`, define `ProtocolError(RuntimeError)` and enforce:
 
@@ -509,7 +511,7 @@ In `simpleloop/persistence/artifacts.py`, define `ProtocolError(RuntimeError)` a
 
 The function returns `CandidateResult`; it never returns a partially validated dictionary.
 
-- [ ] **Step 4: Implement exact `encode_candidate_result()`**
+- [x] **Step 4: Implement exact `encode_candidate_result()`**
 
 ```python
 def encode_candidate_result(
@@ -556,7 +558,7 @@ def encode_candidate_result(
 
 Never encode `usage` into business `result.json`; it remains in `usage.json`.
 
-- [ ] **Step 5: Verify the codec and commit**
+- [x] **Step 5: Verify the codec and commit**
 
 ```bash
 python -m pytest -q tests/test_candidate_contract.py tests/test_candidate_codec.py tests/test_phase0_characterization.py
@@ -585,7 +587,7 @@ git commit -m "refactor: add typed candidate result codec"
 
 **Produces:** `CandidateResult` in memory and unchanged v0 JSON on disk.
 
-- [ ] **Step 1: Convert worker tests from keys to attributes and verify red**
+- [x] **Step 1: Convert worker tests from keys to attributes and verify red**
 
 ```python
 assert result.status is CandidateStatus.COMPLETED
@@ -599,7 +601,7 @@ assert result.metrics["SPEED_MS"] == 100.0
 
 Run `python -m pytest -q tests/test_candidate_worker.py`; expect failures because worker functions still return dictionaries.
 
-- [ ] **Step 2: Make every worker terminal branch construct one typed result**
+- [x] **Step 2: Make every worker terminal branch construct one typed result**
 
 Change return types together:
 
@@ -619,11 +621,11 @@ Map facts without reclassification:
 - gate rejection: committed artifact/evaluation, false gate;
 - completed/baseline: artifact/evaluation/gate/eligibility retained.
 
-- [ ] **Step 3: Encode only at the standalone worker boundary**
+- [x] **Step 3: Encode only at the standalone worker boundary**
 
 `write_result()` accepts `CandidateResult`, calls `encode_candidate_result()`, and retains the existing atomic order: result temp, `os.replace`, optional sidecar temp/replace, `_FINISHED` last. Update the CLI catch-all to build `candidate_failure()` and update its mocked success test to return a minimal real `CandidateResult`.
 
-- [ ] **Step 4: Decode HEPJob result once and preserve telemetry immutably**
+- [x] **Step 4: Decode HEPJob result once and preserve telemetry immutably**
 
 ```python
 @staticmethod
@@ -645,7 +647,7 @@ result = replace(
 
 Keep malformed/missing result classified as infrastructure failure and excluded from history.
 
-- [ ] **Step 5: Make local execution and telemetry finalization immutable**
+- [x] **Step 5: Make local execution and telemetry finalization immutable**
 
 Backend candidate methods return `tuple[CandidateResult, ...]`. Replace loop mutation with:
 
@@ -666,7 +668,7 @@ def _finalize_candidates(
     return tuple(finalized)
 ```
 
-- [ ] **Step 6: Verify worker/backend parity and commit**
+- [x] **Step 6: Verify worker/backend parity and commit**
 
 ```bash
 python -m pytest -q tests/test_candidate_worker.py tests/test_hepjob_backend.py tests/test_parallel_candidates.py
@@ -699,11 +701,11 @@ Expected: Local and HEPJob return the same type; candidate fixture stays equal.
 
 **Produces:** `Selection`, `RoundResult`, and one legacy-compatible history projection.
 
-- [ ] **Step 1: Write red selector tests for all current policies**
+- [x] **Step 1: Write red selector tests for all current policies**
 
 Test best eligible candidate, deterministic candidate-ID tie break, no eligible candidate, no improvement, and static mode accepting a gate-valid regression. Assert candidates have no `selected` attribute.
 
-- [ ] **Step 2: Implement the config-free selector**
+- [x] **Step 2: Implement the config-free selector**
 
 ```python
 @dataclass(frozen=True)
@@ -748,7 +750,7 @@ def select_candidate(
     return Selection(winner.candidate_id, winner.sha, "selected")
 ```
 
-- [ ] **Step 3: Define the only round persistence input**
+- [x] **Step 3: Define the only round persistence input**
 
 ```python
 @dataclass(frozen=True)
@@ -765,7 +767,7 @@ class RoundResult:
         return self.selection.sha or self.parent_sha
 ```
 
-- [ ] **Step 4: Replace `Store.append_generation()` with `append_round()`**
+- [x] **Step 4: Replace `Store.append_generation()` with `append_round()`**
 
 `append_round(result: RoundResult)` must:
 
@@ -779,7 +781,7 @@ class RoundResult:
 
 Keep `history()`, `eligible(dict, schema)`, and `best_candidate(dict history, schema)` as explicitly legacy persistence/reporting readers. Current-round selection must not call them.
 
-- [ ] **Step 5: Build one typed terminal result in the existing loop**
+- [x] **Step 5: Build one typed terminal result in the existing loop**
 
 Both fresh and resume paths maintain a typed `ProposalBatch`. Resume ignores legacy proposer-only fields and reads `instruction`/`evidence_refs`. After execution:
 
@@ -813,7 +815,7 @@ parent_sha = round_result.next_sha
 
 Find a selected candidate by matching `selection.candidate_id`; never mutate a candidate.
 
-- [ ] **Step 6: Keep the Phase 0 history fixture exact and commit**
+- [x] **Step 6: Keep the Phase 0 history fixture exact and commit**
 
 Update characterization to decode its candidate fixture, create `RoundResult`, call `append_round()`, and compare exact history JSON. Add an abstention projection test.
 
@@ -838,7 +840,7 @@ git commit -m "refactor: persist typed round results"
 
 **Produces:** executable architectural guards and the final checkpoint.
 
-- [ ] **Step 1: Add the proposer import firewall**
+- [x] **Step 1: Add the proposer import firewall**
 
 ```python
 def imported_modules(path: Path) -> set[str]:
@@ -868,7 +870,7 @@ def test_host_pipeline_does_not_import_proposer_package():
 
 Do not scan `proposer_lane_worker.py`; it is the intentional adapter executing proposer code.
 
-- [ ] **Step 2: Add a current-round dictionary-index guard**
+- [x] **Step 2: Add a current-round dictionary-index guard**
 
 ```python
 PIPELINE_FUNCTIONS = {
@@ -904,13 +906,13 @@ def test_current_round_pipeline_does_not_index_candidate_dicts():
 
 Legacy persisted-history readers `_resume_chain()` and `_summary()` are intentionally outside this guard until the reporting/history migration.
 
-- [ ] **Step 3: Run structural and focused protocol checks**
+- [x] **Step 3: Run structural and focused protocol checks**
 
 ```bash
 python -m pytest -q tests/test_architecture_boundaries.py tests/test_phase0_characterization.py tests/test_candidate_codec.py tests/test_host_proposer_contract.py tests/test_round_contract.py
 ```
 
-- [ ] **Step 4: Run full verification and inspect remaining dictionary boundaries**
+- [x] **Step 4: Run full verification and inspect remaining dictionary boundaries**
 
 ```bash
 python -m pytest -q
@@ -930,7 +932,7 @@ Expected:
 - each new contract has a production consumer and tests;
 - `.superpowers/` is not staged.
 
-- [ ] **Step 5: Commit the Phase 1 checkpoint**
+- [x] **Step 5: Commit the Phase 1 checkpoint**
 
 ```bash
 git add tests/test_architecture_boundaries.py docs/superpowers/plans/2026-08-14-simpleloop-phase0-phase1-typed-contracts.md
@@ -954,12 +956,12 @@ The necessary result is narrower: the current Kernel still runs, but its live bu
 
 ## Final Review Checklist
 
-- [ ] Root test baseline passes.
-- [ ] Five durable formats are characterized.
-- [ ] Proposer package is isolated behind its worker adapter.
-- [ ] Candidate result is one frozen in-memory model.
-- [ ] Selection is immutable round state.
-- [ ] History is projected from `RoundResult`.
-- [ ] Local, HEPJob, resume, RSI, plot, and export tests pass.
-- [ ] No unused future-phase framework was added.
-- [ ] Every task has one focused, revertible commit.
+- [x] Root test baseline passes.
+- [x] Five durable formats are characterized.
+- [x] Proposer package is isolated behind its worker adapter.
+- [x] Candidate result is one frozen in-memory model.
+- [x] Selection is immutable round state.
+- [x] History is projected from `RoundResult`.
+- [x] Local, HEPJob, resume, RSI, plot, and export tests pass.
+- [x] No unused future-phase framework was added.
+- [x] Every task has one focused, revertible commit.

@@ -260,6 +260,27 @@ def test_cli_unreadable_manifest_is_infra_failure(tmp_path: Path):
     assert rc == 2
 
 
+def test_cli_malformed_manifest_with_result_dir_still_finishes(tmp_path: Path):
+    result_dir = tmp_path / "result"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.resolved.json").write_text("{}", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "candidate_id": 2,
+        "round_id": 1,
+        "parent_sha": "parent",
+        "run_dir": str(run_dir),
+        "result_dir": str(result_dir),
+    }), encoding="utf-8")
+
+    assert main(["--manifest", str(manifest)]) == 0
+    assert (result_dir / "_FINISHED").exists()
+    result = json.loads((result_dir / "result.json").read_text())
+    assert result["status"] == "WORKER_FAILED"
+    assert result["proposal"] == "<missing proposal>"
+
+
 def test_candidate_failure_shape(tmp_path: Path):
     failure = candidate_failure(3, _spec(tmp_path), "boom", "parent")
     assert failure.status is CandidateStatus.WORKER_FAILED

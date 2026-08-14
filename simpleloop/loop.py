@@ -343,9 +343,6 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 )
                 for item in proposals_meta
             ))
-            proposal_instructions = [
-                proposal.instruction for proposal in proposal_batch.proposals
-            ]
             try:
                 candidates = ctx.execution_backend.resume_round(
                     inflight.get("jobs") or [], round_id=round_id,
