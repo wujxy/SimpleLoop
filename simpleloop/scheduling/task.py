@@ -136,7 +136,7 @@ class ScheduledCandidates:
 class ScheduledProposer:
     def __init__(
         self, *, run_dir, workspace, jobs: WorkerJobs, telemetry,
-        proposal_slots: int, scientist_steps: int, prompt_dir,
+        proposal_slots: int, scientist_steps: int, prompt_dir, self_repo=None,
     ):
         self.run_dir = Path(run_dir)
         self.workspace = workspace
@@ -145,6 +145,7 @@ class ScheduledProposer:
         self.proposal_slots = proposal_slots
         self.scientist_steps = scientist_steps
         self.prompt_dir = Path(prompt_dir) if prompt_dir else None
+        self.self_repo = Path(self_repo) if self_repo else None
 
     def propose(self, request: ProposerRequest) -> ProposalBatch:
         record = self.jobs.inflight()
@@ -180,6 +181,7 @@ class ScheduledProposer:
                 "prompt_dir": str(self.prompt_dir or ""),
                 "proposal_slots": self.proposal_slots,
                 "scientist_steps": self.scientist_steps,
+                "self_repo": str(self.self_repo or ""),
             }
         result_dir = Path(str(payload["result_dir"]))
         workspace = _payload_workspace(payload)

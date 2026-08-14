@@ -21,6 +21,9 @@ class ProposerLaneSpec:
     scientist_steps: int = 200
     attempt: int = 1
     mode: str = "task"
+    self_repo: str = ""
+    reviews_path: str = ""
+    incumbent_self_sha: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -39,6 +42,9 @@ class ProposerLaneSpec:
             int(raw.get("scientist_steps") or 200),
             int(raw.get("attempt") or 1),
             str(raw.get("mode") or "task"),
+            str(raw.get("self_repo") or ""),
+            str(raw.get("reviews_path") or ""),
+            str(raw.get("incumbent_self_sha") or ""),
         )
 
 
@@ -207,15 +213,16 @@ def run_self_review_lane(
     deps: ProposerLaneDeps,
     spec: ProposerLaneSpec,
 ) -> dict[str, object]:
-    from ...self_repo import SelfRepo
-
-    self_repo = SelfRepo(deps.run_dir)
+    self_repo = Path(spec.self_repo)
+    reviews_path = Path(spec.reviews_path)
+    if not self_repo.is_dir() or not spec.incumbent_self_sha:
+        raise ValueError("self-review manifest has no active self body")
     metrics = deps.cfg.get("metrics") or {}
     result = deps.orchestrator.run_self_review(
-        self_repo=self_repo.repo,
+        self_repo=self_repo,
         run_dir=deps.run_dir,
-        reviews_path=self_repo.root / "reviews.jsonl",
-        incumbent_self_sha=self_repo.active_self_sha,
+        reviews_path=reviews_path,
+        incumbent_self_sha=spec.incumbent_self_sha,
         goal=deps.cfg["goal"],
         objective_key=(metrics.get("objective") or {}).get("key"),
         current_round=spec.round_id,
@@ -223,7 +230,7 @@ def run_self_review_lane(
         memory_service=deps.memory_service,
         scientist_steps=spec.scientist_steps,
     )
-    return _self_review_result(spec, result, self_repo.active_self_sha)
+    return _self_review_result(spec, result, spec.incumbent_self_sha)
 
 
 def _failure_result(spec: ProposerLaneSpec, reason: str) -> dict[str, object]:

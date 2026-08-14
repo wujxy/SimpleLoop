@@ -161,7 +161,7 @@ def test_scheduled_proposer_decodes_worker_result_and_keeps_journal(tmp_path):
     proposer = ScheduledProposer(
         run_dir=tmp_path, workspace=Workspaces(tmp_path / "ws"), jobs=jobs,
         telemetry=telemetry, proposal_slots=1, scientist_steps=10,
-        prompt_dir=None,
+        prompt_dir=None, self_repo=tmp_path / "self" / "repo",
     )
 
     result = proposer.propose(ProposerRequest(4, "goal", "parent"))
@@ -169,3 +169,6 @@ def test_scheduled_proposer_decodes_worker_result_and_keeps_journal(tmp_path):
     assert result.proposals[0].instruction == "new idea"
     assert telemetry.records == [{"model": "researcher"}]
     assert jobs.calls[0]["stage"] == "proposer"
+    assert jobs.calls[0]["jobs"][0].payload["self_repo"] == str(
+        tmp_path / "self" / "repo"
+    )

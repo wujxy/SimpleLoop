@@ -19,6 +19,7 @@ _HANDLERS = {
     "candidate": "simpleloop.scheduling.handlers.candidate:handle_candidate",
     "proposer": "simpleloop.scheduling.handlers.proposer:handle_proposer",
     "self_review": "simpleloop.scheduling.handlers.proposer:handle_self_review",
+    "self_edit": "simpleloop.scheduling.handlers.rsi:handle_self_edit",
     "viability": "simpleloop.scheduling.handlers.proposer:handle_viability",
 }
 

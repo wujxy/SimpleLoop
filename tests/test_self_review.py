@@ -177,15 +177,15 @@ def test_self_review_can_investigate_own_source_first(monkeypatch, tmp_path: Pat
 # --- worker glue: run_self_review_lane -> result.json shape (no model) -----
 
 def test_run_self_review_lane_result_shape(tmp_path: Path):
-    """The worker self-mode glue (no model): SelfRepo path resolution +
-    _self_review_result_to_dict. Spans the worker → orchestrator seam without a
-    live model, so it is deterministic."""
-    from simpleloop.self_repo import SelfRepo
+    """The worker consumes explicit body/history inputs and returns a decision."""
     from simpleloop.scheduling.handlers.proposer import (
         ProposerLaneDeps, ProposerLaneSpec, run_self_review_lane,
     )
 
-    SelfRepo(tmp_path).setup(resume=False)  # creates self/repo + state.json (S0)
+    body = tmp_path / "self" / "repo"
+    body.mkdir(parents=True)
+    reviews = tmp_path / "self" / "reviews.jsonl"
+    reviews.touch()
 
     class _FakeOrch:
         captured = None
@@ -204,14 +204,16 @@ def test_run_self_review_lane_result_shape(tmp_path: Path):
         run_dir=tmp_path, runtime=None, repo_path=tmp_path / "repo",
         orchestrator=_FakeOrch(), memory_service=None)
     spec = ProposerLaneSpec(lane_id=0, round_id=7, base_sha="x",
-                            run_dir=str(tmp_path), mode="self")
+                            run_dir=str(tmp_path), mode="self",
+                            self_repo=str(body), reviews_path=str(reviews),
+                            incumbent_self_sha="self-sha")
 
     out = run_self_review_lane(deps, spec)
 
     # the orchestrator was handed the incumbent self-repo + reviews path
-    assert _FakeOrch.captured["self_repo"] == tmp_path / "self" / "repo"
-    assert _FakeOrch.captured["reviews_path"] == tmp_path / "self" / "reviews.jsonl"
-    assert _FakeOrch.captured["incumbent_self_sha"]  # read from state.json
+    assert _FakeOrch.captured["self_repo"] == body
+    assert _FakeOrch.captured["reviews_path"] == reviews
+    assert _FakeOrch.captured["incumbent_self_sha"] == "self-sha"
     assert _FakeOrch.captured["goal"] == "optimize the FCN"
     assert _FakeOrch.captured["objective_key"] == "SPEED_MS"
 
@@ -222,4 +224,4 @@ def test_run_self_review_lane_result_shape(tmp_path: Path):
     assert sr["self_change"]["target"] == "prompt"
     assert sr["self_change"]["evidence_refs"] == ["proposer/scientist.py"]
     assert sr["contract_version"] == "proposer-cli-v0"
-    assert sr["incumbent_self_sha"]  # read from state.json, non-empty
+    assert sr["incumbent_self_sha"] == "self-sha"

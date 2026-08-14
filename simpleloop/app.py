@@ -28,24 +28,29 @@ from .processes import run_signal_handlers
 from .reporting import plot as plot_mod
 from .reporting.summary import write_summary
 from .reporting.telemetry import RunTelemetry
-from .roles.agent import Agent
 from .round import RoundRequest, SelectionPolicy, run_round
+from .rsi.body import GitSelfBodyStore
+from .rsi.history import JsonlSelfHistoryStore
+from .rsi.pipeline import RsiPipeline
 from .scheduling.contracts import ResourceSpec, RetryPolicy
 from .scheduling.hepjob import HEPJobConfig, HEPJobScheduler
 from .scheduling.jobs import WorkerJobPolicy, WorkerJobs
 from .scheduling.local import LocalScheduler
-from .scheduling.rsi import ScheduledSelfReview, ScheduledViability
+from .scheduling.rsi import (
+    ScheduledSelfEditor,
+    ScheduledSelfReviewer,
+    ScheduledViabilityChecker,
+)
 from .scheduling.supervisor import JobSupervisor
 from .scheduling.task import (
     BaselineRequest, ScheduledBaseline, ScheduledCandidates, ScheduledProposer,
 )
-from .self_repo import LegacyRsiRunner, SelfRepo, check_viability
 from .stages.evaluator import BaselineAcceptanceError
 from .stages.proposer import StaticProposer
 from .stages.selector import select_candidate
 from .world import (
     ApptainerSandbox, ProcessRequest, SandboxPreflightError, SandboxSpec,
-    SourceWorkspace, WorkspaceSpec, WorldBuilder, executor_environment,
+    WorkspaceSpec, WorldBuilder, executor_environment,
     executor_world_spec, forwarded_payload_env,
 )
 from .world.git import GitWorkspaceProvider
@@ -154,9 +159,6 @@ def _run_locked(
         run_dir, metrics_schema=cfg["metrics"],
         history_eval_cap=cfg.get("eval_history_cap_chars", 6000),
     )
-    self_repo = SelfRepo(run_dir)
-    self_repo.setup(resume=continue_run)
-    _seed_rsi_commitment(cfg, self_repo, continue_run)
     _preflight_executor(cfg, workspace, world_builder, sandbox_spec)
 
     jobs = _build_worker_jobs(cfg, run_dir, workspace)
@@ -168,12 +170,38 @@ def _run_locked(
         run_dir=run_dir, workspace=workspace, jobs=baseline_jobs,
         telemetry=telemetry, metrics_schema=cfg["metrics"],
     )
+    bodies = GitSelfBodyStore(run_dir / "self")
+    self_history = JsonlSelfHistoryStore(run_dir / "self")
+    reviewer = ScheduledSelfReviewer(
+        run_dir=run_dir, jobs=jobs, telemetry=telemetry,
+        scientist_steps=int(cfg.get("scientist_steps", 200)),
+        prompt_dir=prompt_dir,
+    )
+    editor = ScheduledSelfEditor(
+        run_dir=run_dir, jobs=jobs, telemetry=telemetry,
+        prompt_dir=prompt_dir,
+    )
+    viability = ScheduledViabilityChecker(
+        run_dir=run_dir, jobs=jobs, telemetry=telemetry,
+    )
+    rsi = RsiPipeline(
+        goal=str(cfg["goal"]),
+        seed=Path(__file__).resolve().parent.parent / "proposer",
+        first_review_round=_first_self_review_round(cfg),
+        reviewer=reviewer,
+        editor=editor,
+        bodies=bodies,
+        viability=viability,
+        history=self_history,
+        checkpoint=jobs,
+    )
+    rsi.prepare()
     state_and_baseline = _starting_state(
         continue_run=continue_run,
         stop_round=stop_round,
         history=store.history(),
         baseline_sha=workspace.baseline_sha(),
-        last_self_review=self_repo.last_review_round(),
+        last_self_review=self_history.state().last_review_round,
         baseline=baseline,
         telemetry=telemetry,
     )
@@ -194,28 +222,13 @@ def _run_locked(
             telemetry=telemetry,
             proposal_slots=int(cfg.get("candidates_per_round", 1)),
             scientist_steps=int(cfg.get("scientist_steps", 200)),
-            prompt_dir=prompt_dir,
+            prompt_dir=prompt_dir, self_repo=bodies.runtime_path,
         )
     )
     candidates = ScheduledCandidates(
         run_dir=run_dir, workspace=workspace, jobs=jobs,
         telemetry=telemetry, max_parallel=int(cfg.get("max_workers", 1)),
         prompt_dir=prompt_dir,
-    )
-    reviewer = ScheduledSelfReview(
-        run_dir=run_dir, jobs=jobs, telemetry=telemetry,
-        scientist_steps=int(cfg.get("scientist_steps", 200)),
-        prompt_dir=prompt_dir,
-    )
-    viability = ScheduledViability(jobs=jobs, telemetry=telemetry)
-    rsi = LegacyRsiRunner(
-        self_repo=self_repo,
-        reviewer=reviewer,
-        executor=_self_executor_factory(cfg, world_builder, telemetry),
-        viability=lambda candidate, candidate_run_dir: check_viability(
-            candidate, candidate_run_dir, execute=viability.check,
-        ),
-        run_dir=run_dir,
     )
     observer = _RoundObserver(
         store=store, telemetry=telemetry, metrics_schema=cfg["metrics"],
@@ -364,24 +377,6 @@ def _preflight_executor(cfg, workspace, world_builder, sandbox_spec) -> None:
         workspace.remove(worktree)
 
 
-def _self_executor_factory(cfg, world_builder, telemetry):
-    def build(worktree: Path):
-        workspace = SourceWorkspace("self-change", worktree, "")
-        world = world_builder.build(
-            workspace,
-            _executor_sandbox_spec(cfg),
-            executor_world_spec(("proposer",)),
-        )
-        executor = cfg["roles"]["executor"]
-        return Agent(
-            world=world, command="claude",
-            timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
-            allowed_tools="Read,Edit,Write,Bash", model=executor["model"],
-            usage_observer=telemetry.record_usage,
-        )
-    return build
-
-
 def _stop_round(cfg, static, continue_run, target_rounds):
     if static is not None and continue_run:
         raise ValueError("--continue cannot be combined with --proposals")
@@ -405,15 +400,15 @@ def _stop_round(cfg, static, continue_run, target_rounds):
     return target_rounds
 
 
-def _seed_rsi_commitment(cfg, self_repo, resume):
-    if resume:
-        return
+def _first_self_review_round(cfg) -> int | None:
     first = (cfg.get("rsi") or {}).get("first_self_review_round")
     if (
-        isinstance(first, int) and not isinstance(first, bool) and first >= 0
-        and self_repo.next_self_review_round is None
+        isinstance(first, int)
+        and not isinstance(first, bool)
+        and first >= 0
     ):
-        self_repo.update_commitment(next_self_review_round=first)
+        return first
+    return None
 
 
 def _assert_executor_ready(cfg: Mapping[str, object]) -> None:

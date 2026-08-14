@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from simpleloop.persistence.journal import JobJournal
+from simpleloop.rsi.models import (
+    SelfChange,
+    SelfDecisionKind,
+    SelfEditRequest,
+    SelfReviewRequest,
+    ViabilityRequest,
+)
 from simpleloop.scheduling.envelope import WorkerResult, WorkerStatus
-from simpleloop.scheduling.rsi import ScheduledSelfReview, ScheduledViability
+from simpleloop.scheduling.rsi import (
+    ScheduledSelfEditor,
+    ScheduledSelfReviewer,
+    ScheduledViabilityChecker,
+)
+from simpleloop.world import SourceWorkspace
 
 
 class Telemetry:
@@ -36,59 +49,134 @@ class Jobs:
         self.journal.clear()
 
 
-def test_scheduled_self_review_uses_declared_kind_and_returns_decision(tmp_path):
+def reviewer(tmp_path, jobs, telemetry=None):
+    return ScheduledSelfReviewer(
+        run_dir=tmp_path,
+        jobs=jobs,
+        telemetry=telemetry or Telemetry(),
+        scientist_steps=12,
+        prompt_dir=None,
+    )
+
+
+def review_request(tmp_path, round_id=5):
+    body = tmp_path / "self" / "repo"
+    body.mkdir(parents=True, exist_ok=True)
+    reviews = tmp_path / "self" / "reviews.jsonl"
+    reviews.touch()
+    return SelfReviewRequest(round_id, "goal", "s0", body, reviews)
+
+
+def test_review_uses_explicit_body_history_and_returns_typed_decision(tmp_path):
     envelope = WorkerResult(
-        "self_review", "r5-self", WorkerStatus.COMPLETED,
-        {"self_review": {"decision": "KEEP"}}, ({"model": "r"},),
+        "self_review",
+        "r5-self",
+        WorkerStatus.COMPLETED,
+        {"self_review": {
+            "decision": "KEEP",
+            "diagnosis": "progress",
+            "keep_reason": "enough",
+            "next_review_after_rounds": 5,
+        }},
+        ({"model": "r"},),
     )
     telemetry = Telemetry()
     jobs = Jobs(JobJournal(tmp_path / "inflight.json"), envelope)
-    reviewer = ScheduledSelfReview(
-        run_dir=tmp_path, jobs=jobs, telemetry=telemetry,
-        scientist_steps=12, prompt_dir=None,
+
+    result = reviewer(tmp_path, jobs, telemetry).review(review_request(tmp_path))
+
+    job = jobs.calls[0]["jobs"][0]
+    assert result.kind is SelfDecisionKind.KEEP
+    assert job.kind == "self_review"
+    assert job.payload["self_repo"] == str(tmp_path / "self" / "repo")
+    assert job.payload["reviews_path"] == str(
+        tmp_path / "self" / "reviews.jsonl"
     )
-
-    result = reviewer.review(5)
-
-    assert result == {"decision": "KEEP"}
-    assert jobs.calls[0]["jobs"][0].kind == "self_review"
+    assert job.payload["incumbent_self_sha"] == "s0"
     assert telemetry.records == [{"model": "r"}]
-    assert jobs.cleared == 1
+    assert jobs.cleared == 0
 
 
-def test_scheduled_self_review_resumes_persisted_payload(tmp_path):
+def test_review_resumes_persisted_payload(tmp_path):
     journal = JobJournal(tmp_path / "inflight.json")
-    journal.begin("self_review", 7, {"payload": {
-        "lane_id": 0, "round_id": 7, "base_sha": "",
-        "run_dir": str(tmp_path), "workspace_path": "",
-        "result_dir": str(tmp_path / "persisted"), "scientist_steps": 3,
-    }}, [])
+    payload = {
+        "lane_id": 0,
+        "round_id": 7,
+        "base_sha": "s0",
+        "run_dir": str(tmp_path),
+        "self_repo": str(tmp_path / "persisted-body"),
+        "reviews_path": str(tmp_path / "persisted-reviews"),
+        "incumbent_self_sha": "s0",
+        "result_dir": str(tmp_path / "persisted"),
+        "scientist_steps": 3,
+    }
+    journal.begin("self_review", 7, {"payload": payload}, [])
     jobs = Jobs(journal, WorkerResult(
-        "self_review", "r7-self", WorkerStatus.COMPLETED,
-        {"self_review": {"decision": "CHANGE"}},
+        "self_review",
+        "r7-self",
+        WorkerStatus.COMPLETED,
+        {"self_review": {
+            "decision": "KEEP", "diagnosis": "d", "keep_reason": "k",
+            "next_review_after_rounds": 3,
+        }},
     ))
-    reviewer = ScheduledSelfReview(
-        run_dir=tmp_path, jobs=jobs, telemetry=Telemetry(),
-        scientist_steps=99, prompt_dir=None,
-    )
 
-    reviewer.review(7)
+    reviewer(tmp_path, jobs).review(review_request(tmp_path, 7))
 
     assert jobs.calls[0]["jobs"][0].payload["scientist_steps"] == 3
+    assert jobs.calls[0]["jobs"][0].payload["self_repo"].endswith(
+        "persisted-body"
+    )
 
 
-def test_scheduled_viability_uses_viability_kind_and_clears(tmp_path):
-    jobs = Jobs(JobJournal(tmp_path / "inflight.json"), WorkerResult(
-        "viability", "viability-candidate", WorkerStatus.COMPLETED,
+def test_edit_transitions_review_stage_and_never_clears(tmp_path):
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin("self_review", 5, {"payload": {}}, [])
+    jobs = Jobs(journal, WorkerResult(
+        "self_edit",
+        "r5-self-edit",
+        WorkerStatus.COMPLETED,
+        {"self_edit": {"status": "EDITED", "output": "done"}},
+    ))
+    editor = ScheduledSelfEditor(
+        run_dir=tmp_path, jobs=jobs, telemetry=Telemetry(), prompt_dir=None,
+    )
+    workspace = SourceWorkspace("self-5", tmp_path / "body", "s0")
+    workspace.path.mkdir()
+
+    result = editor.edit(SelfEditRequest(
+        5, SelfChange("prompt", "broaden", "edit charter"), workspace,
+    ))
+
+    assert result.status == "EDITED"
+    assert jobs.calls[0]["transition_from"] == "self_review"
+    assert jobs.calls[0]["jobs"][0].kind == "self_edit"
+    assert jobs.calls[0]["jobs"][0].workspace == workspace
+    assert jobs.cleared == 0
+
+
+def test_viability_transitions_from_self_edit_and_classifies_lane(tmp_path):
+    (tmp_path / "config.resolved.json").write_text(
+        json.dumps({"goal": "g"}), encoding="utf-8"
+    )
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin("self_edit", 5, {"payload": {}}, [])
+    jobs = Jobs(journal, WorkerResult(
+        "viability",
+        "r5-viability",
+        WorkerStatus.COMPLETED,
         {"status": "COMPLETED", "outcome": "abstain", "proposals": []},
     ))
-    checker = ScheduledViability(jobs=jobs, telemetry=Telemetry())
+    body = tmp_path / "candidate"
+    body.mkdir()
+    checker = ScheduledViabilityChecker(
+        run_dir=tmp_path, jobs=jobs, telemetry=Telemetry(), scientist_steps=20,
+    )
 
-    result = checker.check({
-        "round_id": 0, "base_sha": "candidate",
-        "result_dir": str(tmp_path / "result"),
-    })
+    result = checker.check(ViabilityRequest(5, "s1", body))
 
-    assert result["status"] == "COMPLETED"
+    assert result.viable is True
+    assert jobs.calls[0]["transition_from"] == "self_edit"
     assert jobs.calls[0]["jobs"][0].kind == "viability"
-    assert jobs.cleared == 1
+    assert jobs.calls[0]["jobs"][0].payload["self_repo"] == str(body)
+    assert jobs.cleared == 0
