@@ -151,7 +151,9 @@ def test_edit_transitions_review_stage_and_never_clears(tmp_path):
     assert result.status == "EDITED"
     assert jobs.calls[0]["transition_from"] == "self_review"
     assert jobs.calls[0]["jobs"][0].kind == "self_edit"
-    assert jobs.calls[0]["jobs"][0].workspace == workspace
+    # Self worktrees belong to the self body store: the supervisor's task
+    # provider must never be asked to release them.
+    assert jobs.calls[0]["jobs"][0].workspace is None
     assert jobs.cleared == 0
 
 
@@ -179,4 +181,6 @@ def test_viability_transitions_from_self_edit_and_classifies_lane(tmp_path):
     assert jobs.calls[0]["transition_from"] == "self_edit"
     assert jobs.calls[0]["jobs"][0].kind == "viability"
     assert jobs.calls[0]["jobs"][0].payload["self_repo"] == str(body)
+    # The smoke repo is owned by the self body store, not the supervisor.
+    assert jobs.calls[0]["jobs"][0].workspace is None
     assert jobs.cleared == 0

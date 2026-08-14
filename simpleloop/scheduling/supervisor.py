@@ -130,6 +130,32 @@ class JobSupervisor:
         outcomes: dict[str, JobOutcome] = {}
         released: set[str] = set()
 
+        # A crash can persist a terminal runtime whose result was never
+        # collected (or has since vanished). Such a job must not stall the
+        # batch: retry it when attempts remain, otherwise finish it as an
+        # infrastructure failure.
+        for request_id, runtime in runtimes.items():
+            if runtime.state not in _TERMINAL:
+                continue
+            job = by_id[request_id]
+            if job.result_path.exists():
+                continue  # collected by the main loop below
+            if runtime.attempt < job.retry.max_attempts:
+                runtime.state = "ready"
+                runtime.handle = None
+                runtime.submitted_at = None
+                runtime.running_since = None
+                runtime.gone_since = None
+            else:
+                outcomes[request_id] = JobOutcome(
+                    job,
+                    infrastructure_error=(
+                        runtime.note
+                        or "job ended without a result before the run stopped"
+                    ),
+                )
+                self._release(job, released)
+
         while len(outcomes) < len(request.jobs):
             changed = False
 

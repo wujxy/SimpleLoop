@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from simpleloop.app import _build_worker_jobs
+from simpleloop.app import _build_worker_jobs, _reconcile_inflight
 from simpleloop.scheduling.hepjob import HEPJobScheduler
 from simpleloop.scheduling.local import LocalScheduler
 
@@ -53,3 +53,31 @@ def test_baseline_journal_cannot_clear_resumable_task_checkpoint(tmp_path):
     baseline_jobs.clear()
 
     assert task_jobs.inflight().stage == "candidates"
+
+
+def test_reconcile_clears_stale_journal_for_committed_round(tmp_path):
+    jobs = _build_worker_jobs(_config(), tmp_path, object())
+    jobs.journal.begin("candidates", 3, {"payloads": []}, [])
+
+    _reconcile_inflight(jobs, [{"round": 2}, {"round": 3}])
+
+    assert jobs.inflight() is None
+
+
+def test_reconcile_keeps_journal_for_uncommitted_round(tmp_path):
+    jobs = _build_worker_jobs(_config(), tmp_path, object())
+    jobs.journal.begin("candidates", 3, {"payloads": []}, [])
+
+    _reconcile_inflight(jobs, [{"round": 2}])
+
+    assert jobs.inflight().stage == "candidates"
+    assert jobs.inflight().round_id == 3
+
+
+def test_reconcile_leaves_rsi_stages_to_self_history(tmp_path):
+    jobs = _build_worker_jobs(_config(), tmp_path, object())
+    jobs.journal.begin("self_edit", 3, {"payload": {}}, [])
+
+    _reconcile_inflight(jobs, [{"round": 3}])
+
+    assert jobs.inflight().stage == "self_edit"

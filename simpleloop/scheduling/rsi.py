@@ -15,7 +15,6 @@ from ..rsi.models import (
     ViabilityRequest,
     ViabilityResult,
 )
-from ..world import SourceWorkspace
 from .contracts import InfrastructureError
 from .envelope import WorkerStatus
 from .jobs import WorkerJob, WorkerJobs
@@ -109,11 +108,9 @@ class ScheduledSelfEditor:
                 if record is not None and record.stage == "self_review"
                 else None
             )
-        workspace = SourceWorkspace(
-            request.workspace.workspace_id,
-            Path(str(payload["worktree_path"])),
-            request.workspace.base_sha,
-        )
+        # Self worktrees live under the self body store's own roots and their
+        # lifecycle belongs to the RSI pipeline (bodies.discard_candidate);
+        # they must never be released by the supervisor's task provider.
         envelope = _one(
             self.jobs,
             stage="self_edit",
@@ -124,7 +121,6 @@ class ScheduledSelfEditor:
                 f"r{request.round_id}-self-edit",
                 payload,
                 Path(str(payload["result_dir"])),
-                workspace,
             ),
             transition_from=transition,
         )
@@ -183,11 +179,8 @@ class ScheduledViabilityChecker:
                 if record is not None and record.stage == "self_edit"
                 else None
             )
-        workspace = SourceWorkspace(
-            f"viability-{request.round_id}",
-            Path(str(payload["workspace_path"])),
-            request.candidate_sha,
-        )
+        # The smoke run reads the candidate self repo directly; its workspace
+        # is owned by the self body store, not the supervisor's task provider.
         envelope = _one(
             self.jobs,
             stage="viability",
@@ -198,7 +191,6 @@ class ScheduledViabilityChecker:
                 f"r{request.round_id}-viability",
                 payload,
                 Path(str(payload["result_dir"])),
-                workspace,
             ),
             transition_from=transition,
         )

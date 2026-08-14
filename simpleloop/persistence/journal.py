@@ -1,6 +1,7 @@
 """Single durable record for the currently active worker stage."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -103,6 +104,14 @@ class JobJournal:
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
+        if not self.path.parent.is_dir():
+            return
+        # fsync the directory so a power loss cannot resurrect the record.
+        dir_fd = os.open(str(self.path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     def _write(self, record: JournalRecord) -> None:
         _atomic_json(self.path, {

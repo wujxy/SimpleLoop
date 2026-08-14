@@ -195,6 +195,7 @@ def _run_locked(
         checkpoint=jobs,
     )
     rsi.prepare()
+    _reconcile_inflight(jobs, store.history())
     state_and_baseline = _starting_state(
         continue_run=continue_run,
         stop_round=stop_round,
@@ -259,6 +260,23 @@ def _run_locked(
     )
     print(f"[{stamp()}] done. best={summary['best_sha']}", flush=True)
     return summary
+
+
+def _reconcile_inflight(jobs, history: list[dict]) -> None:
+    """Drop a task-stage journal whose round is already committed.
+
+    A crash between ``history.append_round`` and ``checkpoint.clear`` leaves
+    a stale inflight record that would otherwise deadlock the next round with
+    a stage/round mismatch. RSI stages are reconciled against terminal self
+    events by ``RsiPipeline.prepare`` instead.
+    """
+    record = jobs.inflight()
+    if record is None:
+        return
+    if str(record.stage) in {"proposer", "candidates"} and any(
+        item.get("round") == record.round_id for item in history
+    ):
+        jobs.clear()
 
 
 def _starting_state(

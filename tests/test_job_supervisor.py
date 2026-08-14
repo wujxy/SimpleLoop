@@ -218,6 +218,51 @@ def test_resume_inspects_persisted_remote_handle_without_submit(tmp_path):
     assert scheduler.submitted == []
 
 
+def test_resume_failed_runtime_without_result_finishes_as_infrastructure(tmp_path):
+    job = _job(tmp_path, attempts=2)
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin("candidates", 1, {}, [{
+        "request_id": "r1-c0", "attempt": 2, "state": "failed",
+        "handle": {"scheduler": "fake", "value": "1"},
+        "submitted_at": 1.0, "running_since": 1.0,
+        "gone_since": None, "note": "node lost",
+    }])
+    scheduler = FakeScheduler()
+
+    result = JobSupervisor(
+        clock=Clock(), sleep=lambda _: None, poll_seconds=0,
+    ).run_batch(
+        JobBatchRequest("candidates", 1, {}, (job,), 1),
+        scheduler=scheduler, journal=journal,
+    )
+
+    assert scheduler.submitted == []
+    assert len(result.failed) == 1
+    assert result.failed[0].infrastructure_error == "node lost"
+
+
+def test_resume_terminal_runtime_with_attempts_left_is_resubmitted(tmp_path):
+    job = _job(tmp_path, attempts=2)
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin("candidates", 1, {}, [{
+        "request_id": "r1-c0", "attempt": 1, "state": "succeeded",
+        "handle": {"scheduler": "fake", "value": "1"},
+        "submitted_at": 1.0, "running_since": None,
+        "gone_since": None, "note": "",
+    }])
+    scheduler = FakeScheduler(complete_on_attempt=1)
+
+    result = JobSupervisor(
+        clock=Clock(), sleep=lambda _: None, poll_seconds=0,
+    ).run_batch(
+        JobBatchRequest("candidates", 1, {}, (job,), 1),
+        scheduler=scheduler, journal=journal,
+    )
+
+    assert len(scheduler.submitted) == 1
+    assert result.completed[0].result.result == {"attempt": 1}
+
+
 def test_malformed_result_is_protocol_error_not_retry(tmp_path):
     job = _job(tmp_path)
     scheduler = FakeScheduler()
