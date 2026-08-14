@@ -48,6 +48,7 @@ _DEFAULT_NEXT_REVIEW = None  # null until the first self-review sets a commitmen
 # test IS the loop contract in miniature (goal in -> result out), so it runs a real
 # (short) research episode. See ``check_viability``.
 _SMOKE_SCIENTIST_STEPS = 20
+_DEFAULT_SELF_REVIEW_DEFER = 8
 
 
 def _stamp() -> str:
@@ -363,6 +364,67 @@ class SelfRepo:
             return TransitionResult(candidate, False, False, vr.detail)
         finally:
             self._remove_self_worktree(wt)
+
+
+class LegacyRsiRunner:
+    """Adapt the landed RSI lifecycle to the loop's small ``RsiRunner`` port.
+
+    The loop owns only scheduling. This adapter owns the existing self-review,
+    self-change, viability and commitment transaction until that subsystem is
+    redesigned independently.
+    """
+
+    def __init__(
+        self, *, self_repo: SelfRepo, reviewer, executor, run_dir: str | Path,
+        viability=None, default_defer: int = _DEFAULT_SELF_REVIEW_DEFER,
+    ):
+        self.self_repo = self_repo
+        self.reviewer = reviewer
+        self.executor = executor
+        self.run_dir = Path(run_dir)
+        self.viability = viability
+        self.default_defer = default_defer
+
+    def due(self, round_id: int) -> bool:
+        next_round = self.self_repo.next_self_review_round
+        return next_round is not None and round_id >= next_round
+
+    def run(self, round_id: int):
+        payload = self.reviewer.review(round_id)
+        decision = payload.get("decision") or "KEEP"
+        defer = payload.get("next_review_after_rounds")
+        if not isinstance(defer, int) or isinstance(defer, bool) or defer < 1:
+            defer = self.default_defer
+        next_review_round = round_id + defer
+
+        candidate_sha = viable = adopted = None
+        change = payload.get("self_change")
+        if decision == "CHANGE" and change:
+            transition = self.self_repo.transition(
+                agent=self.executor,
+                self_change=change,
+                run_dir=self.run_dir,
+                label=f"self-exec r{round_id}",
+                viability=self.viability,
+            )
+            candidate_sha = transition.candidate_self_sha
+            viable = transition.viable
+            adopted = transition.adopted
+
+        self.self_repo.append_review(
+            round_id,
+            payload=payload,
+            next_review_round=next_review_round,
+            candidate_self_sha=candidate_sha,
+            viable=viable,
+            adopted=adopted,
+        )
+        self.self_repo.update_commitment(
+            next_self_review_round=next_review_round)
+
+        # Lazy import keeps the RSI substrate independent of orchestration.
+        from .loop import RsiResult
+        return RsiResult(round_id=round_id, decision=decision)
 
 
 # ---- viability authority (S3b, revised: behavior-level smoke test) --------

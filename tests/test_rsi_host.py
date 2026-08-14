@@ -8,23 +8,22 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from simpleloop.loop import _run_self_review_round, _starting_state
-from simpleloop.self_repo import SelfRepo, ViabilityResult
+from simpleloop.loop import _starting_state
+from simpleloop.self_repo import LegacyRsiRunner, SelfRepo, ViabilityResult
 
 
 # --- _run_self_review_round (the loop's self-review round helper) ----------
 
-def _host_ctx(run_dir: Path, payload: dict) -> SimpleNamespace:
+def _runner(run_dir: Path, payload: dict, *, executor=None, viability=None):
     sr = SelfRepo(run_dir)
     sr.setup(resume=False)
-    eb = SimpleNamespace(run_self_review=lambda *, round_id: payload)
-    # A no-op self-executor so the CHANGE path runs transition but produces no
-    # candidate (the defer logic is what's under test in those cases). The
-    # full adoption path has its own test with a real-editing fake + mocked smoke.
-    noop_exec = SimpleNamespace(run_text=lambda *a, **k: "")
-    return SimpleNamespace(
-        self_repo=sr, execution_backend=eb, run_dir=run_dir,
-        self_executor_agent=noop_exec)
+    return LegacyRsiRunner(
+        self_repo=sr,
+        reviewer=SimpleNamespace(review=lambda round_id: payload),
+        executor=executor or SimpleNamespace(run_text=lambda *a, **k: ""),
+        viability=viability,
+        run_dir=run_dir,
+    )
 
 
 def _keep_payload(sha: str, *, defer: int = 5) -> dict:
@@ -46,15 +45,15 @@ def _change_payload(sha: str) -> dict:
 def test_run_self_review_round_keep(tmp_path: Path):
     sr = SelfRepo(tmp_path)
     sr.setup(resume=False)
-    ctx = _host_ctx(tmp_path, _keep_payload(sr.active_self_sha, defer=5))
+    runner = _runner(tmp_path, _keep_payload(sr.active_self_sha, defer=5))
 
-    decision = _run_self_review_round(ctx, round_id=5)
+    result = runner.run(5)
 
-    assert decision == "KEEP"
+    assert result.decision == "KEEP"
     # commitment advanced to round_id + defer
-    assert ctx.self_repo.next_self_review_round == 10
+    assert runner.self_repo.next_self_review_round == 10
     # reviews.jsonl got one contract-§9.2 record
-    rec = json.loads(ctx.self_repo.reviews_path.read_text().strip())
+    rec = json.loads(runner.self_repo.reviews_path.read_text().strip())
     assert rec["round"] == 5 and rec["decision"] == "KEEP"
     assert rec["next_review_round"] == 10
     assert rec["change"] is None and rec["adopted"] is None  # S3d fields null
@@ -66,19 +65,18 @@ def test_run_self_review_round_change_uses_default_defer(tmp_path: Path):
     (it would otherwise churn re-suggesting an unactioned change)."""
     sr = SelfRepo(tmp_path)
     sr.setup(resume=False)
-    ctx = _host_ctx(tmp_path, _change_payload(sr.active_self_sha))
+    runner = _runner(tmp_path, _change_payload(sr.active_self_sha))
 
-    decision = _run_self_review_round(ctx, round_id=8)
+    result = runner.run(8)
 
-    assert decision == "CHANGE"
-    from simpleloop.loop import _DEFAULT_SELF_REVIEW_DEFER
-    assert ctx.self_repo.next_self_review_round == 8 + _DEFAULT_SELF_REVIEW_DEFER
-    rec = json.loads(ctx.self_repo.reviews_path.read_text().strip())
+    assert result.decision == "CHANGE"
+    assert runner.self_repo.next_self_review_round == 16
+    rec = json.loads(runner.self_repo.reviews_path.read_text().strip())
     assert rec["decision"] == "CHANGE"
     assert rec["change"]["target"] == "prompt"
 
 
-def test_run_self_review_round_change_drives_full_adoption(tmp_path, monkeypatch):
+def test_run_self_review_round_change_drives_full_adoption(tmp_path):
     """S3d: a CHANGE drives the full transition — self-executor edits -> candidate
     -> smoke -> adopt — and the reviews.jsonl record carries candidate/viable/
     adopted. check_viability is mocked so the verdict is deterministic (the real
@@ -86,27 +84,24 @@ def test_run_self_review_round_change_drives_full_adoption(tmp_path, monkeypatch
     sr = SelfRepo(tmp_path)
     sr.setup(resume=False)
     old_sha = sr.active_self_sha
-    monkeypatch.setattr(
-        "simpleloop.self_repo.check_viability",
-        lambda candidate_repo, run_dir: ViabilityResult(True, "smoke COMPLETED"))
-
     class _EditingAgent:
         def run_text(self, prompt, *, cwd, label="agent"):
             (Path(cwd) / "proposer" / "prompts" / "proposer.md").write_text(
                 "# self-revised\n", encoding="utf-8")
             return "done"
 
-    ctx = SimpleNamespace(
+    runner = LegacyRsiRunner(
         self_repo=sr,
-        execution_backend=SimpleNamespace(
-            run_self_review=lambda *, round_id: _change_payload(sr.active_self_sha)),
-        self_executor_agent=_EditingAgent(),
-        run_dir=tmp_path,
+        reviewer=SimpleNamespace(
+            review=lambda round_id: _change_payload(sr.active_self_sha)),
+        executor=_EditingAgent(), run_dir=tmp_path,
+        viability=lambda candidate, run_dir: ViabilityResult(
+            True, "smoke COMPLETED"),
     )
 
-    decision = _run_self_review_round(ctx, round_id=8)
+    result = runner.run(8)
 
-    assert decision == "CHANGE"
+    assert result.decision == "CHANGE"
     rec = json.loads(sr.reviews_path.read_text().strip())
     assert rec["decision"] == "CHANGE"
     assert rec["candidate_self_sha"] is not None
