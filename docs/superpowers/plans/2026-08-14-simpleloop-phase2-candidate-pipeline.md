@@ -281,7 +281,7 @@ Expected: candidate contract tests pass.
 - Consumes: Task 1 ports and the existing `Agent`, `Workspace`, `ApptainerRuntime`, eval parser, prompt loader, and handoff writer.
 - Produces: `AgentExecutor`, `GitArtifactWorkspace`, `HarnessEvaluator`, `HandoffCandidateTrace`, `BaselineAcceptanceError`, and `validate_baseline()`.
 
-- [ ] **Step 1: Write failing adapter tests**
+- [x] **Step 1: Write failing adapter tests**
 
 ```python
 def test_agent_executor_only_returns_agent_facts(tmp_path: Path):
@@ -321,7 +321,7 @@ def test_validate_baseline_rejects_missing_objective():
         )
 ```
 
-- [ ] **Step 2: Run tests and confirm adapters are missing**
+- [x] **Step 2: Run tests and confirm adapters are missing**
 
 ```bash
 python -m pytest -q tests/test_candidate_stages.py
@@ -329,7 +329,7 @@ python -m pytest -q tests/test_candidate_stages.py
 
 Expected: import failures for `AgentExecutor`, `GitArtifactWorkspace`, and `HarnessEvaluator`.
 
-- [ ] **Step 3: Move the existing implementations behind the ports**
+- [x] **Step 3: Move the existing implementations behind the ports**
 
 Implement `AgentExecutor.execute()` in `stages/executor.py` by moving prompt construction and `parse_self_report()` from `roles/executor.py`. It returns only:
 
@@ -410,7 +410,7 @@ def validate_baseline(evaluation: EvaluationResult, spec: GateSpec) -> None:
 
 Implement `HandoffCandidateTrace` by projecting typed values into the exact existing executor/eval handoff dictionaries. Move imports/tests from `roles.executor` to `stages.executor`, then delete the old implementation or reduce `roles/executor.py` to no production consumers before deleting it in Task 6.
 
-- [ ] **Step 4: Verify adapter behavior and existing executor tests**
+- [x] **Step 4: Verify adapter behavior and existing executor tests**
 
 ```bash
 python -m pytest -q tests/test_candidate_stages.py tests/test_candidate_worker.py -k "self_report or execute or baseline"
@@ -418,7 +418,7 @@ python -m pytest -q tests/test_candidate_stages.py tests/test_candidate_worker.p
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit stage adapters**
+- [x] **Step 5: Commit stage adapters**
 
 ```bash
 git add simpleloop/stages simpleloop/persistence/candidate_trace.py simpleloop/roles/executor.py tests/test_candidate_stages.py tests/test_candidate_worker.py

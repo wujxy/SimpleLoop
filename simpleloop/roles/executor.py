@@ -3,14 +3,13 @@
 the harness gates the changed paths and commits them itself."""
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .agent import Agent
 from ..prompts import load_semantic
 from ..harness.workspace import Workspace
+from ..stages.executor import parse_self_report
 
 
 @dataclass
@@ -30,52 +29,6 @@ class ExecResult:
     # the executor's voice; NOT used to steer the Proposer (the Harness gates
     # remain the only merit oracle) — see prompts/executor.md.
     self_report: dict | None = None
-
-
-# Accepted SELF_REPORT values. Best-effort parse: anything outside these is
-# treated as "no usable block" (None), so a malformed report never breaks a
-# candidate — the full text is still captured in output / the handoff.
-_SELF_REPORT_OUTCOMES = frozenset({"completed", "partial", "blocked"})
-_SELF_REPORT_KINDS = frozenset({"objective", "effort"})
-_SUMMARY_MAX_CHARS = 600
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n(\{.*?\})\s*\n```", re.DOTALL)
-
-
-def parse_self_report(text: str) -> dict | None:
-    """Best-effort parse of the executor's SELF_REPORT block.
-
-    Scans fenced JSON objects (last-first) and keeps the first that declares
-    an ``outcome`` key — the executor otherwise emits prose/code, so a fenced
-    object with ``outcome`` is the report. Returns a normalized dict, or None
-    if no trustworthy block is present. Never raises.
-    """
-    if not text:
-        return None
-    report = None
-    for raw in reversed(_JSON_FENCE_RE.findall(text)):
-        try:
-            obj = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(obj, dict) and "outcome" in obj:
-            report = obj
-            break
-    if report is None:
-        return None
-    outcome = report.get("outcome")
-    if outcome not in _SELF_REPORT_OUTCOMES:
-        return None
-    kind = report.get("blocked_reason_kind")
-    if kind not in _SELF_REPORT_KINDS:
-        kind = None
-    summary = report.get("summary")
-    if not isinstance(summary, str):
-        summary = ""
-    return {
-        "outcome": outcome,
-        "blocked_reason_kind": kind,
-        "summary": summary.strip()[:_SUMMARY_MAX_CHARS],
-    }
 
 
 def execute(agent: Agent, *, proposal: str, goal: str,
