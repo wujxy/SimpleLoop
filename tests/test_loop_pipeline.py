@@ -127,6 +127,34 @@ def test_loop_rsi_branch_consumes_round_without_task_history():
     assert result.state.next_round == 2
 
 
+def test_loop_notifies_full_observer_of_round_lifecycle():
+    events = []
+
+    class FullObserver:
+        def round_started(self, round_id, *, rsi):
+            events.append(("start", round_id, rsi))
+
+        def round_committed(self, result):
+            events.append(("commit", result.round_id))
+
+        def rsi_finished(self, result):
+            events.append(("rsi", result.round_id, result.decision))
+
+    rsi = OneRsi()
+    run_loop(
+        _request(stop=2), rounds=Rounds(events), rsi=rsi,
+        history=History(events), checkpoint=Checkpoint(events),
+        observer=FullObserver(),
+    )
+
+    # Round 0 is an RSI round (banner, decision), round 1 a task round
+    # (banner, commit) — the observer sees every stage transition.
+    assert [event for event in events if isinstance(event, tuple)] == [
+        ("start", 0, True), ("rsi", 0, "KEEP"),
+        ("start", 1, False), ("commit", 1),
+    ]
+
+
 def test_loop_no_winner_retains_incumbent_metrics():
     events = []
     result = run_loop(

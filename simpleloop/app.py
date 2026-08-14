@@ -75,11 +75,33 @@ class _TaskRounds:
 
 
 class _RoundObserver:
-    def __init__(self, *, store, telemetry, metrics_schema, prior_metrics):
+    def __init__(
+        self, *, store, telemetry, metrics_schema, prior_metrics,
+        stop_round: int,
+    ):
         self.store = store
         self.telemetry = telemetry
         self.metrics_schema = metrics_schema
         self.prior_metrics = dict(prior_metrics)
+        self.stop_round = stop_round
+        self.rsi_tally: dict[str, int] = {}
+
+    def round_started(self, round_id: int, *, rsi: bool) -> None:
+        kind = "self-review" if rsi else "task"
+        print(
+            f"[{stamp()}] === round {round_id + 1}/{self.stop_round} "
+            f"({kind}) ===", flush=True,
+        )
+
+    def rsi_finished(self, result) -> None:
+        self.rsi_tally[result.decision] = (
+            self.rsi_tally.get(result.decision, 0) + 1
+        )
+        tally = _tally_text(self.rsi_tally)
+        print(
+            f"[{stamp()}] self-review round {result.round_id + 1}: "
+            f"{result.decision} ({tally})", flush=True,
+        )
 
     def round_committed(self, result) -> None:
         _print_round_performance(
@@ -232,7 +254,7 @@ def _run_locked(
     )
     observer = _RoundObserver(
         store=store, telemetry=telemetry, metrics_schema=cfg["metrics"],
-        prior_metrics=state.incumbent_metrics,
+        prior_metrics=state.incumbent_metrics, stop_round=stop_round,
     )
     objective = cfg["metrics"]["objective"]
     result = run_loop(
@@ -254,12 +276,21 @@ def _run_locked(
     )
     if result.interrupted:
         print(f"[{stamp()}] {result.interruption}", flush=True)
+    if result.rsi_rounds:
+        print(
+            f"[{stamp()}] self-reviews: {result.rsi_rounds} "
+            f"({_tally_text(result.rsi_tally)})", flush=True,
+        )
     summary = write_summary(
         run_dir=run_dir, store=store, workspace=workspace,
         metrics_schema=cfg["metrics"], baseline_metrics=baseline_metrics,
     )
     print(f"[{stamp()}] done. best={summary['best_sha']}", flush=True)
     return summary
+
+
+def _tally_text(tally: Mapping[str, int]) -> str:
+    return " ".join(f"{key}={value}" for key, value in sorted(tally.items()))
 
 
 def _reconcile_inflight(jobs, history: list[dict]) -> None:
@@ -298,8 +329,12 @@ def _starting_state(
         incumbent_sha, selected = _resume_chain(history, baseline_sha)
     else:
         next_round, incumbent_sha, selected = 0, baseline_sha, None
+    print(
+        f"[{stamp()}] evaluating baseline on {baseline_sha[:10]}...", flush=True,
+    )
     baseline_result = baseline.evaluate(BaselineRequest(baseline_sha))
     baseline_metrics = dict(baseline_result.metrics)
+    print(f"[{stamp()}] baseline eval done.", flush=True)
     if not continue_run:
         telemetry.set_baseline(baseline_metrics)
     incumbent_metrics = (

@@ -57,7 +57,22 @@ class CheckpointStore(Protocol):
 
 
 class LoopObserver(Protocol):
+    """Frontend progress sink.
+
+    ``round_started`` and ``rsi_finished`` are optional hooks: ``run_loop``
+    calls them only when the observer provides them, so a minimal observer
+    (and test fakes) may implement ``round_committed`` alone.
+    """
+
+    def round_started(self, round_id: int, *, rsi: bool) -> None: ...
     def round_committed(self, result: RoundResult) -> None: ...
+    def rsi_finished(self, result: RsiResult) -> None: ...
+
+
+def _notify(observer: LoopObserver, hook: str, *args, **kwargs) -> None:
+    method = getattr(observer, hook, None)
+    if callable(method):
+        method(*args, **kwargs)
 
 
 def run_loop(
@@ -77,17 +92,20 @@ def run_loop(
         round_id = state.next_round
         try:
             if rsi.due(round_id):
+                _notify(observer, "round_started", round_id, rsi=True)
                 rsi_result = rsi.run(round_id)
                 rsi_rounds += 1
                 rsi_tally[rsi_result.decision] = (
                     rsi_tally.get(rsi_result.decision, 0) + 1
                 )
+                _notify(observer, "rsi_finished", rsi_result)
                 state = LoopState(
                     round_id + 1,
                     state.incumbent_sha,
                     state.incumbent_metrics,
                 )
                 continue
+            _notify(observer, "round_started", round_id, rsi=False)
             result = rounds.run(RoundRequest(
                 round_id,
                 request.goal,
