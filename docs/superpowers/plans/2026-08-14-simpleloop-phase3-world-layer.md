@@ -34,7 +34,7 @@
 - Consumes: `CandidateArtifact` and the Phase 2 candidate identity fields.
 - Produces: `WorkspaceSpec`, `SourceWorkspace`, `ChangeSet`, `CommitRequest`, `WorkspaceProvider`, `MountMode`, `MountSpec`, `SandboxSpec`, `ProcessRequest`, `ProcessResult`, `ExecutionSandbox`, and `SandboxProvider`.
 
-- [ ] **Step 1: Write failing frozen-contract tests**
+- [x] **Step 1: Write failing frozen-contract tests**
 
 ```python
 def test_world_values_are_frozen(tmp_path):
@@ -53,13 +53,13 @@ def test_process_result_records_timeout_without_exception():
     assert result.timed_out is True
 ```
 
-- [ ] **Step 2: Run the contract tests and observe the missing module failure**
+- [x] **Step 2: Run the contract tests and observe the missing module failure**
 
 Run: `python -m pytest -q tests/test_world_contracts.py`
 
 Expected: collection fails because `simpleloop.world` does not exist.
 
-- [ ] **Step 3: Implement only the frozen values and protocols from the spec**
+- [x] **Step 3: Implement only the frozen values and protocols from the spec**
 
 ```python
 @dataclass(frozen=True)
@@ -82,13 +82,13 @@ class ChangeSet:
 
 Implement the remaining signatures exactly as section 4 of the design, with `CommitRequest` carrying no worktree path.
 
-- [ ] **Step 4: Run focused and existing candidate contract tests**
+- [x] **Step 4: Run focused and existing candidate contract tests**
 
 Run: `python -m pytest -q tests/test_world_contracts.py tests/test_candidate_contracts.py`
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/world tests/test_world_contracts.py
