@@ -103,6 +103,12 @@ class CandidateBatchRequest:
 
 
 @dataclass(frozen=True)
+class CandidateBatchResult:
+    candidates: tuple[CandidateResult, ...]
+    telemetry: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class CandidateRequest:
     round_id: int
     candidate_id: int
