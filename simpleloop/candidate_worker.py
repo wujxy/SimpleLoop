@@ -188,9 +188,7 @@ def build_ports(
         command="claude",
         timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
         allowed_tools="Read,Edit,Write,Bash",
-        max_output_tokens=cfg.get("agent_max_output_tokens", 64000),
         model=role.get("model"),
-        base_url=role.get("base_url"),
         usage_observer=usage_observer,
     )
     workspace_provider = GitWorkspaceProvider(

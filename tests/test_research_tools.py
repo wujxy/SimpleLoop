@@ -12,7 +12,7 @@ from proposer.research_tools import (
     ResearchTools,
     render_research_tool_prompt,
 )
-from simpleloop.container.runtime import MountMap
+from proposer.runtime import MountMap
 
 
 class _Runtime:

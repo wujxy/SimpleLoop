@@ -1,4 +1,4 @@
-"""Evaluator port, Apptainer adapter, and baseline acceptance policy."""
+"""Evaluator port, World adapter, and baseline acceptance policy."""
 from __future__ import annotations
 
 import math

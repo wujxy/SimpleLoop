@@ -20,7 +20,10 @@ from .contracts import (
 )
 
 
-_BLOCKED_PREFIXES = ("APPTAINER_", "APPTAINERENV_", "SINGULARITY_", "SINGULARITYENV_", "BASH_FUNC_")
+BLOCKED_LAUNCHER_PREFIXES = (
+    "APPTAINER_", "APPTAINERENV_", "SINGULARITY_", "SINGULARITYENV_",
+    "BASH_FUNC_",
+)
 _BLOCKED_EXACT = frozenset({"which_declare"})
 _FORWARDED_ENV = frozenset({
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
@@ -145,7 +148,7 @@ class _BoundApptainerSandbox:
         result = {
             key: value
             for key, value in source.items()
-            if not key.startswith(_BLOCKED_PREFIXES)
+            if not key.startswith(BLOCKED_LAUNCHER_PREFIXES)
             and key not in _BLOCKED_EXACT
         }
         result.update({

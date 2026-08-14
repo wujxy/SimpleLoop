@@ -13,7 +13,8 @@ from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from simpleloop.harness import export as export_mod
 from simpleloop.harness.store import Store
-from simpleloop.harness.workspace import Workspace
+from simpleloop.world import CommitRequest, WorkspaceSpec
+from simpleloop.world.git import GitWorkspaceProvider
 from round_helpers import append_round
 
 SCHEMA = {
@@ -166,13 +167,14 @@ def test_rename_exposes_both_paths_in_changed_paths(tmp_path: Path):
     _git(src, "-c", "user.name=t", "-c", "user.email=t@e.invalid",
          "commit", "-qm", "add frozen file")
     run_dir = tmp_path / "run"
-    ws = Workspace(run_dir, str(src), "HEAD", ["editable/**"])
-    ws.setup()
-    wt = ws.add_worktree("rename", ws.baseline_sha())
+    ws = GitWorkspaceProvider(run_dir, src, "HEAD")
+    ws.initialize()
+    workspace = ws.create(WorkspaceSpec("rename", ws.baseline_sha()))
+    wt = workspace.path
     (wt / "editable").mkdir()
     _git(wt, "mv", "frozen.txt", "editable/moved.txt")
 
-    changed = ws.changed_paths(wt)
+    changed = [path.as_posix() for path in ws.inspect(workspace).paths]
 
     assert changed == ["editable/moved.txt", "frozen.txt"]
 
@@ -183,14 +185,17 @@ def _seed_run(tmp_path: Path):
     src = _make_source(tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    ws = Workspace(run_dir=run_dir, repo_path=str(src), baseline_ref="HEAD",
-                   editable=["*"])
-    ws.setup()
+    ws = GitWorkspaceProvider(run_dir, src, "HEAD")
+    ws.initialize()
     baseline = ws.baseline_sha()
-    wt = ws.add_worktree("0-c0", baseline)
+    workspace = ws.create(WorkspaceSpec("0-c0", baseline))
+    wt = workspace.path
     (wt / "file.txt").write_text("hello world\n")
-    sha = ws.commit(wt, "0-c0", ["file.txt"])
-    ws.remove_worktree("0-c0")
+    artifact = ws.commit(workspace, CommitRequest(
+        0, 0, baseline, ws.inspect(workspace).paths,
+    ))
+    sha = artifact.sha
+    ws.remove(workspace)
     store = Store(run_dir, metrics_schema=SCHEMA)
     append_round(store,
         0, parent_sha=baseline, selected_candidate=0, selected_sha=sha,
@@ -267,9 +272,8 @@ def test_export_head_and_best_reject_empty_runs(tmp_path: Path):
     src = _make_source(tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    ws = Workspace(run_dir=run_dir, repo_path=str(src), baseline_ref="HEAD",
-                   editable=["*"])
-    ws.setup()
+    ws = GitWorkspaceProvider(run_dir, src, "HEAD")
+    ws.initialize()
     baseline = ws.baseline_sha()
     store = Store(run_dir, metrics_schema=SCHEMA)
     # one round, no commit: chain never advances, nothing eligible

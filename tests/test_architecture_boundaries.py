@@ -106,3 +106,27 @@ def test_candidate_pipeline_has_no_context_or_config_bundle():
 def test_migrated_candidate_owners_are_removed():
     assert not (ROOT / "simpleloop/roles/executor.py").exists()
     assert not (ROOT / "simpleloop/harness/gate.py").exists()
+
+
+def test_business_modules_depend_only_on_world_contracts():
+    for relative in (
+        "simpleloop/candidate.py",
+        "simpleloop/roles/agent.py",
+        "simpleloop/stages/artifacts.py",
+        "simpleloop/stages/executor.py",
+        "simpleloop/stages/evaluator.py",
+    ):
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        assert "container.runtime" not in source, relative
+        assert "world.git" not in source, relative
+        assert "Apptainer" not in source, relative
+
+
+def test_old_world_owners_are_removed():
+    assert not (ROOT / "simpleloop/container/runtime.py").exists()
+    assert not (ROOT / "simpleloop/harness/workspace.py").exists()
+
+
+def test_proposer_package_remains_independent_of_simpleloop_world():
+    for path in (ROOT / "proposer").rglob("*.py"):
+        assert "simpleloop.world" not in path.read_text(encoding="utf-8"), path

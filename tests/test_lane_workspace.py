@@ -15,7 +15,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from simpleloop.harness.workspace import Workspace
+from simpleloop.world import WorkspaceSpec
+from simpleloop.world.git import GitWorkspaceProvider
 
 
 def _git(*args: str) -> str:
@@ -37,23 +38,20 @@ def _make_source_repo(repo: Path) -> str:
     return _git("-C", str(repo), "rev-parse", "HEAD")
 
 
-def _workspace(tmp_path: Path) -> tuple[Workspace, str]:
+def _workspace(tmp_path: Path) -> tuple[GitWorkspaceProvider, str]:
     source = tmp_path / "source"
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     base = _make_source_repo(source)
-    ws = Workspace(
-        run_dir=run_dir, repo_path=str(source),
-        baseline_ref="HEAD", editable=["src/**"],
-    )
-    ws.setup()
+    ws = GitWorkspaceProvider(run_dir, source, "HEAD")
+    ws.initialize()
     return ws, base
 
 
 def test_lane_workspace_structure(tmp_path: Path):
     ws, base = _workspace(tmp_path)
 
-    lane = ws.add_lane_workspace(0, base)
+    lane = ws.create_lane(0, base).path
 
     assert lane == ws.lanes_root / "lane-0" / "workspace"
     assert lane.is_dir()
@@ -74,7 +72,8 @@ def test_lane_workspace_does_not_pollute_run_repo(tmp_path: Path):
     repo_head_before = _git("-C", str(repo), "rev-parse", "HEAD")
     repo_status_before = _git("-C", str(repo), "status", "--porcelain")
 
-    lane = ws.add_lane_workspace(0, base)
+    lane_workspace = ws.create_lane(0, base)
+    lane = lane_workspace.path
     # write a scratch file + modify a source file inside the lane workspace
     (lane / "scratch.txt").write_text("toy experiment\n")
     (lane / "src" / "foo.cc").write_text("int f() { return 1; }\n")
@@ -82,7 +81,7 @@ def test_lane_workspace_does_not_pollute_run_repo(tmp_path: Path):
     # run/repo's HEAD and working tree are untouched
     assert _git("-C", str(repo), "rev-parse", "HEAD") == repo_head_before
     assert _git("-C", str(repo), "status", "--porcelain") == repo_status_before
-    ws.remove_lane_workspace(0)
+    ws.remove_lane(lane_workspace)
 
 
 def test_lane_workspace_history_visible(tmp_path: Path):
@@ -91,49 +90,54 @@ def test_lane_workspace_history_visible(tmp_path: Path):
     ws, base = _workspace(tmp_path)
     # simulate a candidate commit descending from base, via a candidate worktree
     # (run/repo is cloned --no-checkout, so commits are made through worktrees)
-    cand = ws.add_worktree("cand", base)
+    candidate = ws.create(WorkspaceSpec("cand", base))
+    cand = candidate.path
     _git("-C", str(cand), "config", "user.name", "Test")
     _git("-C", str(cand), "config", "user.email", "test@example.invalid")
     (cand / "src" / "foo.cc").write_text("int f() { return 9; }\n")
     _git("-C", str(cand), "add", "-A")
     _git("-C", str(cand), "commit", "-m", "candidate")
     candidate_sha = _git("-C", str(cand), "rev-parse", "HEAD")
-    ws.remove_worktree("cand")
+    ws.remove(candidate)
 
     # lane workspace checked out at the ORIGINAL base
-    lane = ws.add_lane_workspace(0, base)
+    lane_workspace = ws.create_lane(0, base)
+    lane = lane_workspace.path
     assert _git("-C", str(lane), "rev-parse", "HEAD") == base
     # ...can still inspect the descendant candidate commit + diff against it
     show = _git("-C", str(lane), "show", f"{candidate_sha}:src/foo.cc")
     assert "return 9" in show
     diff = _git("-C", str(lane), "diff", f"{base}..{candidate_sha}")
     assert "return 9" in diff
-    ws.remove_lane_workspace(0)
+    ws.remove_lane(lane_workspace)
 
 
 def test_lane_workspace_fresh_each_episode(tmp_path: Path):
     """Recreating a lane workspace drops the previous episode's dirty state."""
     ws, base = _workspace(tmp_path)
 
-    lane = ws.add_lane_workspace(0, base)
+    lane_workspace = ws.create_lane(0, base)
+    lane = lane_workspace.path
     (lane / "dirty.txt").write_text("round r scratch\n")
     (lane / "src" / "foo.cc").write_text("dirty\n")
-    ws.remove_lane_workspace(0)
+    ws.remove_lane(lane_workspace)
 
     # a new episode at a (possibly different) base starts clean
-    lane2 = ws.add_lane_workspace(0, base)
+    lane_workspace2 = ws.create_lane(0, base)
+    lane2 = lane_workspace2.path
     assert not (lane2 / "dirty.txt").exists()
     assert (lane2 / "src" / "foo.cc").read_text().startswith("int f")
     assert _git("-C", str(lane2), "status", "--porcelain") == ""
-    ws.remove_lane_workspace(0)
+    ws.remove_lane(lane_workspace2)
 
 
 def test_multi_lane_isolation(tmp_path: Path):
     """Concurrent lanes cannot see each other's working-tree changes."""
     ws, base = _workspace(tmp_path)
 
-    lane0 = ws.add_lane_workspace(0, base)
-    lane1 = ws.add_lane_workspace(1, base)
+    workspace0 = ws.create_lane(0, base)
+    workspace1 = ws.create_lane(1, base)
+    lane0, lane1 = workspace0.path, workspace1.path
 
     (lane0 / "only-in-lane0.txt").write_text("x\n")
     (lane1 / "only-in-lane1.txt").write_text("y\n")
@@ -142,8 +146,8 @@ def test_multi_lane_isolation(tmp_path: Path):
     assert not (lane0 / "only-in-lane1.txt").exists()
     assert (lane1 / "only-in-lane1.txt").exists()
     assert not (lane1 / "only-in-lane0.txt").exists()
-    ws.remove_lane_workspace(0)
-    ws.remove_lane_workspace(1)
+    ws.remove_lane(workspace0)
+    ws.remove_lane(workspace1)
 
 
 def test_candidate_worktree_independent_of_lane_workspace(tmp_path: Path):
@@ -151,14 +155,16 @@ def test_candidate_worktree_independent_of_lane_workspace(tmp_path: Path):
     the proposer dirtying its lane workspace."""
     ws, base = _workspace(tmp_path)
 
-    lane = ws.add_lane_workspace(0, base)
+    lane_workspace = ws.create_lane(0, base)
+    lane = lane_workspace.path
     (lane / "src" / "foo.cc").write_text("proposer toy edit\n")
     (lane / "toy.cpp").write_text("experiment\n")
 
-    candidate = ws.add_worktree("3-c0", base)
+    candidate_workspace = ws.create(WorkspaceSpec("3-c0", base))
+    candidate = candidate_workspace.path
     # candidate working tree is the pristine base, not the proposer's dirty state
     assert (candidate / "src" / "foo.cc").read_text().startswith("int f")
     assert not (candidate / "toy.cpp").exists()
     assert _git("-C", str(candidate), "status", "--porcelain") == ""
-    ws.remove_worktree("3-c0")
-    ws.remove_lane_workspace(0)
+    ws.remove(candidate_workspace)
+    ws.remove_lane(lane_workspace)

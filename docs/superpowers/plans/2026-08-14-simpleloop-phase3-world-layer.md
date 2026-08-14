@@ -1,5 +1,7 @@
 # SimpleLoop Phase 3 World Layer Implementation Plan
 
+**Status:** Implemented (2026-08-14)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace SimpleLoop's concrete Workspace/Apptainer dependencies with one production SourceWorkspace, ExecutionSandbox, and World layer while preserving candidate, baseline, HEPJob, history, resume, and RSI behavior.
@@ -384,7 +386,7 @@ git commit -m "refactor: run candidate stages through worlds"
 - Consumes: `GitWorkspaceProvider`, `ApptainerSandbox`, `WorldBuilder`, World policy helpers, and migrated candidate ports.
 - Produces: production Local and HEPJob paths using typed SourceWorkspace/World without changing scheduler protocols.
 
-- [ ] **Step 1: Write failing production composition tests**
+- [x] **Step 1: Write failing production composition tests**
 
 ```python
 def test_local_backend_opens_typed_workspace_and_cleans_it():
@@ -408,23 +410,23 @@ def test_hepjob_keeps_manifest_and_retry_shape_unchanged():
     assert manifest["worktree_path"]
 ```
 
-- [ ] **Step 2: Run backend/worker tests and observe concrete API failures**
+- [x] **Step 2: Run backend/worker tests and observe concrete API failures**
 
 Run: `python -m pytest -q tests/test_parallel_candidates.py tests/test_candidate_worker.py tests/test_hepjob_backend.py tests/test_runtime.py tests/test_initialize.py`
 
 Expected: new tests fail because composition still constructs legacy Runtime/Workspace values.
 
-- [ ] **Step 3: Migrate composition without touching scheduling behavior**
+- [x] **Step 3: Migrate composition without touching scheduling behavior**
 
 Loop/worker/initialize instantiate the concrete provider, sandbox provider, and builder. Local uses provider `open()`; HEPJob uses `create/remove` and reconstructs `SourceWorkspace` from the existing manifest path in workers. Baseline gets an Evaluator World. Preserve Condor commands, job records, retries, journal payload, proposer subprocesses, result codecs, and RSI paths exactly.
 
-- [ ] **Step 4: Run all runtime/backend/worker/resume/RSI tests**
+- [x] **Step 4: Run all runtime/backend/worker/resume/RSI tests**
 
 Run: `python -m pytest -q tests/test_parallel_candidates.py tests/test_candidate_worker.py tests/test_hepjob_backend.py tests/test_runtime.py tests/test_initialize.py tests/test_round_contract.py tests/test_rsi_host.py tests/test_self_repo.py tests/test_self_review.py tests/test_static_mode.py tests/test_plot.py tests/test_telemetry.py`
 
 Expected: all pass with only established environment skips.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop tests
@@ -448,7 +450,7 @@ git commit -m "refactor: compose candidates from explicit worlds"
 - Consumes: completed production migration.
 - Produces: one Git owner, one SimpleLoop Apptainer owner, executable dependency guards, and the Phase 3 completion record.
 
-- [ ] **Step 1: Add failing architecture guards before deletion**
+- [x] **Step 1: Add failing architecture guards before deletion**
 
 ```python
 def test_business_modules_do_not_import_apptainer_or_concrete_git():
@@ -469,17 +471,17 @@ def test_proposer_remains_independent_of_simpleloop_world():
         assert "simpleloop.world" not in path.read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 2: Run architecture tests and observe old owner failures**
+- [x] **Step 2: Run architecture tests and observe old owner failures**
 
 Run: `python -m pytest -q tests/test_architecture_boundaries.py`
 
 Expected: fails while old files/imports remain.
 
-- [ ] **Step 3: Remove compatibility imports, delete old files, and update current docs**
+- [x] **Step 3: Remove compatibility imports, delete old files, and update current docs**
 
 Delete old owner files only after `rg` proves there are no SimpleLoop consumers. Update README's trust boundary to list `world/git.py`, `world/apptainer.py`, and `world/builder.py`. Historical dated design documents remain historical records.
 
-- [ ] **Step 4: Run complete verification**
+- [x] **Step 4: Run complete verification**
 
 ```bash
 python -m pytest -q
@@ -491,7 +493,7 @@ git diff --check
 
 Expected: pytest passes with the established environment skip only; compileall exits 0; both `rg` commands produce no output except allowed imports inside `world/apptainer.py` when the query is narrowed for architecture checking; diff check exits 0.
 
-- [ ] **Step 5: Mark the plan implemented and commit**
+- [x] **Step 5: Mark the plan implemented and commit**
 
 Change the header status to `Implemented`, mark every checkbox `[x]`, then:
 

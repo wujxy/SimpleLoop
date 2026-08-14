@@ -86,7 +86,6 @@ _redirect_self_repo()
 import proposer  # the loaded self (redirected above to --self-repo / the run's self)
 from proposer.runtime import ApptainerRuntime, world_mount_map
 from .harness import views
-from .harness.workspace import Workspace
 from proposer.memory import MemoryService
 from proposer.memory.models import (
     ExistingFindingTarget, NewFindingTarget, ResearchProposal,
@@ -157,7 +156,7 @@ class ProposerLaneDeps:
     cfg: dict
     run_dir: Path
     runtime: ApptainerRuntime
-    workspace: Workspace
+    repo_path: Path
     orchestrator: ProposerOrchestrator
     memory_service: MemoryService
     prompt_dir: Path | None = None
@@ -191,17 +190,11 @@ def build_lane_deps(
         usage_observer=usage_observer,
         context_policy=ContextPolicy.from_config(cfg.get("context")),
     )
-    workspace = Workspace(
-        run_dir=run_dir,
-        repo_path=cfg["repo_path"],
-        baseline_ref=cfg["baseline_ref"],
-        editable=cfg["editable_paths"],
-    )
     memory_service = MemoryService(
         run_dir=run_dir, metrics_schema=cfg.get("metrics") or {},
     )
     return ProposerLaneDeps(
-        cfg=cfg, run_dir=run_dir, runtime=runtime, workspace=workspace,
+        cfg=cfg, run_dir=run_dir, runtime=runtime, repo_path=run_dir / "repo",
         orchestrator=orchestrator, memory_service=memory_service,
         prompt_dir=Path(prompt_dir) if prompt_dir else None,
         gate_lines=views.gate_block(cfg.get("metrics")),
@@ -286,7 +279,7 @@ def run_lane(deps: ProposerLaneDeps, spec: ProposerLaneSpec) -> dict:
         frozen=[],
         world_mount=world_mount_map(cfg),
         memory_service=deps.memory_service,
-        repo_path=deps.workspace.repo,
+        repo_path=deps.repo_path,
         run_dir=deps.run_dir,
         current_round=spec.round_id,
         gate_block=deps.gate_lines,

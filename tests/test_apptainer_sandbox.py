@@ -7,7 +7,11 @@ from simpleloop.world import (
     ProcessRequest,
     SandboxSpec,
 )
-from simpleloop.world.apptainer import ApptainerSandbox
+from simpleloop.world.apptainer import (
+    ApptainerSandbox,
+    evaluator_environment,
+    executor_environment,
+)
 
 
 def _bound(tmp_path, *, network=True, environment=None):
@@ -48,6 +52,27 @@ def test_network_none_is_explicit_and_environment_is_clean(tmp_path):
         "APPTAINERENV_TOKEN": "secret"
     }
     assert "secret" not in "\n".join(sandbox.summary_lines())
+
+
+def test_role_environments_keep_credentials_out_of_evaluator():
+    ambient = {
+        "ANTHROPIC_AUTH_TOKEN": "token",
+        "ANTHROPIC_BASE_URL": "https://ambient.invalid",
+        "HTTPS_PROXY": "http://proxy.invalid",
+        "UNRELATED": "ignored",
+    }
+
+    executor = executor_environment(
+        base_url="https://configured.invalid",
+        max_output_tokens=12345,
+        environ=ambient,
+    )
+    evaluator = evaluator_environment(ambient)
+
+    assert executor["ANTHROPIC_AUTH_TOKEN"] == "token"
+    assert executor["ANTHROPIC_BASE_URL"] == "https://configured.invalid"
+    assert executor["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "12345"
+    assert evaluator == {"HTTPS_PROXY": "http://proxy.invalid"}
 
 
 def test_run_returns_timeout_result_and_kills_process_group(

@@ -141,7 +141,10 @@ that factual history and can inspect the repository and diffs itself.
 | `stages/evaluator.py` | evaluator port, adapter, and baseline policy |
 | `harness/evals.py` | evaluator execution and `KEY=VALUE` metric parsing |
 | `harness/store.py` | factual JSONL history and objective selection |
-| `harness/workspace.py` | isolated worktrees and Harness-owned commits |
+| `world/contracts.py` | mechanism-neutral workspace, sandbox, and process values |
+| `world/git.py` | isolated Git workspaces and candidate commits |
+| `world/apptainer.py` | contained process execution and environment policy |
+| `world/builder.py` | validated Executor/Evaluator filesystem worlds |
 | `reporting/plot.py` | 2×3 factual progress overview |
 
 Writable paths are enforced by the prepared container world. `PATHS` remains

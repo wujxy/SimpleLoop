@@ -710,8 +710,7 @@ def _get_self_executor(ctx: RunContext):
                 world=world, command="claude",
                 timeout_seconds=ctx.cfg.get("agent_timeout_seconds", 3600),
                 allowed_tools="Read,Edit,Write,Bash",
-                max_output_tokens=ctx.cfg.get("agent_max_output_tokens", 64000),
-                model=executor["model"], base_url=executor["base_url"],
+                model=executor["model"],
                 usage_observer=ctx.telemetry.record_usage,
             )
         ctx.self_executor_agent = build

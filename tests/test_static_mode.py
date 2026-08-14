@@ -9,17 +9,6 @@ SCHEMA = {
 }
 
 
-class FakeRuntime:
-    def __init__(self, **_kwargs):
-        pass
-
-    def summary_lines(self):
-        return ()
-
-    def preflight(self):
-        pass
-
-
 def _config(tmp_path, max_rounds=99):
     return {
         "goal": "make it faster",

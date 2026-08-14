@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from .runtime import _BLOCKED_PREFIXES
+from ..world.apptainer import BLOCKED_LAUNCHER_PREFIXES
 
 
 class ImageBuildError(RuntimeError):
@@ -65,7 +65,7 @@ def build_image(
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(_BLOCKED_PREFIXES)
+        if not key.startswith(BLOCKED_LAUNCHER_PREFIXES)
     }
     completed = subprocess.run(argv, check=False, env=env)
     if completed.returncode:

@@ -190,8 +190,7 @@ class LocalBackend(ExecutionBackend):
                     world=executor_world, command="claude",
                     timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
                     allowed_tools="Read,Edit,Write,Bash",
-                    max_output_tokens=cfg.get("agent_max_output_tokens", 64000),
-                    model=role.get("model"), base_url=role.get("base_url"),
+                    model=role.get("model"),
                     usage_observer=self.ctx.telemetry.record_usage,
                 ),
                 ExecutorConfig(
