@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import PurePosixPath
-from typing import Mapping
+from pathlib import Path, PurePosixPath
+from typing import Mapping, Protocol
 
 from .stages.proposer import Proposal
 
@@ -86,3 +86,61 @@ class CandidateResult:
     @property
     def eligible(self) -> bool:
         return self.gate.eligible
+
+
+@dataclass(frozen=True)
+class CandidatePlan:
+    candidate_id: int
+    parent_sha: str
+    proposal: Proposal
+
+
+@dataclass(frozen=True)
+class CandidateBatchRequest:
+    round_id: int
+    candidates: tuple[CandidatePlan, ...]
+
+
+@dataclass(frozen=True)
+class CandidateRequest:
+    round_id: int
+    candidate_id: int
+    parent_sha: str
+    proposal: Proposal
+    worktree: Path
+
+
+@dataclass(frozen=True)
+class CommitRequest:
+    round_id: int
+    candidate_id: int
+    parent_sha: str
+    worktree: Path
+    changed_paths: tuple[PurePosixPath, ...]
+
+
+class ArtifactWorkspace(Protocol):
+    def inspect(self, worktree: Path) -> tuple[PurePosixPath, ...]:
+        ...
+
+    def commit(self, request: CommitRequest) -> CandidateArtifact:
+        ...
+
+
+class CandidateTrace(Protocol):
+    def record_execution(
+        self,
+        request: CandidateRequest,
+        execution: ExecutionResult,
+        artifact: CandidateArtifact | None,
+    ) -> None:
+        ...
+
+    def record_evaluation(
+        self,
+        request: CandidateRequest,
+        evaluation: EvaluationResult | None,
+        gate: GateDecision,
+        status: CandidateStatus,
+    ) -> None:
+        ...

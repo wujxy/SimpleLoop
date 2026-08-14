@@ -42,7 +42,7 @@
 - Consumes: existing `Proposal`, `CandidateResult`, `ExecutionResult`, `CandidateArtifact`, `EvaluationResult`, and `GateDecision`.
 - Produces: `CandidatePlan`, `CandidateBatchRequest`, `CandidateRequest`, `Executor`, `ArtifactWorkspace`, `Evaluator`, `CandidateTrace`, request/config dataclasses, `GateSpec`, and `apply_gates()`.
 
-- [ ] **Step 1: Write failing frozen-contract and gate tests**
+- [x] **Step 1: Write failing frozen-contract and gate tests**
 
 ```python
 from dataclasses import FrozenInstanceError
@@ -99,7 +99,7 @@ def test_apply_gates_preserves_skip_details():
     )
 ```
 
-- [ ] **Step 2: Run the tests and verify the new API is missing**
+- [x] **Step 2: Run the tests and verify the new API is missing**
 
 Run:
 
@@ -109,7 +109,7 @@ python -m pytest -q tests/test_candidate_contracts.py
 
 Expected: collection fails because `CandidateBatchRequest` and `simpleloop.stages.gate` do not exist.
 
-- [ ] **Step 3: Add the minimal frozen contracts and pure gate**
+- [x] **Step 3: Add the minimal frozen contracts and pure gate**
 
 Add to `simpleloop/candidate.py`:
 
@@ -252,7 +252,7 @@ def apply_gates(evaluation: EvaluationResult | None, spec: GateSpec,
     return GateDecision(rows, passed, eligible)
 ```
 
-- [ ] **Step 4: Verify and commit typed ports**
+- [x] **Step 4: Verify and commit typed ports**
 
 ```bash
 python -m pytest -q tests/test_candidate_contracts.py
