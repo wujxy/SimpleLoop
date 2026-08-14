@@ -20,27 +20,22 @@ class AgentError(RuntimeError):
 @dataclass
 class AgentResult:
     text: str           # the agent's response text (inside the JSON envelope)
-    data: dict          # parsed JSON object (run_json only)
     usage: object = None
 
 
 def _decode_output(stdout: str) -> AgentResult:
     """Decode Claude's JSON envelope without interpreting usage semantics."""
     text = stdout
-    data: dict = {}
     usage: object = None
     try:
         outer = json.loads(stdout)
         if isinstance(outer, dict):
-            structured = outer.get("structured_output")
-            if isinstance(structured, dict):
-                data = structured
             if isinstance(outer.get("result"), str):
                 text = outer["result"]
             usage = outer.get("usage")
     except json.JSONDecodeError:
         pass
-    return AgentResult(text=text, data=data, usage=usage)
+    return AgentResult(text=text, usage=usage)
 
 
 class Agent:
@@ -74,39 +69,11 @@ class Agent:
                 flush=True,
             )
 
-    def run_json(
-        self,
-        prompt: str,
-        *,
-        cwd: Path,
-        label: str = "agent",
-        json_schema: dict,
-    ) -> dict:
-        """Run the agent with schema-enforced structured output; return the JSON object."""
-        result = self._run(
-            prompt, cwd=cwd, label=label, json_schema=json_schema)
-        if result.data:
-            return result.data
-        try:
-            parsed = json.loads(result.text)
-        except json.JSONDecodeError as exc:
-            raise AgentError(
-                f"[{label}] structured output was not an exact JSON object: {exc}",
-                raw_output=result.text,
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise AgentError(
-                f"[{label}] structured output must be a JSON object",
-                raw_output=result.text,
-            )
-        return parsed
-
     def run_text(self, prompt: str, *, cwd: Path, label: str = "agent") -> str:
         """Run the agent, return its raw text. Used by the executor (no JSON expected)."""
         return self._run(prompt, cwd=cwd, label=label).text
 
-    def _run(self, prompt: str, *, cwd: Path, label: str,
-             json_schema: dict | None = None) -> AgentResult:
+    def _run(self, prompt: str, *, cwd: Path, label: str) -> AgentResult:
         # Prompt goes via STDIN, not argv: a long assembled prompt can exceed the
         # kernel's ARG_MAX and kill Popen mid-run.
         payload = [
@@ -118,11 +85,6 @@ class Agent:
         if self.model:
             payload += ["--model", self.model]
         payload += self.extra_args
-        if json_schema is not None:
-            payload += [
-                "--json-schema",
-                json.dumps(json_schema, separators=(",", ":")),
-            ]
         print(
             f"[{label}] claude call started "
             f"(timeout={self.timeout_seconds}s, world=/work)",

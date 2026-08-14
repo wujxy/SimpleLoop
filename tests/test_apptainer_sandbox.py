@@ -52,7 +52,6 @@ def test_network_none_is_explicit_and_environment_is_clean(tmp_path):
     assert sandbox.launcher_env({"APPTAINER_BAD": "x"}) == {
         "APPTAINERENV_TOKEN": "secret"
     }
-    assert "secret" not in "\n".join(sandbox.summary_lines())
 
 
 def test_user_namespace_is_an_explicit_provider_choice(tmp_path):

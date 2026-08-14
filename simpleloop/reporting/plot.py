@@ -43,31 +43,6 @@ class PlotSeries:
     lower_is_better: bool | None
     rounds: list[int]
 
-    # Convenience views over the observations; exercised by the plot tests.
-    @property
-    def objective_points(self) -> list[tuple[int, float]]:
-        return [
-            (int(point.round), point.objective)
-            for point in self.candidates
-            if point.objective is not None
-        ]
-
-    @property
-    def selected_objectives(self) -> list[tuple[int, float]]:
-        return [
-            (int(point.round), point.objective)
-            for point in self.candidates
-            if point.selected and point.objective is not None
-        ]
-
-    @property
-    def incumbent_objective(self) -> list[tuple[int, float]]:
-        return [
-            (int(point.round), point.objective)
-            for point in self.incumbents
-            if point.round > 0 and point.objective is not None
-        ]
-
 
 def _number(value: object) -> float | None:
     if (

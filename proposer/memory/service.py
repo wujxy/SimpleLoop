@@ -9,6 +9,7 @@ search_experiments / inspect_episode``). Never mutates the Experiment Ledger.
 """
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import replace
 from pathlib import Path
@@ -32,6 +33,7 @@ from .retrieval import (
     diverse_experiment_search,
     rank_findings,
 )
+from .reflection_views import render_reflection_pack
 
 
 MEMORY_TOOL_CHEATSHEET = (
@@ -43,6 +45,36 @@ MEMORY_TOOL_CHEATSHEET = (
     " status?})\n"
     "- inspect_episode(ref='r<round>c<candidate>')"
 )
+
+
+def read_reflection_records(run_dir: Path) -> list[dict]:
+    """Read the Host-owned reflection log (``run_dir/reflection/history.jsonl``)
+    as DATA — the proposer never writes it. Tolerant of a missing file (no
+    reflections yet) and of torn/blank lines (a crash mid-append must not
+    break the next round's context assembly)."""
+    path = Path(run_dir) / "reflection" / "history.jsonl"
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            records.append(obj)
+    return records
+
+
+def _read_reflection_handoffs(run_dir: Path) -> list[str]:
+    return [
+        str(record.get("handoff") or "")
+        for record in read_reflection_records(run_dir)
+        if record.get("handoff")
+    ]
 
 
 class MemoryService:
@@ -239,6 +271,30 @@ class MemoryService:
         return build_generation_context(
             goal=goal, editable=editable, frozen=frozen,
             base_sha=base_sha, gate_block=gate_block,
+        )
+
+    def build_reflection_pack(self, *, current_round: int) -> str:
+        """The aggregate trajectory evidence for one Reflection session.
+
+        Deterministic derived views (mechanism-family concentration,
+        expectation↔outcome ledger, incumbent trajectory, attention locality)
+        plus the Scientist's previous reflection handoffs. Best-effort on the
+        reflection log (a missing file just means no prior reflections); safe
+        at round 0 (renders an honest near-empty pack)."""
+        history = read_history(self.history_path)
+        experiments = self.load_experiments()
+        findings = self.load_findings()
+        from ..scientist_session import read_expectations
+        expectation_rows = read_expectations(self.run_dir)
+        handoffs = _read_reflection_handoffs(self.run_dir)
+        return render_reflection_pack(
+            current_round=current_round,
+            experiments=experiments,
+            findings=findings,
+            history_rows=history,
+            expectation_rows=expectation_rows,
+            previous_handoffs=handoffs,
+            metrics_schema=self.metrics_schema,
         )
 
     # --- Write path: target resolution & experiment linking ---------------

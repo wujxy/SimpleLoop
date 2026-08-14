@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from simpleloop.scheduling import worker
 from simpleloop.scheduling.handlers import proposer as proposer_handler
 from simpleloop.scheduling.envelope import (
@@ -108,3 +110,65 @@ def test_viability_redirect_happens_before_proposer_composition(
 
     assert seen == [str(selected.resolve())]
     assert result["status"] == "LANE_FAILED"
+
+
+def test_reflection_handler_registered():
+    from simpleloop.scheduling.worker import _load_handler
+    handler = _load_handler("reflection")
+    assert callable(handler)
+    assert handler.__name__ == "handle_reflection"
+
+
+def test_reflection_handler_routes_and_lets_failures_escape(
+        monkeypatch, tmp_path):
+    """handle_reflection routes to run_reflection_lane and lets exceptions
+    escape — a crashed reflection must become a FAILED envelope (retryable
+    infrastructure), never a fabricated COMPLETED handoff."""
+    calls = {}
+
+    class _Deps:
+        pass
+
+    def _fake_build_lane_deps(cfg, run_dir, **kwargs):
+        calls["deps_built"] = True
+        return _Deps()
+
+    def _fake_run_reflection_lane(deps, spec):
+        calls["spec"] = spec
+        return {
+            "status": "COMPLETED", "mode": "reflection",
+            "reflection": {
+                "round_id": spec.round_id, "handoff": "audit warning",
+                "self_limitation_suspected": True, "abstained": False,
+                "note": None,
+            },
+            "trace": {}, "telemetry": {},
+        }
+
+    monkeypatch.setattr(proposer_handler, "build_lane_deps",
+                        _fake_build_lane_deps)
+    monkeypatch.setattr(proposer_handler, "run_reflection_lane",
+                        _fake_run_reflection_lane)
+    # _run imports config lazily inside the function; give it a real snapshot
+    (tmp_path / "config.resolved.json").write_text("{}", encoding="utf-8")
+    _Deps.runtime = type("R", (), {"preflight": lambda self: None})()
+    payload = {
+        "lane_id": 0, "round_id": 3, "base_sha": "abc",
+        "run_dir": str(tmp_path), "workspace_path": str(tmp_path),
+        "result_dir": str(tmp_path / "result"), "prompt_dir": "",
+        "scientist_steps": 5, "mode": "reflection",
+    }
+    result = proposer_handler.handle_reflection(payload, lambda usage: None)
+    assert result["status"] == "COMPLETED"
+    assert result["mode"] == "reflection"
+    assert result["reflection"]["handoff"] == "audit warning"
+    # the spec carries the reflection mode through (not coerced to "task")
+    assert calls["spec"].mode == "reflection"
+    assert calls["spec"].round_id == 3
+
+    def _boom(deps, spec):
+        raise RuntimeError("reflection crashed")
+
+    monkeypatch.setattr(proposer_handler, "run_reflection_lane", _boom)
+    with pytest.raises(RuntimeError):
+        proposer_handler.handle_reflection(payload, lambda usage: None)

@@ -19,7 +19,7 @@ from simpleloop.candidate import (
     GateDecision,
 )
 from proposer.memory import MemoryService
-from simpleloop.stages.agent import Agent, AgentError, AgentResult
+from simpleloop.stages.agent import Agent
 from simpleloop.persistence.history import Store, best_candidate
 from simpleloop.stages.proposer import Proposal, ProposalBatch, ProposerRequest, StaticProposer
 from simpleloop.stages.selector import select_candidate
@@ -410,43 +410,6 @@ def test_store_keeps_parent_and_best_when_generation_has_no_winner(tmp_path: Pat
     assert best_candidate(
         store.history(), store.metrics_schema,
     )["sha"] == "best"
-
-
-def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):
-    agent = Agent(world=object())
-    expected = {"proposals": []}
-
-    def fake_run(*_args, **_kwargs):
-        return AgentResult(text="ignored", data=expected)
-
-    monkeypatch.setattr(agent, "_run", fake_run)
-
-    assert agent.run_json(
-        "prompt",
-        cwd=tmp_path,
-        label="proposer",
-        json_schema={"type": "object"},
-    ) is expected
-
-
-def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path: Path):
-    agent = Agent(world=object())
-
-    def fake_run(*_args, **_kwargs):
-        return AgentResult(
-            text='explanation before {"proposals":[]}',
-            data={},
-        )
-
-    monkeypatch.setattr(agent, "_run", fake_run)
-
-    with pytest.raises(AgentError, match="not an exact JSON object"):
-        agent.run_json(
-            "prompt",
-            cwd=tmp_path,
-            label="proposer",
-            json_schema={"type": "object"},
-        )
 
 
 def test_next_proposals_static_mode_returns_host_proposal(tmp_path):

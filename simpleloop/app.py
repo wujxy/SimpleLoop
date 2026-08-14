@@ -31,6 +31,7 @@ from .round import RoundRequest, SelectionPolicy, run_round
 from .rsi.body import GitSelfBodyStore
 from .rsi.history import JsonlSelfHistoryStore
 from .rsi.pipeline import RsiPipeline
+from .reflection import JsonlReflectionLog, ReflectionPipeline
 from .scheduling.contracts import ResourceSpec, RetryPolicy
 from .scheduling.hepjob import HEPJobConfig, HEPJobScheduler
 from .scheduling.jobs import WorkerJobPolicy, WorkerJobs
@@ -40,6 +41,7 @@ from .scheduling.rsi import (
     ScheduledSelfReviewer,
     ScheduledViabilityChecker,
 )
+from .scheduling.reflection import ScheduledReflector
 from .scheduling.supervisor import JobSupervisor
 from .scheduling.task import (
     BaselineRequest, ScheduledBaseline, ScheduledCandidates, ScheduledProposer,
@@ -91,6 +93,18 @@ class _RoundObserver:
         print(
             f"[{stamp()}] === round {round_id + 1}/{self.stop_round} "
             f"({kind}) ===", flush=True,
+        )
+
+    def reflection_started(self, round_id: int) -> None:
+        print(
+            f"[{stamp()}] === round {round_id + 1}/{self.stop_round} "
+            "(reflection) ===", flush=True,
+        )
+
+    def reflection_finished(self, round_id: int) -> None:
+        print(
+            f"[{stamp()}] reflection round {round_id + 1}: handoff left",
+            flush=True,
         )
 
     def rsi_finished(self, result) -> None:
@@ -217,6 +231,24 @@ def _run_locked(
         checkpoint=jobs,
     )
     rsi.prepare()
+    reflection_cfg = cfg.get("reflection") or {}
+    reflection_log = JsonlReflectionLog(run_dir / "reflection")
+    reflection = None
+    if reflection_cfg.get("enabled", True):
+        reflector = ScheduledReflector(
+            run_dir=run_dir, workspace=workspace, jobs=jobs,
+            telemetry=telemetry,
+            scientist_steps=int(cfg.get("scientist_steps", 200)),
+            prompt_dir=prompt_dir,
+        )
+        reflection = ReflectionPipeline(
+            run_dir=run_dir, workspace=workspace, reflector=reflector,
+            log=reflection_log, checkpoint=jobs,
+            interval_rounds=int(reflection_cfg.get("interval_rounds", 8)),
+            first_reflection_round=int(
+                reflection_cfg.get("first_reflection_round", 8)),
+        )
+        reflection.prepare()
     _reconcile_inflight(jobs, store.history())
     state_and_baseline = _starting_state(
         continue_run=continue_run,
@@ -224,6 +256,7 @@ def _run_locked(
         history=store.history(),
         baseline_sha=workspace.baseline_sha(),
         last_self_review=self_history.state().last_review_round,
+        last_reflection=reflection_log.last_round(),
         baseline=baseline,
         telemetry=telemetry,
     )
@@ -273,6 +306,7 @@ def _run_locked(
         history=store,
         checkpoint=jobs,
         observer=observer,
+        reflection=reflection,
     )
     if result.interrupted:
         print(f"[{stamp()}] {result.interruption}", flush=True)
@@ -280,6 +314,11 @@ def _run_locked(
         print(
             f"[{stamp()}] self-reviews: {result.rsi_rounds} "
             f"({_tally_text(result.rsi_tally)})", flush=True,
+        )
+    if result.reflection_rounds:
+        print(
+            f"[{stamp()}] reflections: {result.reflection_rounds}",
+            flush=True,
         )
     summary = write_summary(
         run_dir=run_dir, store=store, workspace=workspace,
@@ -313,6 +352,7 @@ def _reconcile_inflight(jobs, history: list[dict]) -> None:
 def _starting_state(
     *, continue_run: bool, stop_round: int, history: list[dict],
     baseline_sha: str, last_self_review: int | None, baseline, telemetry,
+    last_reflection: int | None = None,
 ):
     if continue_run:
         if not history:
@@ -323,6 +363,7 @@ def _starting_state(
         next_round = max(
             last_task,
             last_self_review if last_self_review is not None else -1,
+            last_reflection if last_reflection is not None else -1,
         ) + 1
         if next_round >= stop_round:
             return None

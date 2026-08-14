@@ -52,6 +52,31 @@ def _resolve_session_dir(run_dir: Path, lane_id: int) -> Path:
     return new
 
 
+def read_expectations(run_dir: Path) -> dict[int, dict]:
+    """Read pre-registered expectations: LAST row per round wins.
+
+    Returns ``{round: {"round", "captured", "expectations"}}`` (empty when the
+    file does not exist yet — e.g. a run-dir from before this mechanism). Used
+    by the world-event builder (pairing outcomes with prior commitments) and by
+    the reflection pack (the expectation↔outcome ledger).
+    """
+    path = _resolve_session_dir(Path(run_dir), 0) / "expectations.jsonl"
+    if not path.exists():
+        return {}
+    rows: dict[int, dict] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("round"), int):
+            rows[obj["round"]] = obj
+    return rows
+
+
 @dataclass
 class ScientistSession:
     """One Scientist's persistent state across rounds.
@@ -79,6 +104,10 @@ class ScientistSession:
     @property
     def meta_path(self) -> Path:
         return self.session_dir / "meta.json"
+
+    @property
+    def expectations_path(self) -> Path:
+        return self.session_dir / "expectations.jsonl"
 
     @classmethod
     def load_or_create(
@@ -178,6 +207,40 @@ class ScientistSession:
         revised, not appended — it is a living self-model, not a log)."""
         self.notebook_path.write_text(text, encoding="utf-8")
         self.notebook = text
+
+    def append_expectations(
+        self, round_id: int, expectations: list[dict], *, captured: bool
+    ) -> None:
+        """Append one pre-registration row for ``round_id``.
+
+        The notebook is rewritten each round, so free-text expectations do not
+        survive; this row is the durable record of what the Scientist committed
+        to BEFORE the results existed (the hindsight-bias defense). Append-only:
+        a retried round appends again and the reader takes the LAST row per
+        round. ``captured=False`` (budget exhausted / model failure) must still
+        be written — a missing pre-registration is information, never silence.
+        """
+        with self.expectations_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "round": round_id,
+                        "captured": captured,
+                        "expectations": expectations,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    def note_replayed_reflection(self, round_id: int) -> None:
+        """Record that the reflection handoff from ``round_id`` was injected
+        into a live round, so a crash-retry does not double-inject (and a
+        duplicate injection is only a harmless archived repeat anyway)."""
+        self.meta["last_reflection_replayed"] = round_id
+        self.meta_path.write_text(
+            json.dumps(self.meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def save_meta(self, *, round_id: int, base_sha: str) -> None:
         self.meta["scientist_id"] = self.scientist_id

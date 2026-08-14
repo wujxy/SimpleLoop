@@ -31,27 +31,18 @@ _BM25_K1 = 1.5
 _BM25_B = 0.75
 
 
-@dataclass(frozen=True)
-class _BM25Doc:
-    doc_id: int
-    tokens: tuple[str, ...]
-
-
 class BM25Index:
     """Minimal BM25 over a corpus of token lists."""
 
     def __init__(self, docs: list[list[str]]):
-        self.docs = [
-            _BM25Doc(doc_id=i, tokens=tuple(toks))
-            for i, toks in enumerate(docs)
-        ]
-        self.doc_lens = [len(doc.tokens) for doc in self.docs]
+        self.docs = [tuple(toks) for toks in docs]
+        self.doc_lens = [len(doc) for doc in self.docs]
         self.avgdl = (
             sum(self.doc_lens) / len(self.doc_lens) if self.doc_lens else 0.0
         )
         self._df: dict[str, int] = {}
         for doc in self.docs:
-            for tok in set(doc.tokens):
+            for tok in set(doc):
                 self._df[tok] = self._df.get(tok, 0) + 1
         self._n = len(self.docs)
 
@@ -68,7 +59,7 @@ class BM25Index:
         dl = self.doc_lens[doc_idx]
         # Term frequency in the doc.
         tf: dict[str, int] = {}
-        for tok in doc.tokens:
+        for tok in doc:
             tf[tok] = tf.get(tok, 0) + 1
         score = 0.0
         for term in query:

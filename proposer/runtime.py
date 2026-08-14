@@ -395,18 +395,6 @@ class ApptainerRuntime:
                     f"{completed.returncode}: {detail}"
                 )
 
-    def summary_lines(self) -> tuple[str, str, str]:
-        """Return a concise, secret-free startup summary."""
-        bind_paths = [
-            *(str(path) for path in self.binds if path != self.run_dir),
-            str(self.run_dir),
-        ]
-        return (
-            "runtime: apptainer",
-            f"image: {self.image}",
-            f"binds: {', '.join(bind_paths)}",
-        )
-
     def _validate_paths(self) -> None:
         if not self.image.is_file():
             raise RuntimePreflightError(

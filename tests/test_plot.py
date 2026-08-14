@@ -134,9 +134,16 @@ def test_build_series_tracks_parallel_candidates_selected_and_incumbent():
     assert series.rounds == [1, 2]
     assert plot_mod._Y_KINDS == ("objective", "ratio")
     assert not hasattr(series, "score_points")
-    assert series.objective_points == [(1, 120.0), (1, 90.0), (2, 110.0)]
-    assert series.selected_objectives == [(1, 90.0)]
-    assert series.incumbent_objective == [(1, 90.0), (2, 90.0)]
+    assert [(p.round, p.objective) for p in series.candidates] == [
+        (1, 120.0), (1, 90.0), (2, 110.0),
+    ]
+    assert [(p.round, p.objective) for p in series.candidates if p.selected] == [
+        (1, 90.0),
+    ]
+    assert [
+        (p.round, p.objective)
+        for p in series.incumbents if p.round > 0
+    ] == [(1, 90.0), (2, 90.0)]
     assert series.objective_key == "SPEED_MS"
     assert series.lower_is_better is True
 
@@ -157,9 +164,17 @@ def test_build_series_supports_single_candidate_history_and_missing_values():
 
     assert series.rounds == [1, 2, 3]
     assert not hasattr(series, "selected_scores")
-    assert series.objective_points == [(1, 10.0), (3, 12.0)]
-    assert series.selected_objectives == [(1, 10.0), (3, 12.0)]
-    assert series.incumbent_objective == [(1, 10.0), (2, 10.0), (3, 12.0)]
+    assert [
+        (p.round, p.objective)
+        for p in series.candidates if p.objective is not None
+    ] == [(1, 10.0), (3, 12.0)]
+    assert [
+        (p.round, p.objective) for p in series.candidates if p.selected
+    ] == [(1, 10.0), (3, 12.0)]
+    assert [
+        (p.round, p.objective)
+        for p in series.incumbents if p.round > 0
+    ] == [(1, 10.0), (2, 10.0), (3, 12.0)]
     assert series.objective_key == "QUALITY"
     assert series.lower_is_better is False
 
@@ -181,8 +196,10 @@ def test_build_series_requires_selected_sha_to_advance_parallel_incumbent():
 
     series = build_series(history, SCHEMA)
 
-    assert series.selected_objectives == [(1, 90.0)]
-    assert series.incumbent_objective == []
+    assert [(p.round, p.objective) for p in series.candidates if p.selected] == [
+        (1, 90.0),
+    ]
+    assert [p for p in series.incumbents if p.round > 0] == []
 
 
 def test_build_series_skips_non_finite_values():
@@ -193,8 +210,8 @@ def test_build_series_skips_non_finite_values():
 
     series = build_series(history, SCHEMA)
 
-    assert series.objective_points == []
-    assert series.incumbent_objective == []
+    assert [p for p in series.candidates if p.objective is not None] == []
+    assert [p for p in series.incumbents if p.objective is not None] == []
 
 
 def test_cost_uses_weighted_input_output_and_cache_hit_rates():
@@ -341,9 +358,6 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     class FakeRuntime:
         def __init__(self, **_kwargs):
             pass
-
-        def summary_lines(self):
-            return ()
 
         def preflight(self):
             pass
@@ -694,9 +708,6 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
     class FakeRuntime:
         def __init__(self, **_kwargs):
             pass
-
-        def summary_lines(self):
-            return ()
 
         def preflight(self):
             pass

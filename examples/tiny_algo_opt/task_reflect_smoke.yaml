@@ -1,0 +1,60 @@
+evaluation:
+  commands:
+  - PYTHONPATH=. python -m pytest tests/ -q && echo CORRECTNESS=PASS || echo CORRECTNESS=FAIL
+  - PYTHONPATH=. python scripts/check_drift.py && echo DRIFT=PASS || echo DRIFT=FAIL
+  - PYTHONPATH=. python scripts/bench.py
+  gates:
+  - description: 'The pytest suite passes. Pair counts must be exactly correct; a
+      change that alters any computed count fails.
+
+      '
+    key: CORRECTNESS
+  - description: 'Per-call output is identical to the frozen reference. Any change
+      to operation order, accumulation, or control flow that shifts it fails.
+
+      '
+    key: DRIFT
+  objective:
+    direction: minimize
+    key: ms_per_call
+executor:
+  api: anthropic
+  base_url: https://aiapi.ihep.ac.cn/apiv2/anthropic
+  model: glm-5.2
+goal: 'Optimize the tinyalgo pair-counting implementation in tinyalgo/__init__.py
+  for speed (lower ms_per_call) while keeping results exactly correct: the pytest
+  suite and scripts/check_drift.py must still pass. Edit only tinyalgo.
+
+  '
+loop:
+  candidates_per_round: 2
+  max_parallel_candidates: 2
+  max_rounds: 4
+proposer:
+  api: hepai
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_output_cap_chars: 12000
+  command_timeout_seconds: 120
+  max_steps: 200
+  model: gpt-5.5
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+reflection:
+  enabled: true
+  first_reflection_round: 1
+  interval_rounds: 2
+rsi:
+  enabled: true
+  first_review_round: 4
+schema: simpleloop.v1
+source:
+  baseline: HEAD
+  repo: repo
+world:
+  image: apptainer.sif
+  writable:
+  - tinyalgo

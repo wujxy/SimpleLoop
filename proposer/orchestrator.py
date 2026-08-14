@@ -24,6 +24,7 @@ from .scientist import (
     ContextPolicy,
     ProposerError,
     ProposerResult,
+    ReflectionResult,
     SCIENTIST_PROMPT_VERSION,
     SelfReviewResult,
     ScientistAgent,
@@ -327,6 +328,47 @@ class ProposerOrchestrator:
                 abstained=True,
             )
         _safe_save_meta(session, current_round, incumbent_self_sha)
+        return result
+
+    def run_reflection(
+        self, *,
+        goal: str,
+        editable: list[str],
+        world_mount: MountMap,
+        memory_service,
+        base_sha: str,
+        workspace: Path,
+        repo_path: Path,
+        run_dir: Path,
+        current_round: int,
+        prompt_dir: Path | None,
+        scientist_steps: int = 200,
+    ) -> ReflectionResult:
+        """Run ONE Reflection round: the resident Scientist audits its recent
+        research trajectory in the research world and emits a handoff. Mirrors
+        ``run_self_review``'s session continuity (the autobiography persists
+        across task, self, AND reflection rounds).
+
+        Exceptions are NOT converted into a fabricated result (unlike
+        self-review's KEEP crash-default, which protects the authoritative
+        reviews stream): a failed reflection is infrastructure — the worker
+        envelope reports FAILED and the supervisor retries it. Nothing here
+        writes the reflection log; the Host owns that."""
+        session = ScientistSession.load_or_create(
+            run_dir, 0, prompt_version=SCIENTIST_PROMPT_VERSION,
+        )
+        try:
+            result = self.scientist.reflection(
+                goal=goal, editable=editable, world_mount=world_mount,
+                memory_service=memory_service, base_sha=base_sha,
+                source_path=workspace, repo_path=repo_path, run_dir=run_dir,
+                current_round=current_round, prompt_dir=prompt_dir,
+                session=session, max_steps=scientist_steps,
+            )
+        except Exception as exc:
+            _safe_save_meta(session, current_round, base_sha)
+            raise
+        _safe_save_meta(session, current_round, base_sha)
         return result
 
     @staticmethod

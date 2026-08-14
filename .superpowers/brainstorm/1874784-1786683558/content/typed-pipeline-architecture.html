@@ -1,0 +1,78 @@
+<h2>SimpleLoop：Typed Pipeline 总体架构</h2>
+<p class="subtitle">目标：Loop 只编排；每个模块都有明确 Request → Result；基础设施通过小型 Provider 接口替换。</p>
+
+<div class="section">
+  <div class="label">COMPOSITION ROOT</div>
+  <div style="border:2px solid #6366f1;border-radius:12px;padding:14px 18px;background:#eef2ff;text-align:center">
+    <strong>CLI / Config Loader</strong>
+    <div style="font-size:13px;margin-top:4px;color:#475569">外部 YAML、环境变量 → 已校验的 LoopSpec + Providers</div>
+  </div>
+</div>
+
+<div style="text-align:center;font-size:24px;color:#64748b">↓</div>
+
+<div class="section">
+  <div class="label">ORCHESTRATION — 只表达顺序与分支</div>
+  <div style="border:2px solid #0f766e;border-radius:12px;padding:16px;background:#f0fdfa">
+    <div style="font-weight:700;text-align:center;margin-bottom:12px">run_loop(LoopRequest) → LoopResult</div>
+    <div style="display:flex;align-items:stretch;gap:8px;flex-wrap:wrap;justify-content:center">
+      <div style="padding:10px;border-radius:8px;background:white;border:1px solid #99f6e4">load_state</div>
+      <div style="align-self:center">→</div>
+      <div style="padding:10px;border-radius:8px;background:white;border:1px solid #99f6e4">run_round</div>
+      <div style="align-self:center">→</div>
+      <div style="padding:10px;border-radius:8px;background:white;border:1px solid #99f6e4">record</div>
+      <div style="align-self:center">→</div>
+      <div style="padding:10px;border-radius:8px;background:white;border:1px solid #99f6e4">next / stop</div>
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center;font-size:24px;color:#64748b">↓</div>
+
+<div class="section">
+  <div class="label">ROUND PIPELINE — 明确的数据流</div>
+  <div style="display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:10px">
+    <div style="padding:14px;border-radius:10px;background:#fff7ed;border:1px solid #fdba74"><strong>1. Proposer</strong><br><small>ProposerRequest<br>→ ProposalBatch</small></div>
+    <div style="padding:14px;border-radius:10px;background:#fff7ed;border:1px solid #fdba74"><strong>2. Executor</strong><br><small>ExecutionRequest<br>→ CandidateBatch</small></div>
+    <div style="padding:14px;border-radius:10px;background:#fff7ed;border:1px solid #fdba74"><strong>3. Evaluator</strong><br><small>EvaluationRequest<br>→ EvaluationBatch</small></div>
+    <div style="padding:14px;border-radius:10px;background:#fff7ed;border:1px solid #fdba74"><strong>4. Gate</strong><br><small>GateRequest<br>→ GateDecision</small></div>
+    <div style="grid-column:2 / 4;padding:14px;border-radius:10px;background:#fefce8;border:1px solid #fde047;text-align:center"><strong>5. Selector</strong><br><small>SelectionRequest → RoundSelection</small></div>
+  </div>
+</div>
+
+<div class="split section">
+  <div class="mockup">
+    <div class="mockup-header">资源层：状态与执行分离</div>
+    <div class="mockup-body">
+      <div style="padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:8px"><strong>SourceWorkspace</strong><br><small>prepare / diff / commit / cleanup</small></div>
+      <div style="padding:10px;border:1px solid #cbd5e1;border-radius:8px"><strong>Sandbox</strong><br><small>run / mounts / env / timeout / cleanup</small></div>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">RSI 旁路：不污染任务 pipeline</div>
+    <div class="mockup-body">
+      <div style="padding:10px;border:1px solid #c4b5fd;border-radius:8px;background:#faf5ff"><strong>review_self</strong> → SelfDecision</div>
+      <div style="text-align:center">↓</div>
+      <div style="padding:10px;border:1px solid #c4b5fd;border-radius:8px;background:#faf5ff"><strong>evolve_self</strong> → SelfCandidate</div>
+      <div style="text-align:center">↓</div>
+      <div style="padding:10px;border:1px solid #c4b5fd;border-radius:8px;background:#faf5ff"><strong>check_viability</strong> → Adopt / Reject</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">PROVIDERS — 可替换但不泄漏进业务层</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+    <div style="padding:12px;border-radius:9px;background:#f8fafc;border:1px solid #94a3b8"><strong>WorkspaceProvider</strong><br><small>Git worktree</small></div>
+    <div style="padding:12px;border-radius:9px;background:#f8fafc;border:1px solid #94a3b8"><strong>SandboxProvider</strong><br><small>Apptainer / Podman / Remote</small></div>
+    <div style="padding:12px;border-radius:9px;background:#f8fafc;border:1px solid #94a3b8"><strong>Scheduler</strong><br><small>Local / HEPJob</small></div>
+  </div>
+</div>
+
+<div class="option" data-choice="architecture-approved" onclick="toggleSelect(this)">
+  <div class="letter">✓</div>
+  <div class="content">
+    <h3>这套顶层边界符合预期</h3>
+    <p>点击确认，或在终端指出需要调整的模块关系。</p>
+  </div>
+</div>

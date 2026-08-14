@@ -114,32 +114,6 @@ def build_lane_deps(
     )
 
 
-def proposal_from_dict(raw: Mapping[str, object]):
-    from proposer.memory.models import (
-        ExistingFindingTarget,
-        NewFindingTarget,
-        ResearchProposal,
-    )
-
-    target = raw.get("research_target") or {}
-    if not isinstance(target, Mapping):
-        research_target = NewFindingTarget(question=str(target))
-    elif "finding_id" in target:
-        research_target = ExistingFindingTarget(finding_id=str(target["finding_id"]))
-    else:
-        research_target = NewFindingTarget(
-            question=str(target.get("question") or ""),
-            mechanisms=tuple(target.get("mechanisms") or ()),
-            code_regions=tuple(target.get("code_regions") or ()),
-        )
-    return ResearchProposal(
-        instruction=str(raw.get("instruction") or ""),
-        research_target=research_target,
-        evidence_refs=tuple(raw.get("evidence_refs") or ()),
-        material_difference=raw.get("material_difference"),
-    )
-
-
 def _lane_result_to_dict(result) -> dict[str, object]:
     return {
         "status": "COMPLETED",
@@ -234,6 +208,47 @@ def run_self_review_lane(
     return _self_review_result(spec, result, spec.incumbent_self_sha)
 
 
+def _reflection_result(spec: ProposerLaneSpec, result) -> dict[str, object]:
+    return {
+        "status": "COMPLETED",
+        "mode": "reflection",
+        "lane_id": spec.lane_id,
+        "round_id": spec.round_id,
+        "reflection": {
+            "contract_version": _contract_version(),
+            "round_id": spec.round_id,
+            "handoff": result.handoff,
+            "self_limitation_suspected": result.self_limitation_suspected,
+            "abstained": result.abstained,
+            "note": result.note,
+        },
+        "trace": result.trace or {},
+        "telemetry": result.deliberation_telemetry or {},
+    }
+
+
+def run_reflection_lane(
+    deps: ProposerLaneDeps,
+    spec: ProposerLaneSpec,
+) -> dict[str, object]:
+    from proposer.runtime import world_mount_map
+
+    result = deps.orchestrator.run_reflection(
+        goal=deps.cfg["goal"],
+        editable=deps.cfg["editable_paths"],
+        world_mount=world_mount_map(deps.cfg),
+        memory_service=deps.memory_service,
+        base_sha=spec.base_sha,
+        workspace=Path(spec.workspace_path),
+        repo_path=deps.repo_path,
+        run_dir=deps.run_dir,
+        current_round=spec.round_id,
+        prompt_dir=deps.prompt_dir,
+        scientist_steps=spec.scientist_steps,
+    )
+    return _reflection_result(spec, result)
+
+
 def _failure_result(spec: ProposerLaneSpec, reason: str) -> dict[str, object]:
     return {
         "status": "LANE_FAILED",
@@ -259,7 +274,7 @@ def _run(
     from ... import config as config_mod
 
     raw = dict(payload)
-    raw["mode"] = "self" if mode == "self" else "task"
+    raw["mode"] = mode
     spec = ProposerLaneSpec.from_dict(raw)
     if mode == "self":
         # A failed self review is an infrastructure error, not a KEEP: a
@@ -276,6 +291,19 @@ def _run(
         )
         deps.runtime.preflight()
         return run_self_review_lane(deps, spec)
+    if mode == "reflection":
+        # Same discipline as self-review: a failed reflection must surface as
+        # a FAILED envelope (retryable infrastructure), never as a fabricated
+        # COMPLETED handoff — the reflection log is authoritative.
+        run_dir = Path(spec.run_dir)
+        deps = build_lane_deps(
+            config_mod.load_resolved(run_dir),
+            run_dir,
+            usage_observer=observe_usage,
+            prompt_dir=spec.prompt_dir or None,
+        )
+        deps.runtime.preflight()
+        return run_reflection_lane(deps, spec)
     try:
         run_dir = Path(spec.run_dir)
         deps = build_lane_deps(
@@ -296,6 +324,10 @@ def handle_proposer(payload, observe_usage):
 
 def handle_self_review(payload, observe_usage):
     return _run(payload, observe_usage, mode="self")
+
+
+def handle_reflection(payload, observe_usage):
+    return _run(payload, observe_usage, mode="reflection")
 
 
 def handle_viability(payload, observe_usage):

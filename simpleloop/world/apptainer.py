@@ -205,13 +205,3 @@ class _BoundApptainerSandbox:
             time.monotonic() - started,
             timed_out,
         )
-
-    def summary_lines(self) -> tuple[str, str, str]:
-        return (
-            "sandbox: apptainer",
-            f"image: {Path(self.spec.image)}",
-            "mounts: " + ", ".join(
-                f"{mount.source}:{mount.target}:{mount.mode.value}"
-                for mount in self.mounts
-            ),
-        )

@@ -39,7 +39,6 @@ class WorkingState:
     action_log: list[dict] = field(default_factory=list)
     protocol_repairs: int = 0
     candidate_directions: str = ""
-    current_information_goal: str = ""
     located: bool = False
     last_tool_fingerprint: str | None = None
 

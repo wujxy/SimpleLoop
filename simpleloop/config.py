@@ -16,7 +16,7 @@ RESOLVED_SNAPSHOT_NAME = "config.resolved.json"
 
 _TOP_KEYS = {
     "schema", "goal", "hints", "loop", "source", "world", "evaluation",
-    "providers", "proposer", "executor", "rsi",
+    "providers", "proposer", "executor", "rsi", "reflection",
 }
 
 
@@ -35,6 +35,7 @@ def load(config_path: str | Path, *, require_ready: bool = True) -> dict[str, An
         os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0"
     )
     resolved["rsi"] = {"enabled": False}
+    resolved["reflection"] = _resolve_reflection({})
     return resolved
 
 
@@ -67,6 +68,7 @@ def load_resolved(run_dir: str | Path) -> dict[str, Any]:
         )
     resolved.setdefault("sandbox_userns", True)
     resolved.setdefault("rsi", {"enabled": False})
+    resolved.setdefault("reflection", _resolve_reflection({}))
     return resolved
 
 
@@ -103,6 +105,7 @@ def _resolve_v1(raw: dict, path: Path, *, require_ready: bool) -> dict:
     proposer = _optional_block(raw, "proposer")
     executor = _optional_block(raw, "executor")
     rsi = _optional_block(raw, "rsi")
+    reflection = _optional_block(raw, "reflection")
 
     _reject_unknown(loop, {
         "max_rounds", "candidates_per_round", "max_parallel_candidates",
@@ -124,6 +127,11 @@ def _resolve_v1(raw: dict, path: Path, *, require_ready: bool) -> dict:
     }, "proposer")
     _reject_unknown(executor, {"api", "model", "base_url"}, "executor")
     _reject_unknown(rsi, {"enabled", "first_review_round"}, "rsi")
+    _reject_unknown(
+        reflection,
+        {"enabled", "interval_rounds", "first_reflection_round"},
+        "reflection",
+    )
 
     sandbox = _block(providers, "sandbox")
     scheduler = _block(providers, "scheduler")
@@ -219,7 +227,36 @@ def _resolve_v1(raw: dict, path: Path, *, require_ready: bool) -> dict:
         "enabled": enabled,
         **({"first_self_review_round": first} if enabled else {}),
     }
+    resolved["reflection"] = _resolve_reflection(reflection)
     return resolved
+
+
+def _resolve_reflection(reflection: dict) -> dict:
+    """Reflection is the Scientist's periodic anti-inertia checkpoint —
+    default-on: a task YAML without a reflection block still gets one every
+    ``interval_rounds`` rounds. The fixed interval is an anti-inertia
+    guarantee, not a claim about the scientifically optimal cadence."""
+    enabled = reflection.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("reflection.enabled: must be a boolean")
+    if not enabled and set(reflection) - {"enabled"}:
+        raise ConfigError(
+            "reflection.interval_rounds/first_reflection_round require "
+            "reflection.enabled: true"
+        )
+    interval = reflection.get("interval_rounds", 8)
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
+        raise ConfigError("reflection.interval_rounds: must be an integer >= 1")
+    first = reflection.get("first_reflection_round", interval)
+    if not isinstance(first, int) or isinstance(first, bool) or first < 0:
+        raise ConfigError(
+            "reflection.first_reflection_round: must be a non-negative integer"
+        )
+    return {
+        "enabled": enabled,
+        "interval_rounds": interval,
+        "first_reflection_round": first,
+    }
 
 
 def _block(raw: dict, key: str) -> dict:

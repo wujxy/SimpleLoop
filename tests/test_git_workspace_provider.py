@@ -63,7 +63,6 @@ def test_commit_returns_typed_artifact_and_keeps_sha_reachable(tmp_path: Path):
 
     assert artifact.parent_sha == base
     assert [path.as_posix() for path in artifact.changed_paths] == ["src/a.py"]
-    assert "+new" in provider.diff(base, artifact.sha)
     assert _git("-C", str(provider.repo), "cat-file", "-t", artifact.sha) == "commit"
 
 

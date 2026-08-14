@@ -74,9 +74,6 @@ class WorkspaceProvider(Protocol):
     ) -> "CandidateArtifact":
         ...
 
-    def diff(self, parent_sha: str, child_sha: str) -> str:
-        ...
-
 
 class MountMode(str, Enum):
     READ_ONLY = "ro"

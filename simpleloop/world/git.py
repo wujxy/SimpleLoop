@@ -204,9 +204,6 @@ class GitWorkspaceProvider:
             )
         return CandidateArtifact(request.parent_sha, sha, request.changed_paths)
 
-    def diff(self, parent_sha: str, child_sha: str) -> str:
-        return self._git(self.repo, "diff", f"{parent_sha}..{child_sha}")
-
     def _drop_stale(self, path: Path, *, clear_lingering: bool = False) -> None:
         if not path.exists():
             return

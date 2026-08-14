@@ -35,6 +35,7 @@ class LoopResult:
     task_rounds: int
     rsi_rounds: int
     rsi_tally: Mapping[str, int]
+    reflection_rounds: int = 0
     interrupted: bool = False
     interruption: str | None = None
 
@@ -46,6 +47,15 @@ class RoundRunner(Protocol):
 class RsiRunner(Protocol):
     def due(self, round_id: int) -> bool: ...
     def run(self, round_id: int) -> RsiResult: ...
+
+
+class ReflectionRunner(Protocol):
+    """A periodic reflection checkpoint (continuity design §16): consumes a
+    round id, leaves the incumbent unchanged, and returns the number of the
+    round it occupied."""
+
+    def due(self, round_id: int) -> bool: ...
+    def run(self, round_id: int) -> int: ...
 
 
 class RoundHistory(Protocol):
@@ -62,11 +72,14 @@ class LoopObserver(Protocol):
     ``round_started`` and ``rsi_finished`` are optional hooks: ``run_loop``
     calls them only when the observer provides them, so a minimal observer
     (and test fakes) may implement ``round_committed`` alone.
+    ``reflection_started`` / ``reflection_finished`` follow the same rule.
     """
 
     def round_started(self, round_id: int, *, rsi: bool) -> None: ...
     def round_committed(self, result: RoundResult) -> None: ...
     def rsi_finished(self, result: RsiResult) -> None: ...
+    def reflection_started(self, round_id: int) -> None: ...
+    def reflection_finished(self, round_id: int) -> None: ...
 
 
 def _notify(observer: LoopObserver, hook: str, *args, **kwargs) -> None:
@@ -83,10 +96,12 @@ def run_loop(
     history: RoundHistory,
     checkpoint: CheckpointStore,
     observer: LoopObserver,
+    reflection: ReflectionRunner | None = None,
 ) -> LoopResult:
     state = request.state
     task_rounds = 0
     rsi_rounds = 0
+    reflection_rounds = 0
     rsi_tally: dict[str, int] = {}
     while state.next_round < request.stop_round:
         round_id = state.next_round
@@ -105,6 +120,17 @@ def run_loop(
                     state.incumbent_metrics,
                 )
                 continue
+            if reflection is not None and reflection.due(round_id):
+                _notify(observer, "reflection_started", round_id)
+                reflection.run(round_id)
+                reflection_rounds += 1
+                _notify(observer, "reflection_finished", round_id)
+                state = LoopState(
+                    round_id + 1,
+                    state.incumbent_sha,
+                    state.incumbent_metrics,
+                )
+                continue
             _notify(observer, "round_started", round_id, rsi=False)
             result = rounds.run(RoundRequest(
                 round_id,
@@ -116,6 +142,7 @@ def run_loop(
         except InfrastructureError as exc:
             return LoopResult(
                 state, task_rounds, rsi_rounds, rsi_tally,
+                reflection_rounds=reflection_rounds,
                 interrupted=True, interruption=str(exc),
             )
         history.append_round(result)
@@ -131,4 +158,6 @@ def run_loop(
             dict(winner.metrics) if winner is not None else state.incumbent_metrics,
         )
         task_rounds += 1
-    return LoopResult(state, task_rounds, rsi_rounds, rsi_tally)
+    return LoopResult(
+        state, task_rounds, rsi_rounds, rsi_tally, reflection_rounds,
+    )

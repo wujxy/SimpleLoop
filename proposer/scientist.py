@@ -54,9 +54,10 @@ from .research_agent import (
     _source_path_exists,
     _stamp,
 )
-from .scientist_session import ScientistSession
+from .scientist_session import ScientistSession, read_expectations
 from .runtime import ApptainerRuntime, MountMap
 from .memory.context import build_generation_context
+from .memory.service import read_reflection_records
 from .memory.models import (
     ExistingFindingTarget,
     NewFindingTarget,
@@ -128,6 +129,32 @@ class SelfReviewResult:
     trace: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ReflectionResult:
+    """Internal: one Reflection round's outcome.
+
+    ``handoff`` is the note to the next self — a cognitive warning, not an
+    instruction, not a proposal, and not a self_decision. The Host appends it
+    to run_dir/reflection/history.jsonl; the next task round replays it with
+    an explicit epistemic status.
+
+    ``self_limitation_suspected`` is ADVISORY RSI evidence only (a repeated
+    pattern the reflection named); reflection never decides KEEP/CHANGE and
+    never specifies a self_change.
+
+    ``abstained`` reflects a reflection that exhausted its budget before
+    producing a handoff.
+    """
+
+    handoff: str
+    self_limitation_suspected: bool = False
+    note: str | None = None
+    abstained: bool = False
+    usage: object = None
+    deliberation_telemetry: dict = field(default_factory=dict)
+    trace: dict = field(default_factory=dict)
+
+
 # --- Tunables --------------------------------------------------------------
 
 # Research / memory tools never terminate the loop.
@@ -141,7 +168,7 @@ _TAIL_TURNS = 8
 
 # Prompt-version stamp recorded in meta.json so a prompt change is observable
 # per Scientist across rounds.
-SCIENTIST_PROMPT_VERSION = "scientist-v3"
+SCIENTIST_PROMPT_VERSION = "scientist-v4"
 
 
 # --- Live-context compaction (Option A: deterministic shedding) -----------
@@ -426,15 +453,53 @@ _SUSPEND_PROMPT = (
     "  - the specific code regions, mechanisms, or measurements your current "
     "view rests on — so you can re-check them against the world that exists "
     "when you resume, not rely on this note as fact;\n"
-    "  - what remains unresolved or uncertain;\n"
-    "  - what you expected the experiments you just submitted to teach you, "
-    "and what outcome would strengthen or weaken your current view.\n"
+    "  - what remains unresolved or uncertain.\n"
+    "\n"
+    "Separately — and this part is recorded verbatim and replayed next to the "
+    "results before you see them — register what you expect from each "
+    "direction you submitted. For each proposal slot (0-based, in submission "
+    "order): what outcome you honestly expect and why, and what outcome would "
+    "WEAKEN the belief that motivated that direction. Write your honest prior, "
+    "not a safe prediction — a pre-registration you hedged cannot discipline "
+    "your future judgment.\n"
     "\n"
     "This is autobiographical memory, not an established account of the "
     "present or future world, and not a plan your future self must follow. You "
     "may revise or reject any of it when you resume. Return one JSON object:\n"
-    '  {"notebook": "<your continuation note>"}'
+    '  {"notebook": "<your continuation note>",\n'
+    '   "expectations": [{"slot": 0,\n'
+    '                     "expectation": "<what outcome I expect and why>",\n'
+    '                     "would_weaken": "<what outcome would weaken the '
+    'belief motivating this direction>"}]}\n'
+    "(one expectations entry per submitted proposal slot)"
 )
+
+
+def _valid_expectations(raw: object) -> list[dict]:
+    """Filter a suspend-reply ``expectations`` list down to well-formed rows.
+
+    Malformed entries are dropped rather than failing the round — a partial
+    pre-registration is still better than none (missing slots render as
+    NOT RECORDED in the world event).
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        slot = item.get("slot")
+        expectation = item.get("expectation")
+        if not isinstance(slot, int) or isinstance(slot, bool):
+            continue
+        if not isinstance(expectation, str) or not expectation.strip():
+            continue
+        row = {"slot": slot, "expectation": expectation.strip()}
+        weaken = item.get("would_weaken")
+        if isinstance(weaken, str) and weaken.strip():
+            row["would_weaken"] = weaken.strip()
+        out.append(row)
+    return out
 
 
 # --- Self-review prompt scaffolding (RSI S3c) ------------------------------
@@ -463,6 +528,13 @@ Control action (the only non-tool action):
   the mechanism you believe limits progress and WHAT/WHY changing it would help;
   the concrete HOW is not yours to specify. Both decisions need a reason grounded
   in the evidence above — there is no default KEEP and no default CHANGE.
+
+Deliberation order (mandatory): FIRST build the strongest case AGAINST the current
+self, each charge citing specific evidence (experiment ids, rounds, trajectory
+patterns); THEN the strongest case FOR it (alternative explanations of the same
+evidence); ONLY THEN decide, and state in the diagnosis which charges survived the
+defense and which did not. A verdict that skips the prosecution is a defense; a
+verdict that skips testing the charges is an execution. Neither is a review.
 """
 
 _SELF_REVIEW_COLD_START = (
@@ -483,6 +555,81 @@ _SELF_REVIEW_BUDGET_NUDGE = (
 # this default commitment so the Host's scheduler re-opens self-attention soon
 # rather than stalling.
 _SELF_REVIEW_DEFAULT_DEFER = 3
+
+
+# --- Reflection prompt scaffolding (continuity design §9-§16) -------------
+
+_REFLECTION_PROTOCOL_BLOCK = """Output protocol (immutable): every response is exactly one \
+JSON object.
+
+  {"message": "...optional...", "action": {"action": "...", ...fields...}}
+
+- "action" (required): one research tool call, OR submit_reflection_handoff.
+- "message" (optional): natural text for your own trajectory; not required and
+  not a substitute for acting.
+
+Control action (the only non-tool action):
+- {"action":"submit_reflection_handoff",
+   "handoff":"<note to your next self — a cognitive warning about how the
+              recent you may have failed, grounded in cited evidence; NOT an
+              instruction, NOT a next direction, NOT a proposal>",
+   "self_limitation_suspected": true|false,   # advisory RSI evidence only
+   "note":"...optional context..."}
+  handoff is required and must be a non-empty string. self_limitation_suspected
+  defaults to false; set it true only when you can name the SPECIFIC repeated
+  pattern that suggests a stable limitation of yours (it becomes advisory
+  evidence for a later self-review — reflection itself never modifies you).
+  Do NOT submit proposals, do NOT submit a self_decision, do NOT choose the
+  next research direction. Reveal the inertia; the next self re-decides.
+"""
+
+_REFLECTION_COLD_START = (
+    "You are beginning a reflection. The Goal, the current work, the "
+    "deterministic reflection evidence pack, and your own notebook are in "
+    "your standing context. Your job is not to advance the research — it is "
+    "to doubt it: find where the recent version of you may have failed to "
+    "advance the Goal effectively, cite the evidence, and leave your next "
+    "self a warning. Then submit your handoff."
+)
+
+_REFLECTION_BUDGET_NUDGE = (
+    "Your reflection turn is nearing its budget. If your strongest challenge "
+    "is grounded, submit your reflection_handoff now."
+)
+
+
+def _build_reflection_prompt(
+    *, charter: str, goal: str, base_sha: str, pack: str, notebook: str,
+) -> str:
+    """Assemble the standing context for a Reflection round.
+
+    Mirrors _build_self_review_prompt, but the evidence pack is the aggregate
+    trajectory view (not round-granularity progress), and the notebook is
+    framed as a CLAIM BY THE ENTITY UNDER AUDIT — reflection's object of
+    study includes the notebook's own assertions."""
+    parts = [
+        charter.rstrip(),
+        "Original Goal (the standard your recent research is judged against):\n"
+        + goal.strip(),
+        f"Current accepted revision of the work: {base_sha[:12]}…  The "
+        "research world is readable via your tools; verify claims against it "
+        "when the pack is not enough.",
+    ]
+    parts.append(pack.strip() or (
+        "Reflection evidence pack: no task history yet (an honest near-empty "
+        "pack — weigh what little evidence exists, and say so in the "
+        "handoff rather than manufacturing critique)."))
+    parts.append(_TOOL_BLOCK)
+    parts.append(_REFLECTION_PROTOCOL_BLOCK)
+    parts.append(_RUNTIME_BOUNDARIES)
+    if notebook.strip():
+        parts.append(
+            "The recent you's research notebook (a CLAIM BY THE ENTITY YOU "
+            "ARE AUDITING, not memory to trust — it was written by the very "
+            "trajectory under review; check its assertions against the "
+            "evidence pack and the current work):\n\n" + notebook.strip()
+        )
+    return "\n\n".join(parts)
 
 
 def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
@@ -519,6 +666,18 @@ def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
             lines.append(
                 f"  - round {rnd}: {len(cands)} candidate(s), {n_gate} passed "
                 f"gates; none selected.")
+    # Advisory RSI bridge: a recent reflection that suspected a stable
+    # self-limitation is evidence a self-review should weigh — one judgment,
+    # not a diagnosis. Best-effort (a missing reflection log reads as none).
+    try:
+        recent = read_reflection_records(run_dir)[-3:]
+        if any(record.get("self_limitation_suspected") for record in recent):
+            lines.append(
+                "A recent reflection flagged a suspected self-limitation "
+                "(advisory evidence, one judgment — verify it against this "
+                "progress record yourself).")
+    except Exception:
+        pass
     return "\n".join(lines)
 
 
@@ -652,21 +811,36 @@ def _fmt_metrics(metrics: dict) -> str:
     return "metrics=" + ", ".join(parts)
 
 
-def _build_world_event(memory_service, current_round: int, base_sha: str) -> str | None:
+def _build_world_event(
+    memory_service, current_round: int, base_sha: str,
+    expectations: dict[int, dict] | None = None,
+) -> str | None:
     """The resume world-transition event.
 
-    Reports the OUTCOMES of last round's experiments (what reality returned)
-    and states the world that now exists. The directions themselves are NOT
-    echoed here — they live in the Scientist's notebook, and one experiment's
-    detail is available via inspect_episode. Authoritative harness facts only
-    — no interpretation ("this direction is exhausted", etc.); the Scientist
-    produces the meaning.
+    Reports the OUTCOMES of the most recent experiment round (what reality
+    returned) and states the world that now exists. The directions themselves
+    are NOT echoed here — they live in the Scientist's notebook, and one
+    experiment's detail is available via inspect_episode. Authoritative
+    harness facts only — no interpretation ("this direction is exhausted",
+    etc.); the Scientist produces the meaning.
 
     Three outcomes are distinguished so the Scientist's world model is not
     fed a falsehood: a candidate that passed the gates but did not beat the
     incumbent is NOT reported as "no candidate cleared the gates".
 
-    Single-lane: every experiment from last round is this Scientist's. True
+    The round replayed is the latest experiment round strictly before
+    ``current_round`` — NOT ``current_round - 1``, because self-review and
+    reflection rounds consume round ids without producing experiments (the
+    old filter would then fall through to the "you submitted no directions"
+    fallback and tell the Scientist a falsehood).
+
+    ``expectations`` (from ``read_expectations``) pairs each outcome with the
+    pre-registered expectation the Scientist recorded at that round's
+    suspension — verbatim, before the results existed. A missing or
+    failed-capture expectation is stated explicitly: an outcome that cannot
+    be checked against a prior commitment is information, not silence.
+
+    Single-lane: every experiment from that round is this Scientist's. True
     per-Scientist attribution (filtering by scientist_id once multiple lanes
     exist) is deferred — see scientist_session.py docstring.
     """
@@ -674,13 +848,15 @@ def _build_world_event(memory_service, current_round: int, base_sha: str) -> str
         experiments = memory_service.load_experiments()
     except Exception:
         return None
-    last = [e for e in experiments if e.round == current_round - 1]
-    if not last:
+    prior_rounds = [e.round for e in experiments if e.round < current_round]
+    if not prior_rounds:
         return None
+    replay_round = max(prior_rounds)
+    last = [e for e in experiments if e.round == replay_round]
     last.sort(key=lambda e: (e.round, e.candidate))
 
     # The parent these candidates were built on is the world the Scientist was
-    # studying last round (single-lane: all share one parent).
+    # studying that round (single-lane: all share one parent).
     prev_sha = last[0].parent_sha or "—"
 
     lines = [
@@ -692,9 +868,14 @@ def _build_world_event(memory_service, current_round: int, base_sha: str) -> str
         "",
         f"Previous accepted revision: {prev_sha[:10]}",
         "",
-        "Outcomes from your last round's experiments:",
+        f"Outcomes from your experiments in round {replay_round}:",
         "",
     ]
+    round_expectations = (expectations or {}).get(replay_round) or {}
+    exp_rows = round_expectations.get("expectations") or []
+    exp_by_slot = {
+        row.get("slot"): row for row in exp_rows if isinstance(row, dict)
+    }
     for e in last:
         if e.selected:
             outcome = "SELECTED_AS_NEW_INCUMBENT"
@@ -715,7 +896,39 @@ def _build_world_event(memory_service, current_round: int, base_sha: str) -> str
             f"{_fmt_metrics(e.metrics)}"
         )
         lines.append(f"    outcome: {outcome}")
+        row = exp_by_slot.get(e.candidate)
+        if row is not None:
+            lines.append(
+                "    pre-registered expectation (your own words at "
+                "suspension, before this result existed): "
+                f"{row.get('expectation')}"
+            )
+            if row.get("would_weaken"):
+                lines.append(
+                    f"    you said this would weaken the belief if: "
+                    f"{row.get('would_weaken')}"
+                )
+        elif round_expectations:
+            lines.append(
+                "    pre-registered expectation: NOT RECORDED for this slot "
+                "(capture failed or skipped) — this outcome cannot be checked "
+                "against a prior commitment."
+            )
+        else:
+            lines.append(
+                "    pre-registered expectation: NONE was recorded for this "
+                "round — this outcome cannot be checked against a prior "
+                "commitment."
+            )
         lines.append("")
+    lines.append(
+        "Work in this order: first close the previous loop — for each outcome "
+        "above, settle what it did to the belief that motivated the "
+        "experiment (supported it / weakened it / left it undecided) — then "
+        "investigate and choose new directions from the world that exists "
+        "now. This ordering is how you work, not a separate report to file."
+    )
+    lines.append("")
 
     lines.append(f"Current accepted revision: {base_sha[:10]}")
     lines.append("")
@@ -1051,6 +1264,32 @@ def _dispatch(action: dict, proposal_slots: int) -> dict:
             "self_change": self_change,
         }
 
+    # --- terminal action: reflection handoff (continuity design §14) ---
+    if name == "submit_reflection_handoff":
+        _require_keys(
+            action, {"action", "handoff"},
+            {"self_limitation_suspected", "note"})
+        handoff = action["handoff"]
+        if not isinstance(handoff, str) or not handoff.strip():
+            raise ProposerError(
+                "reflection_handoff.handoff must be a non-empty string")
+        suspected = action.get("self_limitation_suspected", False)
+        if not isinstance(suspected, bool):
+            raise ProposerError(
+                "reflection_handoff.self_limitation_suspected must be a "
+                "boolean")
+        note = action.get("note")
+        if note is not None and (
+                not isinstance(note, str) or not note.strip()):
+            raise ProposerError(
+                "reflection_handoff.note must be a non-empty string if given")
+        return {
+            "action": name,
+            "handoff": handoff.strip(),
+            "self_limitation_suspected": suspected,
+            "note": note.strip() if isinstance(note, str) else None,
+        }
+
     raise ProposerError(f"unknown action: {name}")
 
 
@@ -1221,6 +1460,7 @@ class ScientistAgent(ResearchAgent):
                     )
             world_event = _build_world_event(
                 memory_service, current_round, base_sha,
+                expectations=read_expectations(run_dir),
             )
             if world_event is None:
                 world_event = (
@@ -1237,10 +1477,42 @@ class ScientistAgent(ResearchAgent):
             session.append_message(
                 "user", world_event, round_id=current_round,
             )
+            # Replay the latest not-yet-replayed reflection handoff — the
+            # continuity design makes it the primary anchor of the round
+            # AFTER a reflection, with an explicit epistemic status: it is
+            # one judgment, not a fact and not an instruction. The guarantee
+            # is demotion (unfinished plans no longer carry by default), not
+            # promotion (the criticism does not become truth).
+            try:
+                replayed_through = int(
+                    session.meta.get("last_reflection_replayed", -1))
+            except (TypeError, ValueError):
+                replayed_through = -1
+            pending = [
+                record for record in read_reflection_records(run_dir)
+                if isinstance(record.get("round_id"), int)
+                and record["round_id"] > replayed_through
+                and record.get("handoff")
+                and not record.get("abstained")
+            ]
+            if pending:
+                record = pending[-1]
+                handoff_msg = (
+                    f"Reflection handoff from round {record['round_id']} — "
+                    "one judgment your past self made after deliberately "
+                    "doubting its own trajectory. It is not a fact and not an "
+                    "instruction; weigh it against the current evidence, then "
+                    "decide for yourself:\n\n" + str(record["handoff"])
+                )
+                messages.append({"role": "user", "content": handoff_msg})
+                session.append_message(
+                    "user", handoff_msg, round_id=current_round)
+                session.note_replayed_reflection(record["round_id"])
             print(
                 f"[scientist] resume — scientist_id={session.scientist_id[:8]} "
                 f"cold context (raw tail not re-injected); coverage map + "
-                f"world-transition injected",
+                f"world-transition injected"
+                + ("; reflection handoff replayed" if pending else ""),
                 flush=True,
             )
 
@@ -1305,6 +1577,7 @@ class ScientistAgent(ResearchAgent):
             tools_factory=tools_factory,
             terminal_name="submit_proposals",
             budget_nudge=_BUDGET_NUDGE,
+            capture_expectations=True,
             make_result=make_result,
         )
 
@@ -1414,6 +1687,119 @@ class ScientistAgent(ResearchAgent):
             make_result=make_result,
         )
 
+    def reflection(
+        self, *,
+        goal: str,
+        editable: list[str],
+        world_mount,
+        memory_service,
+        base_sha: str,
+        source_path: Path,
+        repo_path: Path,
+        run_dir: Path,
+        current_round: int,
+        prompt_dir: Path | None,
+        session: ScientistSession,
+        max_steps: int | None = None,
+    ) -> ReflectionResult:
+        """Run one Reflection round: the same Scientist temporarily stops
+        advancing the research and audits how the recent version of itself
+        has been conducting it. Distinct from self_review (RSI): the object
+        under audit is the RESEARCH trajectory in the research world, not the
+        self source; the output is a handoff warning, not a KEEP/CHANGE.
+
+        The evidence pack is the deterministic aggregate trajectory view
+        (memory.build_reflection_pack) — patterns invisible at round
+        granularity are what reflection exists to see. tools_factory is the
+        research world (same as a task round): reflection reads the real code
+        and may run probes, but its only terminal action is the handoff.
+        """
+        charter = load_semantic("reflection", prompt_dir)
+        pack = ""
+        if memory_service is not None:
+            try:
+                pack = memory_service.build_reflection_pack(
+                    current_round=current_round)
+            except Exception as exc:
+                print(f"[scientist] reflection pack build failed: {exc}",
+                      flush=True)
+        system_prompt = _build_reflection_prompt(
+            charter=charter, goal=goal, base_sha=base_sha,
+            pack=pack, notebook=session.notebook,
+        )
+
+        # Same cold-start vs resume pattern as task research — the notebook
+        # and session persist across task AND reflection rounds (identity
+        # continuity). The reflection round's own suspension checkpoint
+        # rewrites the notebook: the charter directs that rewrite toward
+        # drift correction and demoting unsupported unfinished plans.
+        if session.is_first_round():
+            messages: list[dict] = [
+                {"role": "user", "content": _REFLECTION_COLD_START}]
+            print("[scientist] reflection cold start", flush=True)
+        else:
+            msg = ("Your reflection is resuming. Re-ground in the evidence "
+                   "pack and the current work, then leave your handoff.")
+            messages = [{"role": "user", "content": msg}]
+            session.append_message("user", msg, round_id=current_round)
+
+        def tools_factory(scratch, home):
+            # The research world — identical to a task round. Reflection
+            # audits the research, so it sees the same reality the normal
+            # Scientist works in (not self_review's self-repo world).
+            return ResearchTools(
+                runtime=self.runtime,
+                workspace=source_path,
+                repo=repo_path,
+                history_dir=run_dir,
+                scratch=Path(scratch),
+                world_mount=world_mount,
+                home=home,
+                memory_service=memory_service,
+                command_timeout_seconds=self.command_timeout_seconds,
+                command_output_cap_chars=self.command_output_cap_chars,
+                current_round=current_round,
+            )
+
+        def make_result(action, state, usages, step, outcome):
+            if outcome == "submit":
+                return ReflectionResult(
+                    handoff=action["handoff"],
+                    self_limitation_suspected=action.get(
+                        "self_limitation_suspected", False),
+                    note=action.get("note"),
+                    usage=usages,
+                    deliberation_telemetry=_build_telemetry(
+                        state, steps=step, outcome="submit"),
+                    trace=_build_trace(
+                        state, round_id=current_round, outcome="reflection"),
+                )
+            # Budget exhausted before a handoff: an explicit abstention, not
+            # a fabricated critique. The Host records it as abstained and the
+            # interval schedules the next real reflection.
+            return ReflectionResult(
+                handoff="(reflection budget exhausted before a handoff)",
+                abstained=True,
+                usage=usages,
+                deliberation_telemetry=_build_telemetry(
+                    state, steps=step, outcome="abstain"),
+                trace=_build_trace(
+                    state, round_id=current_round, outcome="reflection"),
+            )
+
+        return self._deliberate(
+            system_prompt=system_prompt,
+            messages=messages,
+            session=session,
+            current_round=current_round,
+            max_steps=max_steps,
+            source_root=source_path,
+            tools_factory=tools_factory,
+            terminal_name="submit_reflection_handoff",
+            budget_nudge=_REFLECTION_BUDGET_NUDGE,
+            make_result=make_result,
+        )
+
     def _deliberate(
         self, *,
         system_prompt: str,
@@ -1426,6 +1812,7 @@ class ScientistAgent(ResearchAgent):
         terminal_name: str,
         budget_nudge: str,
         make_result,
+        capture_expectations: bool = False,
     ):
         """The shared agentic step-loop for one deliberation (task research OR
         self-review). The caller builds the mode-specific system prompt, initial
@@ -1438,6 +1825,9 @@ class ScientistAgent(ResearchAgent):
         mode-specific return: ``outcome == "submit"`` means the ``terminal_name``
         action was reached (``action`` is its parsed dict); ``"abstain"`` means
         the budget ran out first (``action`` is None).
+
+        ``capture_expectations`` is True only for task research rounds — only
+        they submit experiments, so only they pre-register expectations.
         """
         steps_budget = max_steps or self.max_steps
         started = time.monotonic()
@@ -1491,6 +1881,7 @@ class ScientistAgent(ResearchAgent):
                     self._suspension_checkpoint(
                         system_prompt, messages, state, session, deadline,
                         usages, current_round,
+                        capture_expectations=capture_expectations,
                     )
                     return make_result(action, state, usages, step, "submit")
 
@@ -1531,20 +1922,28 @@ class ScientistAgent(ResearchAgent):
             self._suspension_checkpoint(
                 system_prompt, messages, state, session, deadline, usages,
                 current_round,
+                capture_expectations=capture_expectations,
             )
             return make_result(None, state, usages, steps_budget, "abstain")
 
     def _suspension_checkpoint(
         self, system_prompt: str, messages: list[dict], state: WorkingState,
         session: ScientistSession, deadline: float, usages: list,
-        round_id: int,
+        round_id: int, *, capture_expectations: bool = False,
     ) -> None:
         """Ask the Scientist to leave a continuation note for its resumed self,
         and persist it as the notebook (rewritten, not appended).
 
+        With ``capture_expectations`` (task rounds only) the reply's
+        pre-registered expectations are persisted as a durable row — including
+        an explicit ``captured=False`` row when the capture fails, so a missing
+        pre-registration is visible rather than silent.
+
         Best-effort: a parse failure or zero remaining budget leaves the prior
         notebook untouched rather than failing the round.
         """
+        if capture_expectations:
+            session.append_expectations(round_id, [], captured=False)
         remaining = deadline - time.monotonic()
         if remaining <= 5:
             return
@@ -1566,7 +1965,11 @@ class ScientistAgent(ResearchAgent):
             obj = json.loads(reply.text)
             note = obj.get("notebook")
         except (json.JSONDecodeError, TypeError, AttributeError):
-            note = None
+            obj, note = None, None
+        if capture_expectations:
+            valid = _valid_expectations(obj.get("expectations") if obj else None)
+            if valid:
+                session.append_expectations(round_id, valid, captured=True)
         if isinstance(note, str) and note.strip():
             session.write_notebook(note.strip())
             session.append_message("user", _SUSPEND_PROMPT, round_id=round_id)

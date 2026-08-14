@@ -175,3 +175,52 @@ def test_legacy_task_still_loads_at_boundary(tmp_path: Path, monkeypatch):
     resolved = config.load(_write(tmp_path, old))
     assert resolved["goal"] == "make it faster"
     assert resolved["sandbox_userns"] is False
+
+
+# ---------------- reflection block ----------------
+
+def test_v1_reflection_defaults_on_without_block(tmp_path: Path):
+    raw = _task(tmp_path)
+    raw.pop("rsi", None)
+    cfg = config.load(_write(tmp_path, raw))
+    assert cfg["reflection"] == {
+        "enabled": True, "interval_rounds": 8, "first_reflection_round": 8,
+    }
+
+
+def test_v1_reflection_block_resolves(tmp_path: Path):
+    raw = _task(tmp_path)
+    raw["reflection"] = {
+        "enabled": True, "interval_rounds": 4, "first_reflection_round": 2,
+    }
+    cfg = config.load(_write(tmp_path, raw))
+    assert cfg["reflection"] == {
+        "enabled": True, "interval_rounds": 4, "first_reflection_round": 2,
+    }
+
+
+def test_v1_reflection_disabled_rejects_other_keys(tmp_path: Path):
+    raw = _task(tmp_path)
+    raw["reflection"] = {"enabled": False, "interval_rounds": 4}
+    with pytest.raises(config.ConfigError, match="reflection"):
+        config.load(_write(tmp_path, raw))
+
+
+def test_v1_reflection_rejects_unknown_key(tmp_path: Path):
+    raw = _task(tmp_path)
+    raw["reflection"] = {"enabled": True, "cadence": 3}
+    with pytest.raises(config.ConfigError, match="reflection.*cadence"):
+        config.load(_write(tmp_path, raw))
+
+
+@pytest.mark.parametrize("block", [
+    {"enabled": True, "interval_rounds": 0},
+    {"enabled": True, "interval_rounds": True},
+    {"enabled": True, "first_reflection_round": -1},
+    {"enabled": "yes"},
+])
+def test_v1_reflection_rejects_bad_values(tmp_path: Path, block: dict):
+    raw = _task(tmp_path)
+    raw["reflection"] = block
+    with pytest.raises(config.ConfigError, match="reflection"):
+        config.load(_write(tmp_path, raw))

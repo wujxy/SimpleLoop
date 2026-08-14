@@ -617,3 +617,291 @@ def test_research_loop_compacts_live_but_keeps_full_archive(
         assert f"rg cmd{i}" in archive, (
             f"observation {i} missing from archive despite compaction")
     assert "compacted but I remember" in archive  # notebook checkpoint too
+
+
+# ---------------- pre-registered expectations (workstream A) ----------------
+
+def _exp_row(round_id, items, captured=True):
+    return {round_id: {"round": round_id, "captured": captured,
+                       "expectations": items}}
+
+
+def test_world_event_replays_registered_expectation():
+    exps = [_FakeExp(0, 0, False, True, metrics={"SPEED_MS": 1.2})]
+    expectations = _exp_row(0, [{
+        "slot": 0,
+        "expectation": "material improvement if lookup still dominates",
+        "would_weaken": "a neutral result weakens the lookup hypothesis",
+    }])
+    we = _build_world_event(_FakeMem(exps), 1, "beefdead",
+                            expectations=expectations)
+    assert "pre-registered expectation" in we
+    # verbatim replay — the wording is the Scientist's own, not a digest
+    assert "material improvement if lookup still dominates" in we
+    assert "a neutral result weakens the lookup hypothesis" in we
+    # the close-the-loop ordering note is present
+    assert "close the previous loop" in we
+
+
+def test_world_event_flags_missing_expectation_per_slot():
+    exps = [
+        _FakeExp(0, 0, False, True),
+        _FakeExp(0, 1, False, False),
+    ]
+    expectations = _exp_row(0, [{"slot": 0, "expectation": "only slot zero"}])
+    we = _build_world_event(_FakeMem(exps), 1, "beefdead",
+                            expectations=expectations)
+    assert "only slot zero" in we
+    assert "NOT RECORDED for this slot" in we
+
+
+def test_world_event_flags_absent_expectation_row():
+    exps = [_FakeExp(0, 0, False, True)]
+    we = _build_world_event(_FakeMem(exps), 1, "beefdead", expectations={})
+    assert "NONE was recorded for this round" in we
+    # pre-mechanism run: no expectations argument at all behaves the same
+    we2 = _build_world_event(_FakeMem(exps), 1, "beefdead")
+    assert "NONE was recorded for this round" in we2
+
+
+def test_world_event_uses_latest_experiment_round_when_gap():
+    """Round current_round-1 may be a self-review / reflection round with no
+    experiments; the event must replay the latest experiment round before it,
+    labeled with the actual round number — not fall through to the 'you
+    submitted no directions' falsehood."""
+    exps = [_FakeExp(0, 0, True, True), _FakeExp(2, 0, False, True)]
+    we = _build_world_event(_FakeMem(exps), 4, "beefdead")
+    assert we is not None
+    assert "round 2" in we
+    assert "r2c0" in we
+    assert "r0c0" not in we  # older round not replayed
+
+
+def test_suspend_reply_expectations_persisted(tmp_path, monkeypatch):
+    monkeypatch.setattr(proposer_mod, "ResearchTools", _FakeResearchTools)
+    reply = json.dumps({
+        "notebook": "still believe lookup dominates",
+        "expectations": [
+            {"slot": 0, "expectation": "big gain",
+             "would_weaken": "neutral means no"},
+            {"slot": 1},  # malformed: dropped, not fatal
+            "not-a-dict",
+        ],
+    })
+    agent = _make_agent([_submit_reply(2), reply])
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v1")
+    agent.research(
+        goal="g", editable=["src"], world_mount=None,
+        memory_service=_FakeMem([]), base_sha="abc",
+        source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+        current_round=3, gate_block="g", prompt_dir=None,
+        proposal_slots=3, session=session, max_steps=10,
+    )
+    from proposer.scientist_session import read_expectations
+    rows = read_expectations(tmp_path)
+    assert 3 in rows
+    row = rows[3]
+    assert row["captured"] is True
+    assert row["expectations"] == [
+        {"slot": 0, "expectation": "big gain", "would_weaken": "neutral means no"},
+    ]
+
+
+def test_expectation_capture_failure_is_recorded_not_silent(
+        tmp_path, monkeypatch):
+    """A checkpoint model failure must leave an explicit captured=False row —
+    a missing pre-registration is information, never silence."""
+    monkeypatch.setattr(proposer_mod, "ResearchTools", _FakeResearchTools)
+    # no third reply: the checkpoint model call raises inside _FakeModel.pop
+    agent = _make_agent([_submit_reply(1)])
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v1")
+    agent.research(
+        goal="g", editable=["src"], world_mount=None,
+        memory_service=_FakeMem([]), base_sha="abc",
+        source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+        current_round=0, gate_block="g", prompt_dir=None,
+        proposal_slots=3, session=session, max_steps=10,
+    )
+    from proposer.scientist_session import read_expectations
+    rows = read_expectations(tmp_path)
+    assert 0 in rows and rows[0]["captured"] is False
+
+
+def test_expectation_row_last_per_round_wins(tmp_path):
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v1")
+    session.append_expectations(5, [], captured=False)
+    session.append_expectations(
+        5, [{"slot": 0, "expectation": "retry"}], captured=True)
+    from proposer.scientist_session import read_expectations
+    rows = read_expectations(tmp_path)
+    assert rows[5]["captured"] is True
+    assert rows[5]["expectations"][0]["expectation"] == "retry"
+
+
+# ---------------- reflection session (workstream B8) ----------------
+
+def _parse(text):
+    return parse_response(text, 3)
+
+
+def test_parse_submit_reflection_handoff_valid():
+    a = _parse(json.dumps({"action": {
+        "action": "submit_reflection_handoff",
+        "handoff": "anchored on lookup since its first win",
+        "self_limitation_suspected": True,
+        "note": "context",
+    }}))
+    assert a["action"] == "submit_reflection_handoff"
+    assert a["handoff"] == "anchored on lookup since its first win"
+    assert a["self_limitation_suspected"] is True
+    assert a["note"] == "context"
+
+
+def test_parse_submit_reflection_handoff_defaults_and_rejects():
+    a = _parse(json.dumps({"action": {
+        "action": "submit_reflection_handoff", "handoff": "warning",
+    }}))
+    assert a["self_limitation_suspected"] is False
+    assert a["note"] is None
+    # missing handoff
+    with pytest.raises(ProposerError, match="handoff"):
+        _parse(json.dumps({"action": {
+            "action": "submit_reflection_handoff"}}))
+    # empty handoff
+    with pytest.raises(ProposerError, match="handoff"):
+        _parse(json.dumps({"action": {
+            "action": "submit_reflection_handoff", "handoff": "  "}}))
+    # non-bool flag
+    with pytest.raises(ProposerError, match="self_limitation_suspected"):
+        _parse(json.dumps({"action": {
+            "action": "submit_reflection_handoff", "handoff": "w",
+            "self_limitation_suspected": "yes"}}))
+
+
+def _handoff_reply(text="do not inherit the unfinished plan"):
+    return json.dumps({"action": {
+        "action": "submit_reflection_handoff", "handoff": text}})
+
+
+def test_reflection_round_submits_handoff(tmp_path, monkeypatch):
+    monkeypatch.setattr(proposer_mod, "ResearchTools", _FakeResearchTools)
+    agent = _make_agent([_tool_reply("rg hotspot"),
+                         _handoff_reply("audit complete"),
+                         _notebook_reply("re-derived beliefs")])
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v4")
+    result = agent.reflection(
+        goal="make it faster", editable=["src"], world_mount=None,
+        memory_service=_FakeMem([]), base_sha="abc123",
+        source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+        current_round=2, prompt_dir=None, session=session, max_steps=10,
+    )
+    assert isinstance(result, proposer_mod.ReflectionResult)
+    assert result.handoff == "audit complete"
+    assert result.self_limitation_suspected is False
+    assert not result.abstained
+    # the reflection round rewrote the notebook at its suspension
+    assert "re-derived beliefs" in session.notebook
+
+
+def test_reflection_budget_exhaustion_is_explicit_abstain(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(proposer_mod, "ResearchTools", _FakeResearchTools)
+    replies = [_tool_reply(f"rg q{i}") for i in range(20)]
+    agent = _make_agent(replies, max_steps=3)
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v4")
+    result = agent.reflection(
+        goal="g", editable=["src"], world_mount=None,
+        memory_service=_FakeMem([]), base_sha="abc",
+        source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+        current_round=1, prompt_dir=None, session=session, max_steps=3,
+    )
+    assert result.abstained is True
+    assert "budget exhausted" in result.handoff
+
+
+def test_research_resume_injects_latest_reflection_handoff(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(proposer_mod, "ResearchTools", _FakeResearchTools)
+    # an experiment from round 0 so the world event is non-None
+    exps = [_FakeExp(0, 0, False, True)]
+    # two reflection records; only the later one should be replayed
+    log = tmp_path / "reflection"
+    log.mkdir()
+    (log / "history.jsonl").write_text(
+        json.dumps({"round_id": 0, "handoff": "old warning",
+                    "self_limitation_suspected": False, "abstained": False})
+        + "\n"
+        + json.dumps({"round_id": 2, "handoff": "stop anchoring on lookup",
+                      "self_limitation_suspected": False,
+                      "abstained": False}) + "\n")
+    agent = _make_agent([_submit_reply(1), _notebook_reply()])
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v4")
+    # make it a resume round (not first round)
+    session.append_message("user", "BEGIN", round_id=0)
+    session.write_notebook("prior account")
+    agent.research(
+        goal="g", editable=["src"], world_mount=None,
+        memory_service=_FakeMem(exps), base_sha="abc",
+        source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+        current_round=3, gate_block="g", prompt_dir=None,
+        proposal_slots=3, session=session, max_steps=10,
+    )
+    archive = (tmp_path / "proposer" / "session.jsonl").read_text()
+    assert "Reflection handoff from round 2" in archive
+    assert "stop anchoring on lookup" in archive
+    assert "one judgment" in archive  # explicit epistemic framing
+    assert "old warning" not in archive  # only the latest is replayed
+    meta = json.loads((tmp_path / "proposer" / "meta.json").read_text())
+    assert meta["last_reflection_replayed"] == 2
+
+
+def test_research_resume_skips_abstained_and_already_replayed(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(proposer_mod, "ResearchTools", _FakeResearchTools)
+    log = tmp_path / "reflection"
+    log.mkdir()
+    (log / "history.jsonl").write_text(
+        json.dumps({"round_id": 1, "handoff": "real warning",
+                    "abstained": False}) + "\n"
+        + json.dumps({"round_id": 2, "handoff": "(budget exhausted)",
+                      "abstained": True}) + "\n")
+    agent = _make_agent([_submit_reply(1), _notebook_reply()])
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v4")
+    session.append_message("user", "BEGIN", round_id=0)
+    session.write_notebook("prior account")
+    session.note_replayed_reflection(1)  # the real one already replayed
+    agent.research(
+        goal="g", editable=["src"], world_mount=None,
+        memory_service=_FakeMem([_FakeExp(0, 0, False, True)]), base_sha="abc",
+        source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+        current_round=3, gate_block="g", prompt_dir=None,
+        proposal_slots=3, session=session, max_steps=10,
+    )
+    archive = (tmp_path / "proposer" / "session.jsonl").read_text()
+    assert "Reflection handoff" not in archive  # nothing new to replay
+
+
+def test_self_progress_pack_notes_suspected_self_limitation(tmp_path):
+    history = tmp_path / "history.jsonl"
+    history.write_text(json.dumps({
+        "round": 1,
+        "candidates": [{
+            "candidate": 0, "eligible": True, "selected": False,
+            "status": "COMPLETED", "gate_passed": True,
+            "metrics": {"SPEED_MS": 1.0},
+        }],
+    }) + "\n")
+    log = tmp_path / "reflection"
+    log.mkdir()
+    (log / "history.jsonl").write_text(json.dumps({
+        "round_id": 0, "handoff": "w",
+        "self_limitation_suspected": True}) + "\n")
+    pack = proposer_mod._build_self_progress_pack(tmp_path, "SPEED_MS", 2)
+    assert "suspected self-limitation" in pack

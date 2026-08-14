@@ -7,10 +7,9 @@ from simpleloop.stages.agent import Agent, _decode_output
 from simpleloop.world import ProcessResult
 
 
-def test_decode_output_extracts_structured_result_and_usage():
+def test_decode_output_extracts_result_text_and_usage():
     result = _decode_output(json.dumps({
         "result": "fallback",
-        "structured_output": {"proposals": ["try A"]},
         "usage": {
             "input_tokens": 10,
             "output_tokens": 2,
@@ -19,7 +18,6 @@ def test_decode_output_extracts_structured_result_and_usage():
     }))
 
     assert result.text == "fallback"
-    assert result.data == {"proposals": ["try A"]}
     assert result.usage == {
         "input_tokens": 10,
         "output_tokens": 2,

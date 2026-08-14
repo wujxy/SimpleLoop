@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Protocol
 
 from ..world import SourceWorkspace
 
@@ -158,43 +157,3 @@ class RsiResult:
     candidate_sha: str | None = None
     adopted: bool | None = None
     detail: str = ""
-
-
-class SelfReviewer(Protocol):
-    def review(self, request: SelfReviewRequest) -> SelfDecision: ...
-
-
-class SelfEditor(Protocol):
-    def edit(self, request: SelfEditRequest) -> SelfEditResult: ...
-
-
-class ViabilityChecker(Protocol):
-    def check(self, request: ViabilityRequest) -> ViabilityResult: ...
-
-
-class SelfBodyStore(Protocol):
-    def initialize(self, seed: Path) -> SelfRevision: ...
-    def prepare_candidate(
-        self, round_id: int, parent_sha: str,
-    ) -> SourceWorkspace: ...
-    def commit_candidate(
-        self, workspace: SourceWorkspace, request: SelfCommitRequest,
-    ) -> SelfCandidate: ...
-    def discard_candidate(self, workspace: SourceWorkspace) -> None: ...
-    def materialize(self, sha: str) -> Path: ...
-
-
-class SelfHistoryStore(Protocol):
-    @property
-    def review_view_path(self) -> Path: ...
-    def initialize(
-        self, active_sha: str, first_review_round: int | None,
-    ) -> SelfState: ...
-    def state(self) -> SelfState: ...
-    def events(self) -> tuple[SelfEvent, ...]: ...
-    def append(self, event: SelfEvent) -> None: ...
-
-
-class RsiCheckpoint(Protocol):
-    def inflight(self): ...
-    def clear(self) -> None: ...
