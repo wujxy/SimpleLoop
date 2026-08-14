@@ -141,6 +141,7 @@ class JobSupervisor:
             if job.result_path.exists():
                 continue  # collected by the main loop below
             if runtime.attempt < job.retry.max_attempts:
+                self._reset_workspace(job)
                 runtime.state = "ready"
                 runtime.handle = None
                 runtime.submitted_at = None
@@ -281,6 +282,8 @@ class JobSupervisor:
         runtime.note = note
         if runtime.attempt < job.retry.max_attempts:
             runtime.attempt += 1
+            # Never hand the next attempt a possibly-dirty worktree.
+            self._reset_workspace(job)
             runtime.state = "ready"
             runtime.handle = None
             runtime.submitted_at = None
@@ -303,3 +306,10 @@ class JobSupervisor:
             return
         self.workspace_provider.remove(job.workspace)
         released.add(request_id)
+
+    def _reset_workspace(self, job: JobSpec) -> None:
+        if job.workspace is None or self.workspace_provider is None:
+            return
+        reset = getattr(self.workspace_provider, "reset", None)
+        if callable(reset):
+            reset(job.workspace)

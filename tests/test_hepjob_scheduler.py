@@ -102,8 +102,11 @@ def test_inspect_maps_queue_states_and_missing_handle(tmp_path):
     assert [item.state for item in observations] == [
         JobState.PENDING, JobState.RUNNING, JobState.FAILED, JobState.LOST,
     ]
-    assert runner.calls[0][:5] == [
+    # One user-scoped query with local filtering — "cluster.proc" strings
+    # must never be passed as condor_q positional constraints.
+    assert runner.calls[0] == [
         "condor_q", "-pool", "collector.example", "-name", "scheduler@schedd11",
+        "-af", "ClusterId", "ProcId", "JobStatus",
     ]
 
 

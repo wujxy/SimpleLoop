@@ -85,3 +85,18 @@ def test_remove_rejects_path_outside_provider_roots(tmp_path: Path):
 
     with pytest.raises(WorkspaceError, match="outside provider roots"):
         provider.remove(SourceWorkspace("bad", tmp_path / "outside", base))
+
+
+def test_reset_restores_pristine_base_revision(tmp_path: Path):
+    provider, base = _make_provider(tmp_path)
+
+    with provider.open(WorkspaceSpec("0-c0", base)) as workspace:
+        (workspace.path / "src" / "a.py").write_text("half-edited\n", encoding="utf-8")
+        (workspace.path / "stray.txt").write_text("junk\n", encoding="utf-8")
+
+        provider.reset(workspace)
+
+        assert (workspace.path / "src" / "a.py").read_text(encoding="utf-8") == "old\n"
+        assert not (workspace.path / "stray.txt").exists()
+        assert provider.inspect(workspace).paths == ()
+        assert _git("-C", str(workspace.path), "rev-parse", "HEAD") == base

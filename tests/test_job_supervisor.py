@@ -291,6 +291,9 @@ def test_terminal_job_releases_workspace_once(tmp_path):
         def remove(self, item):
             self.removed.append(item)
 
+        def reset(self, item):
+            pass
+
     workspaces = Workspaces()
     scheduler = FakeScheduler(complete_on_attempt=1)
 
@@ -298,6 +301,35 @@ def test_terminal_job_releases_workspace_once(tmp_path):
          workspaces=workspaces)
 
     assert workspaces.removed == [workspace]
+
+
+def test_retry_resets_workspace_before_resubmit(tmp_path):
+    workspace = SourceWorkspace("1-c0", tmp_path / "worktree", "base")
+
+    class Workspaces:
+        def __init__(self):
+            self.removed = []
+            self.resets = []
+
+        def remove(self, item):
+            self.removed.append(item)
+
+        def reset(self, item):
+            self.resets.append(item)
+
+    workspaces = Workspaces()
+    scheduler = FakeScheduler(
+        states=[JobState.FAILED], complete_on_attempt=2,
+    )
+
+    result = _run(tmp_path, scheduler, [_job(tmp_path, workspace=workspace)],
+                  workspaces=workspaces)
+
+    # The retried attempt must start from a pristine worktree, and the
+    # terminal release still happens exactly once.
+    assert workspaces.resets == [workspace]
+    assert workspaces.removed == [workspace]
+    assert result.completed[0].result.result == {"attempt": 2}
 
 
 def test_supervisor_limits_parallel_submissions(tmp_path):

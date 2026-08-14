@@ -225,3 +225,18 @@ def test_run_self_review_lane_result_shape(tmp_path: Path):
     assert sr["self_change"]["evidence_refs"] == ["proposer/scientist.py"]
     assert sr["contract_version"] == "proposer-cli-v0"
     assert sr["incumbent_self_sha"] == "self-sha"
+
+
+def test_self_review_mode_failure_escalates_instead_of_fake_keep(tmp_path):
+    """An infrastructure failure must not be laundered into a KEEP event."""
+    from simpleloop.config import ConfigError
+    from simpleloop.scheduling.handlers.proposer import _run
+
+    payload = {
+        "lane_id": 0, "round_id": 3, "base_sha": "x",
+        "run_dir": str(tmp_path / "missing"), "mode": "self",
+        "self_repo": "", "reviews_path": "", "incumbent_self_sha": "sha",
+    }
+
+    with pytest.raises(ConfigError):
+        _run(payload, lambda row: None, mode="self")

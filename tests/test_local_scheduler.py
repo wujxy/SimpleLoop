@@ -68,16 +68,42 @@ def test_local_scheduler_reports_and_cancels_process_group(tmp_path):
     assert _wait_terminal(scheduler, handle).state is JobState.FAILED
 
 
-def test_local_scheduler_treats_restored_handle_as_lost(tmp_path):
+def test_local_scheduler_waits_for_restored_live_worker(tmp_path):
     first = LocalScheduler()
     job = _job(tmp_path, (sys.executable, "-c", "import time; time.sleep(30)"))
     handle = first.submit(job)
     restored = LocalScheduler(terminate_grace_seconds=0.1)
     try:
-        assert restored.inspect((handle,))[0].state is JobState.LOST
+        # A worker that survived a frontend crash is probed via its
+        # pid:start handle and reported running, not presumed lost.
+        assert restored.inspect((handle,))[0].state is JobState.RUNNING
         restored.cancel(handle)
     finally:
         first.cancel(handle)
+
+
+def test_local_scheduler_treats_dead_restored_handle_as_lost():
+    restored = LocalScheduler()
+
+    observation = restored.inspect((JobHandle("local", "999999:stale"),))[0]
+
+    assert observation.state is JobState.LOST
+
+
+def test_local_scheduler_registers_and_releases_child_groups(tmp_path):
+    from simpleloop.processes import CHILD_PROCESSES
+
+    scheduler = LocalScheduler(terminate_grace_seconds=0.1)
+    job = _job(tmp_path, (sys.executable, "-c", "import time; time.sleep(30)"))
+    handle = scheduler.submit(job)
+    pid = int(handle.value.split(":", 1)[0])
+
+    try:
+        # A SIGTERM to the frontend must be able to reap the worker group.
+        assert pid in CHILD_PROCESSES._pgids
+    finally:
+        scheduler.cancel(handle)
+    assert pid not in CHILD_PROCESSES._pgids
 
 
 def test_local_scheduler_captures_both_streams(tmp_path):

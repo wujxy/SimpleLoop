@@ -249,31 +249,6 @@ def _failure_result(spec: ProposerLaneSpec, reason: str) -> dict[str, object]:
     }
 
 
-def _self_review_failure_result(
-    spec: ProposerLaneSpec,
-    reason: str,
-) -> dict[str, object]:
-    return {
-        "status": "COMPLETED",
-        "mode": "self",
-        "lane_id": spec.lane_id,
-        "round_id": spec.round_id,
-        "self_review": {
-            "contract_version": _contract_version(),
-            "incumbent_self_sha": None,
-            "decision": "KEEP",
-            "diagnosis": reason,
-            "keep_reason": "self-review did not complete; defaulting to KEEP "
-                           "pending a successful review",
-            "next_review_after_rounds": 3,
-            "self_change": None,
-            "abstained": True,
-        },
-        "trace": {},
-        "telemetry": {"tool_calls": 0},
-    }
-
-
 def _run(
     payload: Mapping[str, object],
     observe_usage: Callable[[Mapping[str, object]], None],
@@ -286,6 +261,21 @@ def _run(
     raw = dict(payload)
     raw["mode"] = "self" if mode == "self" else "task"
     spec = ProposerLaneSpec.from_dict(raw)
+    if mode == "self":
+        # A failed self review is an infrastructure error, not a KEEP: a
+        # fabricated decision would be appended to the authoritative self
+        # event stream and defer the next real review. Let the exception
+        # escape so the worker envelope reports FAILED and the supervisor
+        # classifies it as retryable infrastructure.
+        run_dir = Path(spec.run_dir)
+        deps = build_lane_deps(
+            config_mod.load_resolved(run_dir),
+            run_dir,
+            usage_observer=observe_usage,
+            prompt_dir=spec.prompt_dir or None,
+        )
+        deps.runtime.preflight()
+        return run_self_review_lane(deps, spec)
     try:
         run_dir = Path(spec.run_dir)
         deps = build_lane_deps(
@@ -295,12 +285,8 @@ def _run(
             prompt_dir=spec.prompt_dir or None,
         )
         deps.runtime.preflight()
-        if mode == "self":
-            return run_self_review_lane(deps, spec)
         return run_lane(deps, spec)
     except Exception as exc:
-        if mode == "self":
-            return _self_review_failure_result(spec, f"worker failed: {exc}")
         return _failure_result(spec, f"worker failed: {exc}")
 
 

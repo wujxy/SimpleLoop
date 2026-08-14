@@ -138,6 +138,15 @@ class CandidateTrace(Protocol):
     ) -> None:
         ...
 
+    def record_evaluation(
+        self,
+        request: CandidateRequest,
+        evaluation: EvaluationResult | None,
+        gate: GateDecision,
+        status: CandidateStatus,
+    ) -> None:
+        ...
+
 
 def _candidate_result(
     request: CandidateRequest,
@@ -291,12 +300,3 @@ def run_candidate_guarded(
             ),
             gate=unavailable_gates(gate_spec),
         )
-
-    def record_evaluation(
-        self,
-        request: CandidateRequest,
-        evaluation: EvaluationResult | None,
-        gate: GateDecision,
-        status: CandidateStatus,
-    ) -> None:
-        ...

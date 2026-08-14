@@ -58,6 +58,9 @@ class WorkspaceProvider(Protocol):
     def remove(self, workspace: SourceWorkspace) -> None:
         ...
 
+    def reset(self, workspace: SourceWorkspace) -> None:
+        ...
+
     def open(self, spec: WorkspaceSpec) -> ContextManager[SourceWorkspace]:
         ...
 

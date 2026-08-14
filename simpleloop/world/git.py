@@ -111,6 +111,19 @@ class GitWorkspaceProvider:
     def remove(self, workspace: SourceWorkspace) -> None:
         self._remove_path(workspace.path)
 
+    def reset(self, workspace: SourceWorkspace) -> None:
+        """Return a workspace to its pristine base revision.
+
+        Retry hygiene: an agent that timed out or lost its node may have left
+        half-finished edits behind, and the next attempt must not build on
+        top of them. Works for both worktree schemes (candidates and lanes)
+        because it only touches the working tree in place.
+        """
+        if not workspace.path.exists():
+            return
+        self._git(workspace.path, "reset", "--hard", workspace.base_sha or "HEAD")
+        self._git(workspace.path, "clean", "-fd")
+
     def create_lane(
         self,
         lane_id: int | str,

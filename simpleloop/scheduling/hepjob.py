@@ -117,10 +117,12 @@ class HEPJobScheduler:
             return tuple(JobObservation(
                 handle, JobState.UNKNOWN, "handle belongs to another scheduler"
             ) for handle in handles)
+        # One user-scoped query + local filter: passing "cluster.proc"
+        # strings as condor_q positional constraints is fragile (condor
+        # parses them as ad-constraints, not id matchers).
         completed = self._run([
             self.config.query_cmd,
             *self._target_args(),
-            *(handle.value for handle in own),
             "-af", "ClusterId", "ProcId", "JobStatus",
         ])
         if completed.returncode:
