@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 
 from simpleloop import loop as loop_mod
+from simpleloop.candidate_worker import CandidateSpec, candidate_failure
 from simpleloop.loop import RunContext, _finalize_candidates
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
@@ -337,19 +339,30 @@ def test_finalize_candidates_ingests_usage_and_stamps_snapshots():
     remote backend)."""
     tracker = SnapshotTracker()
     ctx = RunContext(cfg={}, telemetry=tracker)
-    candidates = [
-        {"candidate": 0, "usage": [{"input_tokens": 3, "output_tokens": 1}]},
-        {"candidate": 1, "usage": [{"input_tokens": 5, "output_tokens": 2}]},
-    ]
+    candidates = tuple(
+        replace(
+            candidate_failure(
+                candidate_id,
+                CandidateSpec(0, candidate_id, "parent", f"p{candidate_id}"),
+                "test",
+                "parent",
+            ),
+            usage=(usage,),
+        )
+        for candidate_id, usage in enumerate((
+            {"input_tokens": 3, "output_tokens": 1},
+            {"input_tokens": 5, "output_tokens": 2},
+        ))
+    )
 
-    _finalize_candidates(ctx, candidates)
+    finalized = _finalize_candidates(ctx, candidates)
 
     assert tracker.recorded == [
         {"input_tokens": 3, "output_tokens": 1},
         {"input_tokens": 5, "output_tokens": 2},
     ]
-    assert all("usage" not in c for c in candidates)
+    assert all(not candidate.usage for candidate in finalized)
     assert {
-        c["telemetry"]["worktime_seconds"] for c in candidates
+        candidate.telemetry["worktime_seconds"] for candidate in finalized
     } == {1.0, 2.0}
     assert tracker.persist_flags == [True, True]

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from simpleloop.candidate_worker import CandidateDeps, CandidateSpec, run_candidate
+from simpleloop.persistence.artifacts import encode_candidate_result
 from simpleloop.execution.proposer_lanes import (
     read_lane_result,
     read_self_review_result,
@@ -74,7 +75,9 @@ def test_candidate_result_shape(tmp_path: Path, monkeypatch):
         worktree_path=str(tmp_path / "worktree"),
     )
 
-    assert run_candidate(deps, spec) == load("candidate-result.json")
+    assert encode_candidate_result(run_candidate(deps, spec)) == load(
+        "candidate-result.json"
+    )
 
 
 def test_proposer_lane_result_shape(tmp_path: Path):

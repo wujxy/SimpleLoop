@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from simpleloop import candidate_worker as worker_mod
+from simpleloop.candidate import CandidateStatus
 from simpleloop.candidate_worker import (
     CandidateDeps,
     CandidateSpec,
@@ -105,15 +106,14 @@ def test_run_candidate_completed(tmp_path: Path, monkeypatch):
     deps = _deps(tmp_path)
     deps.prompt_dir = tmp_path / "prompts"
     result = run_candidate(deps, _spec(tmp_path))
-    assert result["status"] == "COMPLETED"
-    assert result["sha"] == "def456"
-    assert result["parent_sha"] == "abc123"
-    assert result["gate_passed"] is True
-    assert result["eligible"] is True
-    assert result["gates"]["EVAL_COMMANDS"]["passed"] is True
-    assert result["metrics"]["SPEED_MS"] == 100.0
-    assert not ({"score", "risk", "feedback", "feedback_for_proposer",
-                 "accepted"} & result.keys())
+    assert result.status is CandidateStatus.COMPLETED
+    assert result.sha == "def456"
+    assert result.parent_sha == "abc123"
+    assert result.gate.passed is True
+    assert result.eligible is True
+    assert result.gate.results["EVAL_COMMANDS"].passed is True
+    assert result.metrics["SPEED_MS"] == 100.0
+    assert not hasattr(result, "selected")
 
 
 @pytest.mark.parametrize("objective", [float("nan"), float("inf")])
@@ -138,12 +138,12 @@ def test_run_candidate_no_change_skips_eval(tmp_path: Path, monkeypatch):
                             path_gate_violations=[]))
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
     assert called is False
-    assert result["status"] == "NO_CHANGE"
-    assert result["eligible"] is False
-    assert result["gates"]["EVAL_COMMANDS"] == {
-        "passed": None,
-        "detail": "not run because Executor produced no change",
-    }
+    assert result.status is CandidateStatus.NO_CHANGE
+    assert result.eligible is False
+    assert result.gate.results["EVAL_COMMANDS"].passed is None
+    assert result.gate.results["EVAL_COMMANDS"].detail == (
+        "not run because Executor produced no change"
+    )
 
 
 def test_nonzero_eval_command_is_a_gate_rejection(tmp_path: Path, monkeypatch):
@@ -156,10 +156,10 @@ def test_nonzero_eval_command_is_a_gate_rejection(tmp_path: Path, monkeypatch):
                             "failed", {"SPEED_MS": 90.0,
                                        "CORRECTNESS": True}, (7,)))
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
-    assert result["status"] == "GATE_REJECTED"
-    assert result["gates"]["EVAL_COMMANDS"]["passed"] is False
-    assert result["gate_passed"] is False
-    assert result["eligible"] is False
+    assert result.status is CandidateStatus.GATE_REJECTED
+    assert result.gate.results["EVAL_COMMANDS"].passed is False
+    assert result.gate.passed is False
+    assert result.eligible is False
 
 
 def test_eval_exception_retains_sha_and_factual_failure(tmp_path: Path,
@@ -174,17 +174,18 @@ def test_eval_exception_retains_sha_and_factual_failure(tmp_path: Path,
 
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
 
-    assert result["status"] == "EVAL_FAILED"
-    assert result["sha"] == "def456"
-    assert result["gates"]["PATHS"]["passed"] is True
-    assert result["gates"]["EVAL_COMMANDS"]["passed"] is False
-    assert result["gates"]["CORRECTNESS"]["passed"] is None
+    assert result.status is CandidateStatus.EVAL_FAILED
+    assert result.sha == "def456"
+    assert result.gate.results["PATHS"].passed is True
+    assert result.gate.results["EVAL_COMMANDS"].passed is False
+    assert result.gate.results["CORRECTNESS"].passed is None
 
 
 def test_write_result_is_atomic_and_marks_finished(tmp_path: Path):
     out = tmp_path / "r"
-    write_result(out, {"candidate": 0})
-    assert json.loads((out / "result.json").read_text()) == {"candidate": 0}
+    result = candidate_failure(0, _spec(tmp_path), "boom", "parent")
+    write_result(out, result)
+    assert json.loads((out / "result.json").read_text())["candidate"] == 0
     assert (out / "_FINISHED").exists()
     assert not (out / "result.json.tmp").exists()
 
@@ -206,16 +207,21 @@ def test_cli_writes_terminal_result(tmp_path: Path, monkeypatch):
                         lambda cfg, run_dir, usage_observer=None,
                         prompt_dir=None: (
                             _deps(tmp_path)))
-    monkeypatch.setattr(worker_mod, "run_candidate",
-                        lambda deps, spec: {"candidate": spec.candidate_id,
-                                            "status": "COMPLETED"})
+    monkeypatch.setattr(
+        worker_mod,
+        "run_candidate",
+        lambda deps, spec: candidate_failure(
+            spec.candidate_id, spec, "test terminal", spec.parent_sha,
+        ),
+    )
     rc = main(["--manifest", str(manifest), "--job-id", "123.4"])
     assert rc == 0
     result_dir = Path(spec.result_dir)
     assert (result_dir / "_FINISHED").exists()
     result = json.loads((result_dir / "result.json").read_text())
     # result.json is pure business; telemetry/audit live in the sidecar.
-    assert result == {"candidate": 7, "status": "COMPLETED"}
+    assert result["candidate"] == 7
+    assert result["status"] == "WORKER_FAILED"
     sidecar = json.loads((result_dir / "usage.json").read_text())
     assert sidecar["execution"]["job_id"] == "123.4"
     assert sidecar["execution"]["attempt"] == 2
@@ -256,12 +262,12 @@ def test_cli_unreadable_manifest_is_infra_failure(tmp_path: Path):
 
 def test_candidate_failure_shape(tmp_path: Path):
     failure = candidate_failure(3, _spec(tmp_path), "boom", "parent")
-    assert failure["status"] == "WORKER_FAILED"
-    assert failure["parent_sha"] == "parent"
-    assert failure["gate_passed"] is False
-    assert failure["eligible"] is False
+    assert failure.status is CandidateStatus.WORKER_FAILED
+    assert failure.parent_sha == "parent"
+    assert failure.gate.passed is False
+    assert failure.eligible is False
     # No executor ran, so there is no self-report.
-    assert failure["self_report"] is None
+    assert failure.execution.self_report is None
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +346,9 @@ def test_self_report_flows_into_candidate_record(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(worker_mod.executor_mod, "execute", fake_execute)
     monkeypatch.setattr(worker_mod.evals, "run_eval", lambda *a, **k: None)
     result = run_candidate(_deps(tmp_path), _spec(tmp_path))
-    assert result["status"] == "NO_CHANGE"
-    assert result["eligible"] is False
-    assert result["self_report"] == report
+    assert result.status is CandidateStatus.NO_CHANGE
+    assert result.eligible is False
+    assert result.execution.self_report == report
 
 
 def test_execute_parses_self_report_from_agent_output(tmp_path: Path,

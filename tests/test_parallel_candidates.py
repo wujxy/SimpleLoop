@@ -9,6 +9,14 @@ import yaml
 from simpleloop import candidate_worker as worker_mod
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
+from simpleloop.candidate import (
+    CandidateArtifact,
+    CandidateResult,
+    CandidateStatus,
+    EvaluationResult,
+    ExecutionResult,
+    GateDecision,
+)
 from proposer.memory import MemoryService
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.roles.executor import ExecResult
@@ -25,6 +33,40 @@ EXAMPLES = Path(__file__).parents[1] / "examples"
 
 _SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
            "gates": [{"key": "CORRECTNESS"}]}
+
+
+def _typed(rows: list[dict]) -> tuple[CandidateResult, ...]:
+    """Translate compact policy-test facts into the production contract."""
+    results = []
+    for row in rows:
+        candidate_id = int(row.get("candidate", 0))
+        parent_sha = str(row.get("parent_sha", "parent"))
+        sha = row.get("sha")
+        status = CandidateStatus(row.get(
+            "status",
+            "COMPLETED" if row.get("gate_passed") else "GATE_REJECTED",
+        ))
+        metrics = row.get("metrics") or {}
+        results.append(CandidateResult(
+            candidate_id=candidate_id,
+            experiment_id=str(row.get("experiment_id", f"r0c{candidate_id}")),
+            proposal=Proposal(str(row.get("proposal", f"p{candidate_id}"))),
+            parent_sha=parent_sha,
+            status=status,
+            execution=ExecutionResult(status.value),
+            artifact=(
+                CandidateArtifact(parent_sha, str(sha)) if sha else None
+            ),
+            evaluation=(
+                EvaluationResult("", metrics) if metrics else None
+            ),
+            gate=GateDecision(
+                {}, bool(row.get("gate_passed")), bool(row.get("eligible")),
+            ),
+            usage=tuple(row.get("usage") or ()),
+            telemetry=row.get("telemetry") or {},
+        ))
+    return tuple(results)
 
 
 def _example_yaml(relative_path: str) -> dict:
@@ -142,7 +184,7 @@ def test_selector_uses_objective_and_filters_ineligible_candidates():
         {"candidate": 3, "sha": "winner", "gate_passed": True, "eligible": True,
          "metrics": {"SPEED_MS": 650.0, "CORRECTNESS": True, "EVAL_RESULT": True}},
     ]
-    assert _select_winner(candidates, schema)["sha"] == "winner"
+    assert _select_winner(_typed(candidates), schema).sha == "winner"
 
 
 def test_selector_uses_only_eligibility_objective_and_candidate_order():
@@ -159,7 +201,7 @@ def test_selector_uses_only_eligibility_objective_and_candidate_order():
          "gate_passed": False, "eligible": False,
          "metrics": {"SPEED_MS": 400.0, "CORRECTNESS": False}},
     ]
-    assert _select_winner(candidates, schema)["sha"] == "a"
+    assert _select_winner(_typed(candidates), schema).sha == "a"
 
 
 @pytest.mark.parametrize(
@@ -190,7 +232,7 @@ def test_selector_keeps_incumbent_when_no_candidate_improves_objective(
     ]
 
     assert _select_winner(
-        candidates,
+        _typed(candidates),
         schema,
         prior_metrics={"OBJECTIVE": prior_value},
     ) is None
@@ -225,13 +267,13 @@ def test_selector_advances_only_when_best_candidate_improves_objective(
     ]
 
     selected = _select_winner(
-        candidates,
+        _typed(candidates),
         schema,
         prior_metrics={"OBJECTIVE": prior_value},
     )
 
     assert selected is not None
-    assert selected["sha"] == winner
+    assert selected.sha == winner
 
 
 def test_selector_uses_best_candidate_when_prior_objective_is_missing():
@@ -246,7 +288,9 @@ def test_selector_uses_best_candidate_when_prior_objective_is_missing():
          "metrics": {"OBJECTIVE": 10.0, "CORRECTNESS": True}},
     ]
 
-    assert _select_winner(candidates, schema, prior_metrics={})["sha"] == "fast"
+    assert _select_winner(
+        _typed(candidates), schema, prior_metrics={}
+    ).sha == "fast"
 
 
 def test_round_performance_reports_best_eligible_value_and_relative_improvement(
@@ -267,7 +311,7 @@ def test_round_performance_reports_best_eligible_value_and_relative_improvement(
 
     loop_mod._print_round_performance(
         round_id=2,
-        candidates=candidates,
+        candidates=_typed(candidates),
         metrics_schema=schema,
         prior_metrics={"OBJECTIVE": 100.0},
     )
@@ -400,8 +444,8 @@ def test_run_candidates_uses_same_parent_for_all_worktrees(monkeypatch, tmp_path
 
     assert workspace.added == [("7-c0", "parent"), ("7-c1", "parent"), ("7-c2", "parent")]
     assert workspace.removed == ["7-c0", "7-c1", "7-c2"]
-    assert [candidate["proposal"] for candidate in candidates] == proposals
-    assert _select_winner(candidates, schema)["candidate"] == 0
+    assert [candidate.proposal.instruction for candidate in candidates] == proposals
+    assert _select_winner(candidates, schema).candidate_id == 0
 
 
 def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path, capsys):
@@ -436,9 +480,9 @@ def test_run_candidates_logs_candidate_local_failure(monkeypatch, tmp_path: Path
     )
     candidates = _run_candidates(ctx, ["p0"], 2, "parent")
 
-    assert candidates[0]["status"] == "EVAL_FAILED"
-    assert candidates[0]["eligible"] is False
-    assert "eval exploded" in candidates[0]["eval_block"]
+    assert candidates[0].status is CandidateStatus.EVAL_FAILED
+    assert candidates[0].eligible is False
+    assert "eval exploded" in candidates[0].evaluation.text
     assert "candidate r2-c0 eval error:" in capsys.readouterr().out
 
 
@@ -454,8 +498,8 @@ def test_run_candidates_logs_outer_parallel_worker_failure(monkeypatch, capsys):
         "parent",
     )
 
-    assert [candidate["status"] for candidate in candidates] == [
-        "WORKER_FAILED", "WORKER_FAILED",
+    assert [candidate.status for candidate in candidates] == [
+        CandidateStatus.WORKER_FAILED, CandidateStatus.WORKER_FAILED,
     ]
     out = capsys.readouterr().out
     assert "candidate r3-c0 worker failed: worker 0 exploded" in out
@@ -474,8 +518,8 @@ def test_run_candidates_normalizes_serial_worker_failure(monkeypatch, capsys):
         RunContext(cfg={"max_workers": 1}), ["p0"], 4, "parent",
     )
 
-    assert candidates[0]["status"] == "WORKER_FAILED"
-    assert candidates[0]["parent_sha"] == "parent"
+    assert candidates[0].status is CandidateStatus.WORKER_FAILED
+    assert candidates[0].parent_sha == "parent"
     assert "candidate r4-c0 worker failed: serial worker exploded" in (
         capsys.readouterr().out
     )
@@ -734,7 +778,7 @@ def _run_loop_integration(
             pass
 
         def run_candidates(self, *, proposals: list[str], round_id: int,
-                           parent_sha: str, journal=None) -> list[dict]:
+                           parent_sha: str, journal=None) -> tuple[CandidateResult, ...]:
             assert proposals == ["test another sparse gather"]
             # The inflight journal carries structured proposal metadata, NOT
             # annotations. finding_id is no longer threaded through the
@@ -749,14 +793,14 @@ def _run_loop_integration(
             return fake_run_candidates()
 
         def resume_round(self, jobs: list[dict], *, round_id: int,
-                         parent_sha: str, journal=None) -> list[dict]:
-            return []
+                         parent_sha: str, journal=None) -> tuple[CandidateResult, ...]:
+            return ()
 
     executed = []
 
     def fake_run_candidates(*_args, **_kwargs):
         executed.append(True)
-        return [{
+        return _typed([{
             "candidate": 0,
             "experiment_id": "r1c0",
             "proposal": "test another sparse gather",
@@ -769,7 +813,7 @@ def _run_loop_integration(
             "gate_passed": False,
             "eligible": False,
             "selected": False,
-        }]
+        }])
 
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)

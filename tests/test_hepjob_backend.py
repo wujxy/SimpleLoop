@@ -20,10 +20,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from simpleloop.candidate import CandidateStatus
 from simpleloop.execution import hepjob
 from simpleloop.execution.base import InfraRoundError
 from simpleloop.execution.hepjob import HEPJobBackend
 from simpleloop.loop import INFLIGHT_NAME, _InflightJournal
+from simpleloop.persistence.artifacts import ProtocolError
 from simpleloop.stages.proposer import ProposerRequest
 
 # condor JobStatus codes
@@ -119,12 +121,19 @@ def _seed_result(result_dir, *, attempt=1, status="COMPLETED", host="node1"):
     result_dir.mkdir(parents=True, exist_ok=True)
     result = {
         "candidate": 0,
+        "experiment_id": "r0c0",
+        "proposal": "p",
+        "parent_sha": "p",
         "status": status,
         "sha": f"sha-a{attempt}",
+        "eval_block": "",
         "gates": {},
         "gate_passed": status == "COMPLETED",
         "eligible": status == "COMPLETED",
         "metrics": {},
+        "changed_paths": [],
+        "selected": False,
+        "self_report": None,
     }
     sidecar = {
         "usage": [{"input_tokens": 100, "output_tokens": 10}],
@@ -164,11 +173,16 @@ def test_read_result_requires_current_status_field(tmp_path):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
     job = backend._prepare(0, _fake_proposal(), 0, "parent")
     (job.result_dir / "result.json").write_text(
-        json.dumps({"candidate": 0, "candidate_status": "COMPLETED"}),
+        json.dumps({
+            "candidate": 0,
+            "proposal": "p",
+            "parent_sha": "parent",
+            "candidate_status": "COMPLETED",
+        }),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="candidate result object"):
+    with pytest.raises(ProtocolError, match="status"):
         backend._read_result(job)
 
 
@@ -176,11 +190,16 @@ def test_read_result_requires_current_gate_facts(tmp_path):
     backend = HEPJobBackend(_Ctx(tmp_path), _hep_cfg(tmp_path))
     job = backend._prepare(0, _fake_proposal(), 0, "parent")
     (job.result_dir / "result.json").write_text(
-        json.dumps({"candidate": 0, "status": "COMPLETED"}),
+        json.dumps({
+            "candidate": 0,
+            "proposal": "p",
+            "parent_sha": "parent",
+            "status": "COMPLETED",
+        }),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="candidate result object"):
+    with pytest.raises(ProtocolError, match="gate_passed"):
         backend._read_result(job)
 
 
@@ -232,10 +251,10 @@ def test_completed_after_gone_with_finished(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, ["", ""],  # gone (job not in query output)
         seed_fn=lambda rd: _seed_result(rd))
-    assert cands[0]["status"] == "COMPLETED"
+    assert cands[0].status is CandidateStatus.COMPLETED
     # The usage sidecar is handed to the loop (which owns telemetry); the
     # backend itself records nothing.
-    assert cands[0]["usage"] == [{"input_tokens": 100, "output_tokens": 10}]
+    assert cands[0].usage == ({"input_tokens": 100, "output_tokens": 10},)
     assert (tmp_path / INFLIGHT_NAME).exists() is True
 
 
@@ -244,7 +263,7 @@ def test_completed_after_running_then_gone(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, [f"100 0 {RUNNING}", ""],
         seed_fn=lambda rd: _seed_result(rd))
-    assert cands[0]["status"] == "COMPLETED"
+    assert cands[0].status is CandidateStatus.COMPLETED
 
 
 def test_held_retry_then_success(tmp_path, monkeypatch):
@@ -252,7 +271,7 @@ def test_held_retry_then_success(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, [f"100 0 {HELD}", ""],
         seed_fn=lambda rd: _seed_result(rd, attempt=2, host="node2"))
-    assert cands[0]["status"] == "COMPLETED"
+    assert cands[0].status is CandidateStatus.COMPLETED
     assert _job_json(tmp_path)["attempt"] == 2
     # Held triggered a worktree rebuild (remove + re-add from parent_sha) before
     # the final collect's own cleanup; the dirty worktree was never reused.
@@ -312,7 +331,7 @@ def test_lost_then_retry_then_success(tmp_path, monkeypatch):
     cands = backend.run_candidates(
         proposals=[_fake_proposal()], round_id=0, parent_sha="p",
         journal=_journal(tmp_path))
-    assert cands[0]["status"] == "COMPLETED"
+    assert cands[0].status is CandidateStatus.COMPLETED
     assert _job_json(tmp_path)["attempt"] == 2
 
 
@@ -341,7 +360,7 @@ def test_query_failure_does_not_kill_job(tmp_path, monkeypatch):
     backend, ctx, cands = _drive(
         tmp_path, monkeypatch, ["", ""],
         seed_fn=lambda rd: _seed_result(rd))
-    assert cands[0]["status"] == "COMPLETED"
+    assert cands[0].status is CandidateStatus.COMPLETED
 
 
 def test_resume_from_inflight(tmp_path, monkeypatch):
@@ -375,7 +394,7 @@ def test_resume_from_inflight(tmp_path, monkeypatch):
     cands = backend2.resume_round(
         inflight["jobs"], round_id=inflight["round_id"],
         parent_sha=inflight["parent_sha"], journal=journal2)
-    assert cands[0]["status"] == "COMPLETED"
+    assert cands[0].status is CandidateStatus.COMPLETED
     assert (tmp_path / INFLIGHT_NAME).exists() is True
 
 

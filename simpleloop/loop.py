@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import shutil
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import yaml
 
 from .roles.agent import Agent
 from . import candidate_worker
+from .candidate import CandidateResult
 from . import config as config_mod
 from .execution import build_backend
 from .execution.base import InfraRoundError, RoundJournal
@@ -23,7 +25,8 @@ from .reporting import plot as plot_mod
 from .stages.proposer import Proposal, ProposalBatch, ProposerRequest
 from .harness import views
 from .harness.handoff import write_handoff
-from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
+from .harness.store import Store, best_candidate as _best_candidate
+from .persistence.artifacts import encode_candidate_result
 from .reporting.telemetry import RunTelemetry
 from .container.runtime import ApptainerRuntime, MountMap, world_mount_map
 from .harness.workspace import Workspace
@@ -361,7 +364,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                 }
                 print(f"[{stamp()}] proposer abstained round {round_id + 1}: "
                       f"{proposal_result.abstention.reason}", flush=True)
-                candidates = []
+                candidates = ()
                 journal = None
             else:
                 abstention = None
@@ -393,13 +396,12 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                           "--continue (or delete inflight_round.json to "
                           "re-propose).", flush=True)
                     return _summary(ctx, run_dir_path)
-        _finalize_candidates(ctx, candidates)
+        candidates = _finalize_candidates(ctx, tuple(candidates))
         if static_proposals is not None:
             # Controlled-experiment rule: hard gates alone decide, so a
             # regressing-but-valid experiment still advances the chain.
             first = candidates[0] if candidates else None
-            winner = (first if first and _eligible(first, ctx.metrics_schema)
-                      else None)
+            winner = first if first and first.eligible and first.sha else None
         else:
             winner = _select_winner(
                 candidates,
@@ -410,15 +412,13 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             _print_round_performance(
                 round_id, candidates, ctx.metrics_schema, prior_metrics,
             )
-        selected_candidate = winner.get("candidate") if winner else None
-        selected_sha = winner.get("sha") if winner else None
-        for candidate in candidates:
-            candidate["selected"] = candidate.get("candidate") == selected_candidate
+        selected_candidate = winner.candidate_id if winner else None
+        selected_sha = winner.sha if winner else None
         next_base_sha = selected_sha or parent_sha
         if winner:
             print(f"[{stamp()}] selected candidate r{round_id}-c{selected_candidate}: "
                   f"{selected_sha[:10]}", flush=True)
-            prior_metrics = winner.get("metrics") or prior_metrics
+            prior_metrics = dict(winner.metrics) or prior_metrics
         else:
             if abstention is not None:
                 reason = "proposer abstained (no experiment worth its cost)"
@@ -431,7 +431,13 @@ def _run_locked(cfg: dict, run_dir_path: Path,
         ctx.store.append_generation(
             round_id, parent_sha=parent_sha,
             selected_candidate=selected_candidate, selected_sha=selected_sha,
-            candidates=candidates,
+            candidates=[
+                encode_candidate_result(
+                    candidate,
+                    selected=candidate.candidate_id == selected_candidate,
+                )
+                for candidate in candidates
+            ],
             abstention=abstention,
             deliberation_telemetry=deliberation_telemetry,
             telemetry=ctx.telemetry.snapshot(persist=True),
@@ -769,31 +775,40 @@ def _refresh_progress_plot(store: Store, plot_context: dict | None = None) -> No
     )
 
 
-def _finalize_candidates(ctx: RunContext, candidates: list[dict]) -> None:
+def _finalize_candidates(
+    ctx: RunContext,
+    candidates: tuple[CandidateResult, ...],
+) -> tuple[CandidateResult, ...]:
     """Harness bookkeeping applied uniformly to every returned candidate,
     for both backends: ingest worker-reported usage into telemetry, then
     stamp each candidate with a persisted telemetry snapshot for its
     history row. Backends never touch telemetry themselves."""
     if ctx.telemetry is None:
-        return
+        return candidates
+    finalized = []
     for candidate in candidates:
-        for usage in candidate.pop("usage", []) or []:
+        for usage in candidate.usage:
             ctx.telemetry.record_usage(usage)
-        candidate["telemetry"] = ctx.telemetry.snapshot(persist=True)
+        finalized.append(replace(
+            candidate,
+            usage=(),
+            telemetry=ctx.telemetry.snapshot(persist=True),
+        ))
+    return tuple(finalized)
 
 
 def _run_candidates(ctx: RunContext, proposals: list[str],
                     round_id: int, parent_sha: str,
-                    ) -> list[dict]:
+                    ) -> tuple[CandidateResult, ...]:
     """Run one generation's proposal strings, possibly concurrently."""
     max_workers = min(ctx.cfg.get("max_workers", 1), max(1, len(proposals)))
     if max_workers <= 1 or len(proposals) <= 1:
-        return [
+        return tuple(
             _run_candidate_guarded(
                 ctx, i, proposal, round_id, parent_sha)
             for i, proposal in enumerate(proposals)
-        ]
-    results: list[dict | None] = [None] * len(proposals)
+        )
+    results: list[CandidateResult | None] = [None] * len(proposals)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_run_candidate_guarded, ctx, i, proposal, round_id,
@@ -812,7 +827,7 @@ def _run_candidates(ctx: RunContext, proposals: list[str],
                     i, proposals[i], f"candidate worker failed: {exc}",
                     parent_sha, round_id=round_id,
                     metrics_schema=ctx.metrics_schema)
-    return [r for r in results if r is not None]
+    return tuple(r for r in results if r is not None)
 
 
 def _run_candidate_guarded(
@@ -821,7 +836,7 @@ def _run_candidate_guarded(
     proposal: str,
     round_id: int,
     parent_sha: str,
-) -> dict:
+) -> CandidateResult:
     try:
         return _run_one_candidate(
             ctx, candidate_id, proposal, round_id, parent_sha,
@@ -851,7 +866,7 @@ def _deps_from_ctx(ctx: RunContext) -> candidate_worker.CandidateDeps:
 
 def _run_one_candidate(ctx: RunContext, candidate_id: int,
                        proposal: str,
-                       round_id: int, parent_sha: str) -> dict:
+                       round_id: int, parent_sha: str) -> CandidateResult:
     """LocalBackend's per-candidate path: the backend owns the worktree
     lifecycle; the business logic lives in candidate_worker.run_candidate."""
     worktree_id = f"{round_id}-c{candidate_id}"
@@ -876,7 +891,7 @@ def _candidate_failure(candidate_id: int, proposal: str,
                        sha: str | None = None,
                        eval_block: str = "", eval_metrics: dict | None = None,
                        changed_paths: list[str] | None = None,
-                       metrics_schema: dict | None = None) -> dict:
+                       metrics_schema: dict | None = None) -> CandidateResult:
     spec = candidate_worker.CandidateSpec(
         round_id=round_id, candidate_id=candidate_id, parent_sha=parent_sha,
         proposal=proposal)
@@ -886,25 +901,31 @@ def _candidate_failure(candidate_id: int, proposal: str,
         changed_paths=changed_paths, metrics_schema=metrics_schema)
 
 
-def _select_winner(candidates: list[dict],
+def _select_winner(candidates: tuple[CandidateResult, ...],
                    metrics_schema: dict,
-                   prior_metrics: dict | None = None) -> dict | None:
+                   prior_metrics: dict | None = None) -> CandidateResult | None:
     """Select an eligible candidate only when it improves the incumbent
     (deliberately no score-based fallback — the harness owns the objective)."""
     obj = metrics_schema["objective"]
     key = obj["key"]
-    eligible_cands = [c for c in candidates if _eligible(c, metrics_schema)]
+    eligible_cands = [
+        candidate for candidate in candidates
+        if candidate.eligible and candidate.sha
+        and isinstance(candidate.metrics.get(key), (int, float))
+        and not isinstance(candidate.metrics.get(key), bool)
+        and math.isfinite(candidate.metrics[key])
+    ]
     if not eligible_cands:
         return None
     lower = obj["lower_is_better"]
     direction = 1 if lower else -1
     winner = min(eligible_cands, key=lambda c: (
-        direction * c["metrics"][key],
-        int(c.get("candidate") or 0),
+        direction * c.metrics[key],
+        c.candidate_id,
     ))
     prior_value = (prior_metrics or {}).get(key)
     if isinstance(prior_value, (int, float)):
-        winner_value = winner["metrics"][key]
+        winner_value = winner.metrics[key]
         improved = winner_value < prior_value if lower else winner_value > prior_value
         if not improved:
             return None
@@ -913,7 +934,7 @@ def _select_winner(candidates: list[dict],
 
 def _print_round_performance(
     round_id: int,
-    candidates: list[dict],
+    candidates: tuple[CandidateResult, ...],
     metrics_schema: dict,
     prior_metrics: dict | None,
 ) -> None:
@@ -924,7 +945,7 @@ def _print_round_performance(
     if best is None:
         result = f"{key}=unavailable (no eligible candidate)"
     else:
-        value = best["metrics"][key]
+        value = best.metrics[key]
         delta = evals.objective_delta(
             value, (prior_metrics or {}).get(key), obj["lower_is_better"],
         )

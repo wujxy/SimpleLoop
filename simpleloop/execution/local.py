@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import proposer_lanes as pl
 from .base import ExecutionBackend, InfraRoundError
+from ..candidate import CandidateResult
 from ..stages.proposer import ProposalBatch, ProposerRequest
 
 
@@ -49,7 +50,7 @@ class LocalBackend(ExecutionBackend):
 
     def run_candidates(self, *, proposals: list[str], round_id: int,
                        parent_sha: str, journal=None,
-                       ) -> list[dict]:
+                       ) -> tuple[CandidateResult, ...]:
         from .. import loop as loop_mod
         return loop_mod._run_candidates(
             self.ctx, proposals, round_id, parent_sha,

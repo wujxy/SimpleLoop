@@ -1,5 +1,5 @@
 """CandidateWorker: one candidate's factual execution — executor ->
-path gate/commit -> harness eval/gates -> result dict.
+path gate/commit -> harness eval/gates -> typed result.
 
 Business only: the worktree lifecycle belongs to the execution backends
 (they create it before, remove it after), and job management belongs to
@@ -28,15 +28,26 @@ import os
 import socket
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import config as config_mod
+from .candidate import (
+    CandidateArtifact,
+    CandidateResult,
+    CandidateStatus,
+    EvaluationResult,
+    ExecutionResult,
+    GateDecision,
+    GateResult,
+)
 from .container.runtime import ApptainerRuntime, world_mount_map
 from .harness import evals, gate, views
 from .harness.handoff import write_handoff
 from .harness.workspace import Workspace
 from .roles import executor as executor_mod
 from .roles.agent import Agent, AgentError
+from .persistence.artifacts import encode_candidate_result
+from .stages.proposer import Proposal
 
 
 def stamp() -> str:
@@ -146,7 +157,7 @@ def build_deps(
     )
 
 
-def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
+def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> CandidateResult:
     """Execute and evaluate one candidate. The worktree at
     spec.worktree_path must already exist; the caller removes it."""
     cfg = deps.cfg
@@ -239,6 +250,7 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
             status="EVAL_FAILED",
             gates=gate_results,
             eval_block=eval_block,
+            eval_error=str(exc),
         )
 
     eval_detail = "" if eval_result.commands_ok else (
@@ -274,6 +286,7 @@ def run_candidate(deps: CandidateDeps, spec: CandidateSpec) -> dict:
         gates=gate_results,
         eval_block=eval_result.text,
         metrics=eval_result.metrics,
+        returncodes=eval_result.returncodes,
         gate_passed=gate_passed,
         eligible=eligible,
     )
@@ -300,28 +313,61 @@ def _candidate_result(
     gates: dict,
     eval_block: str = "",
     metrics: dict | None = None,
+    returncodes: tuple[int, ...] = (),
+    eval_error: str | None = None,
     gate_passed: bool = False,
     eligible: bool = False,
-) -> dict:
-    return {
-        "candidate": spec.candidate_id,
-        "experiment_id": f"r{spec.round_id}c{spec.candidate_id}",
-        "proposal": spec.proposal,
-        "parent_sha": spec.parent_sha,
-        "sha": result.sha,
-        "status": status,
-        "eval_block": eval_block,
-        "metrics": metrics or {},
-        "changed_paths": result.changed_paths,
-        "gates": gates,
-        "gate_passed": gate_passed,
-        "eligible": eligible,
-        "selected": False,
-        "self_report": result.self_report,
+) -> CandidateResult:
+    candidate_status = CandidateStatus(status)
+    artifact = (
+        CandidateArtifact(
+            parent_sha=spec.parent_sha,
+            sha=result.sha,
+            changed_paths=tuple(PurePosixPath(path) for path in result.changed_paths),
+        )
+        if result.sha else None
+    )
+    evaluated = candidate_status in {
+        CandidateStatus.COMPLETED,
+        CandidateStatus.GATE_REJECTED,
+        CandidateStatus.EVAL_FAILED,
     }
+    return CandidateResult(
+        candidate_id=spec.candidate_id,
+        experiment_id=f"r{spec.round_id}c{spec.candidate_id}",
+        proposal=Proposal(spec.proposal),
+        parent_sha=spec.parent_sha,
+        status=candidate_status,
+        execution=ExecutionResult(
+            status="COMMITTED" if result.sha else candidate_status.value,
+            reason=result.reason,
+            output=result.output,
+            self_report=result.self_report,
+        ),
+        artifact=artifact,
+        evaluation=(
+            EvaluationResult(
+                text=eval_block,
+                metrics=metrics or {},
+                returncodes=tuple(returncodes),
+                error=eval_error,
+            )
+            if evaluated else None
+        ),
+        gate=GateDecision(
+            {
+                name: GateResult(row.get("passed"), str(row.get("detail") or ""))
+                for name, row in gates.items()
+            },
+            gate_passed,
+            eligible,
+        ),
+    )
 
 
-def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> dict:
+def _run_baseline_eval(
+    deps: CandidateDeps, spec: CandidateSpec, cfg: dict,
+) -> CandidateResult:
     """Run only the evaluation part for baseline assessment.
 
     Skips the Executor and just runs eval commands to get metrics.
@@ -349,24 +395,28 @@ def _run_baseline_eval(deps: CandidateDeps, spec: CandidateSpec, cfg: dict) -> d
         metrics=result.metrics,
     )
     gate_passed = gate.all_passed(gate_results)
-    return {
-        "candidate": spec.candidate_id,
-        "experiment_id": f"r{spec.round_id}c{spec.candidate_id}",
-        "proposal": spec.proposal,
-        "parent_sha": spec.parent_sha,
-        "sha": spec.parent_sha,
-        "status": "BASELINE",
-        "eval_block": result.text,
-        "metrics": result.metrics,
-        "changed_paths": [],
-        "gates": gate_results,
-        "gate_passed": gate_passed,
-        "self_report": None,
-        "eligible": _eligible(
-            spec.parent_sha, gate_passed, result.metrics, cfg.get("metrics"),
+    return CandidateResult(
+        candidate_id=spec.candidate_id,
+        experiment_id=f"r{spec.round_id}c{spec.candidate_id}",
+        proposal=Proposal(spec.proposal),
+        parent_sha=spec.parent_sha,
+        status=CandidateStatus.BASELINE,
+        execution=ExecutionResult("BASELINE"),
+        artifact=CandidateArtifact(spec.parent_sha, spec.parent_sha),
+        evaluation=EvaluationResult(
+            result.text, result.metrics, tuple(result.returncodes),
         ),
-        "selected": False,
-    }
+        gate=GateDecision(
+            {
+                name: GateResult(row.get("passed"), str(row.get("detail") or ""))
+                for name, row in gate_results.items()
+            },
+            gate_passed,
+            _eligible(
+                spec.parent_sha, gate_passed, result.metrics, cfg.get("metrics"),
+            ),
+        ),
+    )
 
 
 def candidate_failure(candidate_id: int, spec: CandidateSpec,
@@ -375,28 +425,46 @@ def candidate_failure(candidate_id: int, spec: CandidateSpec,
                       changed_paths: list[str] | None = None,
                       gate_results: dict | None = None,
                       metrics_schema: dict | None = None,
-                      status: str = "WORKER_FAILED") -> dict:
-    return {
-        "candidate": candidate_id,
-        "experiment_id": f"r{spec.round_id}c{candidate_id}",
-        "proposal": spec.proposal,
-        "parent_sha": parent_sha,
-        "sha": sha,
-        "status": status,
-        "eval_block": eval_block or f"[loop failure] {reason[:200]}",
-        "metrics": eval_metrics or {},
-        "changed_paths": changed_paths or [],
-        "gates": gate_results or gate.build_results(
-            metrics_schema, paths=None,
+                      status: str = "WORKER_FAILED") -> CandidateResult:
+    candidate_status = CandidateStatus(status)
+    rows = gate_results or gate.build_results(metrics_schema, paths=None)
+    artifact = (
+        CandidateArtifact(
+            parent_sha,
+            sha,
+            tuple(PurePosixPath(path) for path in (changed_paths or [])),
+        )
+        if sha else None
+    )
+    evaluation = (
+        EvaluationResult(
+            eval_block,
+            eval_metrics or {},
+            error=eval_block or reason,
+        )
+        if sha and (eval_block or eval_metrics) else None
+    )
+    return CandidateResult(
+        candidate_id=candidate_id,
+        experiment_id=f"r{spec.round_id}c{candidate_id}",
+        proposal=Proposal(spec.proposal),
+        parent_sha=parent_sha,
+        status=candidate_status,
+        execution=ExecutionResult(candidate_status.value, reason=reason),
+        artifact=artifact,
+        evaluation=evaluation,
+        gate=GateDecision(
+            {
+                name: GateResult(row.get("passed"), str(row.get("detail") or ""))
+                for name, row in rows.items()
+            },
+            False,
+            False,
         ),
-        "gate_passed": False,
-        "eligible": False,
-        "selected": False,
-        "self_report": None,
-    }
+    )
 
 
-def write_result(result_dir: str | Path, result: dict,
+def write_result(result_dir: str | Path, result: CandidateResult,
                  *, sidecar: dict | None = None) -> None:
     """Atomic terminal output: result.json.tmp -> rename, then the sidecar
     (usage/audit meta for the frontend's telemetry), _FINISHED last.
@@ -404,7 +472,7 @@ def write_result(result_dir: str | Path, result: dict,
     result_dir = Path(result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
     tmp = result_dir / "result.json.tmp"
-    tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2,
+    tmp.write_text(json.dumps(encode_candidate_result(result), ensure_ascii=False, indent=2,
                               default=str) + "\n", encoding="utf-8")
     os.replace(tmp, result_dir / "result.json")
     if sidecar is not None:
@@ -431,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
 
     usage: list = []
     spec_dict: dict = {}
-    result: dict
+    result: CandidateResult
     try:
         spec_dict = json.loads(
             Path(args.manifest).read_text(encoding="utf-8"))
@@ -454,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
         # terminal result; _FINISHED absence must mean "killed by infra".
         print(f"[{stamp()}] worker failed before/at business execution: {exc}",
               flush=True)
+        if not spec_dict.get("result_dir"):
+            return 2
         result = candidate_failure(
             int(spec_dict.get("candidate_id") or 0),
             CandidateSpec(

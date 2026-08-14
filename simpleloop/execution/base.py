@@ -16,6 +16,7 @@ own round-level harness state:
 """
 from __future__ import annotations
 
+from ..candidate import CandidateResult
 from ..stages.proposer import ProposalBatch, ProposerRequest
 
 
@@ -45,7 +46,7 @@ class ExecutionBackend:
     def run_candidates(self, *, proposals: list[str], round_id: int,
                        parent_sha: str,
                        journal: "RoundJournal | None" = None,
-                       ) -> list[dict]:
+                       ) -> tuple[CandidateResult, ...]:
         raise NotImplementedError
 
     def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
@@ -58,7 +59,7 @@ class ExecutionBackend:
     def resume_round(self, jobs: list[dict], *, round_id: int,
                      parent_sha: str,
                      journal: "RoundJournal | None" = None,
-                     ) -> list[dict]:
+                     ) -> tuple[CandidateResult, ...]:
         """Re-enter the poll loop for an in-flight round after a frontend
         restart. `jobs` is the opaque job table the backend previously passed
         to journal.save(); the proposer is NOT called again. The default

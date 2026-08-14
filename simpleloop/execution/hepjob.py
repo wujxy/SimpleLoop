@@ -32,17 +32,19 @@ import re
 import shlex
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import candidate_worker
 from .. import proposer_lane_worker
+from ..candidate import CandidateResult
 from ..candidate_worker import stamp
 from ..container import runtime as runtime_mod
 from . import proposer_lanes as pl
 from .base import ExecutionBackend, InfraRoundError, RoundJournal
 from ..config import _CPU_MODEL_REQUIREMENTS
 from ..loop import BaselineAcceptanceError
+from ..persistence.artifacts import ProtocolError, decode_candidate_result
 from ..stages.proposer import ProposalBatch, ProposerRequest
 
 
@@ -79,7 +81,7 @@ class _Job:
     running_since: float | None = None
     gone_since: float | None = None
     idle_warned: bool = False
-    result: dict | None = None      # business result after COMPLETED
+    result: CandidateResult | dict | None = None
 
     @property
     def terminal(self) -> bool:
@@ -156,12 +158,12 @@ class HEPJobBackend(ExecutionBackend):
 
             try:
                 result = self._read_result(job)
-            except ValueError as exc:
+            except ProtocolError as exc:
                 raise BaselineAcceptanceError(
                     f"baseline result.json is malformed: {exc}")
 
-            eval_block = result.get("eval_block", "")
-            metrics = result.get("metrics", {})
+            eval_block = result.evaluation.text if result.evaluation else ""
+            metrics = dict(result.metrics)
 
             # Validate baseline metrics
             import math
@@ -204,7 +206,7 @@ class HEPJobBackend(ExecutionBackend):
     def run_candidates(self, *, proposals: list[str], round_id: int,
                        parent_sha: str,
                        journal: RoundJournal | None = None,
-                       ) -> list[dict]:
+                       ) -> tuple[CandidateResult, ...]:
         self._round_id = round_id
         self._parent_sha = parent_sha
         self._journal = journal
@@ -220,7 +222,7 @@ class HEPJobBackend(ExecutionBackend):
     def resume_round(self, jobs_payload: list[dict], *, round_id: int,
                      parent_sha: str,
                      journal: RoundJournal | None = None,
-                     ) -> list[dict]:
+                     ) -> tuple[CandidateResult, ...]:
         """Re-enter the poll loop for an in-flight round after a frontend
         restart. Job state is rebuilt from the journal's jobs table; the
         proposer is NOT called again."""
@@ -443,7 +445,7 @@ class HEPJobBackend(ExecutionBackend):
 
     # ---- supervise / reconcile ----
 
-    def _supervise(self, jobs: list[_Job]) -> list[dict]:
+    def _supervise(self, jobs: list[_Job]) -> tuple[CandidateResult, ...]:
         poll = self.cfg["poll_seconds"]
         while True:
             active = [j for j in jobs if not j.terminal]
@@ -504,7 +506,7 @@ class HEPJobBackend(ExecutionBackend):
                     job.result = self._read_result(job)
                     job.state = "COMPLETED"
                     job.note = ""
-                except ValueError as exc:
+                except ProtocolError as exc:
                     job.state = "INFRA_FAILED"
                     job.note = f"malformed result: {exc}"
                 print(f"[{stamp()}] candidate {label} job {job.job_id} "
@@ -549,7 +551,7 @@ class HEPJobBackend(ExecutionBackend):
 
     # ---- collect ----
 
-    def _collect(self, jobs: list[_Job]) -> list[dict]:
+    def _collect(self, jobs: list[_Job]) -> tuple[CandidateResult, ...]:
         round_id = self._round_id
         candidates = []
         for job in jobs:
@@ -560,15 +562,17 @@ class HEPJobBackend(ExecutionBackend):
                       f"{job.worktree_id}: {exc}", flush=True)
             if job.state == "COMPLETED" and job.result is not None:
                 result = job.result
+                if not isinstance(result, CandidateResult):
+                    raise TypeError("candidate job holds a non-candidate result")
                 # The usage/audit sidecar travels up to the loop, which owns
                 # telemetry accounting (record_usage + snapshot).
                 meta = self._read_worker_meta(job)
-                result["usage"] = meta.get("usage") or []
+                result = replace(result, usage=tuple(meta.get("usage") or ()))
                 execution = meta.get("execution") or {}
                 candidates.append(result)
                 print(f"[{stamp()}] candidate r{round_id}"
                       f"-c{job.candidate_id} collected "
-                      f"(status={result.get('status')}, "
+                      f"(status={result.status.value}, "
                       f"host={execution.get('host')})",
                       flush=True)
             else:
@@ -588,7 +592,7 @@ class HEPJobBackend(ExecutionBackend):
                 "not recorded. Fix the infrastructure issue, then either "
                 "re-run with --continue or delete the run's inflight file "
                 "to re-propose the round.")
-        return candidates
+        return tuple(candidates)
 
     # ---- condor wrappers (the only places that touch condor_*) ----
 
@@ -694,22 +698,13 @@ class HEPJobBackend(ExecutionBackend):
         os.replace(tmp, job.result_dir / "job.json")
 
     @staticmethod
-    def _read_result(job: _Job) -> dict:
+    def _read_result(job: _Job) -> CandidateResult:
         try:
             result = json.loads(
                 (job.result_dir / "result.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"{exc}") from exc
-        if not isinstance(result, dict):
-            raise ValueError("result.json is not a candidate result object")
-        if (
-            not isinstance(result.get("status"), str)
-            or not isinstance(result.get("gates"), dict)
-            or not isinstance(result.get("gate_passed"), bool)
-            or not isinstance(result.get("eligible"), bool)
-        ):
-            raise ValueError("result.json is not a candidate result object")
-        return result
+            raise ProtocolError(f"{exc}") from exc
+        return decode_candidate_result(result)
 
     @staticmethod
     def _read_worker_meta(job: _Job) -> dict:
