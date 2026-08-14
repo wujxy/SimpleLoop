@@ -17,16 +17,16 @@ from ...candidate import (
     candidate_failure_from_request,
     run_candidate_guarded,
 )
-from ...harness import views
 from ...persistence.artifacts import encode_candidate_result
 from ...persistence.candidate_trace import HandoffCandidateTrace
-from ...roles.agent import Agent
+from ...stages.agent import Agent
+from ...stages.gate import gate_block
 from ...stages.artifacts import GitArtifactWorkspace
 from ...stages.evaluator import (
     EvaluationConfig,
     EvaluationRequest,
     Evaluator,
-    HarnessEvaluator,
+    WorldEvaluator,
 )
 from ...stages.executor import AgentExecutor, Executor, ExecutorConfig
 from ...stages.gate import GateSpec, apply_gates
@@ -140,7 +140,7 @@ def build_ports(
     prompt_dir: str | Path | None = None,
 ) -> CandidatePorts:
     run_dir = Path(run_dir)
-    sandbox = ApptainerSandbox()
+    sandbox = ApptainerSandbox(userns=bool(cfg.get("sandbox_userns", True)))
     builder = WorldBuilder(sandbox)
     role = (cfg.get("roles") or {}).get("executor") or {}
     image = Path(cfg["runtime_image"])
@@ -181,12 +181,12 @@ def build_ports(
             ),
             ExecutorConfig(
                 str(cfg.get("goal") or ""),
-                views.gate_block(cfg.get("metrics")),
+                gate_block(cfg.get("metrics")),
                 Path(prompt_dir) if prompt_dir else None,
             ),
         ),
         GitArtifactWorkspace(provider),
-        HarnessEvaluator(evaluator_world, _evaluation_config(cfg)),
+        WorldEvaluator(evaluator_world, _evaluation_config(cfg)),
         spec,
         HandoffCandidateTrace(run_dir),
         lambda: sandbox.preflight(executor_spec),

@@ -11,6 +11,19 @@ PATHS = "PATHS"
 EVAL_COMMANDS = "EVAL_COMMANDS"
 
 
+def gate_block(metrics_schema: dict | None) -> str:
+    """Render declared gate descriptions for proposer/executor prompts."""
+    if not metrics_schema:
+        return ""
+    described = [
+        gate for gate in (metrics_schema.get("gates") or [])
+        if gate.get("description")
+    ]
+    return "\n".join(
+        f"- {gate['key']}: {gate['description']}" for gate in described
+    )
+
+
 @dataclass(frozen=True)
 class GateSpec:
     objective_key: str

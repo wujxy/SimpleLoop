@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from simpleloop import config as config_mod
-from simpleloop.harness import memory
+from simpleloop.persistence import history as history_store
 from simpleloop.reporting import telemetry as telemetry_mod
 from simpleloop.reporting import plot as plot_mod
 from simpleloop.reporting.plot import (
@@ -502,7 +502,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error: no history.jsonl at {run_dir}", file=sys.stderr)
         raise SystemExit(1)
     try:
-        history = memory.read_history(history_path)
+        history = history_store.read_history(history_path)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1)

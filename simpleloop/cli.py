@@ -11,8 +11,8 @@ from pathlib import Path
 
 from . import app
 from . import config as config_mod
-from .harness import memory
-from .container.image import ImageBuildError, build_image
+from .persistence import history
+from .world.image import ImageBuildError, build_image
 from .world import SandboxPreflightError
 from .initialize import InitError, initialize
 from .reporting import plot as plot_mod
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     plot_parser.add_argument(
         "--config",
-        help="The task config the run used (source of eval.metrics). Optional: "
+        help="The task config the run used (source of evaluation metrics). Optional: "
              "defaults to the config.resolved.json snapshot in the run dir.",
     )
     plot_parser.add_argument(
@@ -162,7 +162,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "export":
-        from .harness import export as export_mod
+        from .reporting import export as export_mod
         try:
             info = export_mod.export_run(
                 args.run_dir, what=args.what, to_branch=args.to_branch)
@@ -195,13 +195,13 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Error: no history.jsonl at {run_dir}", file=sys.stderr)
             raise SystemExit(1)
         try:
-            history = memory.read_history(history_path)
+            rows = history.read_history(history_path)
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         plot_context = telemetry_mod.load_plot_context(run_dir)
         overview = plot_mod.write_progress_png(
-            run_dir, history, cfg["metrics"], plot_context)
+            run_dir, rows, cfg["metrics"], plot_context)
         if overview is None:
             print("Error: no image could be written", file=sys.stderr)
             raise SystemExit(1)
@@ -222,8 +222,8 @@ def main(argv: list[str] | None = None) -> None:
             )
             raise SystemExit(1)
         try:
-            episode = memory.resolve_episode(
-                memory.read_history(history_path),
+            episode = history.resolve_episode(
+                history.read_history(history_path),
                 args.ref,
             )
         except ValueError as exc:
@@ -242,12 +242,12 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  goal: {cfg['goal']}")
         print(f"  max_rounds: {cfg['max_rounds']}")
         print(f"  candidates_per_round: {cfg['candidates_per_round']}")
-        print(f"  max_workers: {cfg['max_workers']}")
-        print(f"  eval commands: {len(cfg['eval_commands'])}")
-        print(f"  repo: {cfg['repo_path']} @ {cfg['baseline_ref']}")
-        print(f"  runtime image: {cfg['runtime_image']}")
+        print(f"  max_parallel_candidates: {cfg['max_workers']}")
+        print(f"  evaluation commands: {len(cfg['eval_commands'])}")
+        print(f"  source: {cfg['repo_path']} @ {cfg['baseline_ref']}")
+        print(f"  world image: {cfg['runtime_image']}")
         binds = ", ".join(cfg["runtime_binds"]) or "(none)"
-        print(f"  runtime binds: {binds}")
+        print(f"  world external_writable: {binds}")
         return
 
     if args.command == "run":

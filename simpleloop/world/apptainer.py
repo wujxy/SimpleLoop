@@ -65,15 +65,18 @@ def evaluator_environment(
 
 
 class ApptainerSandbox:
-    def __init__(self, *, executable: str = "apptainer"):
+    def __init__(self, *, executable: str = "apptainer", userns: bool = True):
         self.executable = executable
+        self.userns = userns
 
     def bind(
         self,
         spec: SandboxSpec,
         mounts: tuple[MountSpec, ...],
     ) -> "_BoundApptainerSandbox":
-        return _BoundApptainerSandbox(self.executable, spec, mounts)
+        return _BoundApptainerSandbox(
+            self.executable, spec, mounts, userns=self.userns,
+        )
 
     def preflight(self, spec: SandboxSpec) -> None:
         executable = shutil.which(self.executable)
@@ -84,7 +87,9 @@ class ApptainerSandbox:
             raise SandboxPreflightError(
                 f"runtime image is not a readable file: {image}"
             )
-        sandbox = _BoundApptainerSandbox(executable, spec, ())
+        sandbox = _BoundApptainerSandbox(
+            executable, spec, (), userns=self.userns,
+        )
         result = sandbox.run(ProcessRequest(
             ("bash", "-c", "for t in bash git node claude; do command -v \"$t\" >/dev/null || exit 127; done"),
             PurePosixPath("/"),
@@ -106,10 +111,13 @@ class _BoundApptainerSandbox:
         executable: str,
         spec: SandboxSpec,
         mounts: tuple[MountSpec, ...],
+        *,
+        userns: bool,
     ):
         self.executable = executable
         self.spec = spec
         self.mounts = mounts
+        self.userns = userns
 
     def argv(
         self,
@@ -123,7 +131,7 @@ class _BoundApptainerSandbox:
             "--cleanenv",
             "--no-eval",
         ]
-        if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
+        if self.userns:
             argv.append("--userns")
         argv.extend(["--containall", "--no-mount", "cwd,home,hostfs"])
         if not self.spec.network:

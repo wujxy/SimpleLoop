@@ -8,7 +8,7 @@ from simpleloop.candidate import (
     CandidateArtifact, CandidateResult, CandidateStatus, EvaluationResult,
     ExecutionResult, GateDecision,
 )
-from simpleloop.harness.store import HistoryConflictError, Store
+from simpleloop.persistence.history import HistoryConflictError, Store
 from simpleloop.round import RoundResult
 from simpleloop.stages.proposer import Proposal, ProposalBatch
 from simpleloop.stages.selector import Selection

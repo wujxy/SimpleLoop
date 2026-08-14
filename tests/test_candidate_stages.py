@@ -20,7 +20,7 @@ from simpleloop.stages.evaluator import (
     BaselineAcceptanceError,
     EvaluationConfig,
     EvaluationRequest,
-    HarnessEvaluator,
+    WorldEvaluator,
     validate_baseline,
 )
 from simpleloop.stages.executor import (
@@ -31,7 +31,7 @@ from simpleloop.stages.executor import (
 )
 from simpleloop.stages.gate import GateSpec, apply_gates
 from simpleloop.stages.proposer import Proposal
-from simpleloop.roles.agent import AgentError
+from simpleloop.stages.agent import AgentError
 from simpleloop.world import ChangeSet, ProcessResult, SourceWorkspace
 
 
@@ -124,13 +124,13 @@ def test_git_artifact_workspace_maps_commit_request(tmp_path: Path):
 
 def test_harness_evaluator_maps_eval_result(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        evaluator_mod.evals,
+        evaluator_mod,
         "run_eval",
-        lambda *args, **kwargs: evaluator_mod.evals.EvalResult(
+        lambda *args, **kwargs: evaluator_mod.EvalResult(
             "eval", {"SPEED_MS": 90.0, "CORRECTNESS": True}, (0,),
         ),
     )
-    evaluator = HarnessEvaluator(
+    evaluator = WorldEvaluator(
         object(),
         EvaluationConfig(("eval",), "SPEED_MS", ("CORRECTNESS",)),
     )
@@ -158,7 +158,7 @@ def test_harness_evaluator_runs_commands_through_world(tmp_path: Path):
             )
 
     world = FakeWorld()
-    evaluator = HarnessEvaluator(
+    evaluator = WorldEvaluator(
         world,
         EvaluationConfig(("bench",), "SPEED_MS", ("CORRECTNESS",)),
     )
@@ -174,13 +174,13 @@ def test_harness_evaluator_normalizes_runtime_failure(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        evaluator_mod.evals,
+        evaluator_mod,
         "run_eval",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             RuntimeError("container unavailable")
         ),
     )
-    evaluator = HarnessEvaluator(
+    evaluator = WorldEvaluator(
         object(), EvaluationConfig(("eval",), "SPEED_MS", ()),
     )
 

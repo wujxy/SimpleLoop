@@ -91,15 +91,15 @@ def test_python_examples_provide_the_unversioned_python_command():
 def test_lean_configs_infer_same_name_definition():
     for path in LEAN_CONFIGS:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert raw["runtime"]["image"] == "apptainer.sif"
-        assert "definition" not in raw["runtime"]
+        assert raw["world"]["image"] == "apptainer.sif"
+        assert "definition" not in raw["world"]
 
 
 def test_junosw_configs_name_shared_image_and_definition():
     for path in JUNOSW_CONFIGS:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert raw["runtime"]["image"] == "../junosw-apptainer.sif"
-        assert raw["runtime"]["definition"] == "../junosw-apptainer.def"
+        assert raw["world"]["image"] == "../junosw-apptainer.sif"
+        assert raw["world"]["definition"] == "../junosw-apptainer.def"
 
 
 def test_omilrec_local_executor_binds_are_narrow_and_read_only():

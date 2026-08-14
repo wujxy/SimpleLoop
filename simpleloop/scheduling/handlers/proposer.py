@@ -83,13 +83,14 @@ def build_lane_deps(
     from proposer.orchestrator import ProposerOrchestrator
     from proposer.runtime import ApptainerRuntime
     from proposer.scientist import ContextPolicy
-    from ...harness import views
+    from ...stages.gate import gate_block
 
     run_dir = Path(run_dir)
     runtime = ApptainerRuntime(
         image=cfg["runtime_image"],
         binds=cfg["runtime_binds"],
         run_dir=run_dir,
+        userns=bool(cfg.get("sandbox_userns", True)),
     )
     researcher = (cfg.get("roles") or {}).get("researcher") or {}
     orchestrator = ProposerOrchestrator(
@@ -109,7 +110,7 @@ def build_lane_deps(
         orchestrator,
         MemoryService(run_dir=run_dir, metrics_schema=cfg.get("metrics") or {}),
         Path(prompt_dir) if prompt_dir else None,
-        views.gate_block(cfg.get("metrics")),
+        gate_block(cfg.get("metrics")),
     )
 
 

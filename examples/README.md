@@ -27,10 +27,10 @@ examples/
 
 ## `task.yaml` — reference template
 
-A heavily-commented config covering the full schema (`task` / `safety` /
-`loop` / `runtime` / `eval` / `source`, including the optional `eval.metrics`
-objective + gates block). Not runnable as-is — its `source.path` is a
-placeholder. Copy the YAML, point `source.path` at an existing source
+A reference for `schema: simpleloop.v1`: `goal`, `loop`, `source`, `world`,
+`evaluation`, `providers`, `proposer`, `executor`, and `rsi`. Not runnable
+as-is — its `source.repo` is a placeholder. Copy the YAML, point `source.repo`
+at an existing source
 directory, and initialize it. Schema + validation live in
 `../simpleloop/config.py` (strict: unknown keys error at validate).
 
@@ -90,10 +90,10 @@ simpleloop run --config examples/<folder>/task.yaml --run-dir ./runs/<name>-001
 ```
 
 The source directory must exist. `init` creates missing Git metadata and a
-baseline commit, builds a missing image from `runtime.definition` (or the
-same-name `.def` inferred from `runtime.image`), and skips a usable existing
-image. Pass `--force` to rebuild the configured image. `runtime.binds` remains
-optional and is needed only for external directories.
+baseline commit, builds a missing image from `world.definition` (or the
+same-name `.def` inferred from `world.image`), and skips a usable existing
+image. Pass `--force` to rebuild it. `world.external_writable` and
+`world.external_readonly` are needed only for explicit external mounts.
 
 The HEPAI Proposer call runs from the frontend. Its research shell, the Claude
 Executor, and evaluation run inside the configured SIF. The OMILRECV2 YAMLs bind

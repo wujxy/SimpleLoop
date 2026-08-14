@@ -9,7 +9,7 @@ import pytest
 
 from simpleloop import app as loop_mod
 from simpleloop.candidate import CandidateRequest, candidate_failure_from_request
-from simpleloop.harness.store import Store
+from simpleloop.persistence.history import Store
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
 from simpleloop.stages.proposer import Proposal
 from simpleloop.world import ProcessResult, SourceWorkspace

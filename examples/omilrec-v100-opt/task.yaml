@@ -1,91 +1,81 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Minimize reconstruction SPEED_MS while satisfying every configured gate. The current implementation
+  is the starting artifact, not a constraint on the form or scale of a valid solution.
 
-task:
-  goal: >
-    Minimize reconstruction SPEED_MS while satisfying every configured gate.
-    The current implementation is the starting artifact, not a constraint on
-    the form or scale of a valid solution.
-
-safety:
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
 loop:
   max_rounds: 30
   candidates_per_round: 4
-  max_workers: 3
+  max_parallel_candidates: 3
   agent_timeout_seconds: 7200
-
-# self_improvement:
-#   interval_rounds: 10
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5.2
-    base_url: sk-GHrvyBmucuHRAJjrlKKpPXsKPkbxgitHamnlUZkIJTIlobo
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /lustrefs/juno26/users/lidian
-
-eval:
-  commands:
-    # RecMap (4 LFS .root files, ~979MB) lives in the source pkg and is shared
-    # read-only across all candidate/baseline worktrees instead of being
-    # smudged (and duplicated) into each worktree. OMILRECV2_BENCH_RECMAP
-    # defaults to OMILRECV2_TEST_RECMAP inside sl_eval_v100.sh, so one var
-    # covers both the pytest gates and the benchmark. The path is visible
-    # inside the container because /lustrefs/juno26/users/lidian is bound.
-    - "OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash scripts/sl_eval_v100.sh --evtmax 100"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: CONTRACT
-        description: >
-          The production FCN remains directly exercised and all frozen evaluator
-          assets, thresholds, and checks remain intact.
-      - key: FCN
-        description: >
-          Production OMILRECV2::Calculate_EVLikelihood produces exactly 16
-          finite unique results with relative error below 1e-13 against the
-          frozen v1.0.0 values.
-      - key: CONSISTENCY
-        description: >
-          All 18 reconstructed events are finite and remain within 4 mm position,
-          7 keV energy, 10 ps t0, and 0.1 PE peSum of the v1.0.0 references.
-      - key: EVAL_RESULT
-        description: >
-          The complete evaluator, including both builds, tests, and benchmark,
-          finishes successfully and emits every required metric.
-      - key: SINGLE_THREADED
-        description: >
-          The benchmark ran single-threaded (Sniper NTHREADS=1 and OMP/MKL/ROOT
-          pinned to 1). Speedups must come from algorithm or code improvements,
-          not from parallelism — multi-threading would reduce SPEED_MS without a
-          real improvement.
-
 source:
-  path: ../../../omilrec-v100-opt-pkg 
-  baseline_ref: simpleloop-v100-gated-baseline
+  repo: ../../../omilrec-v100-opt-pkg
+  baseline: simpleloop-v100-gated-baseline
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /lustrefs/juno26/users/lidian
+evaluation:
+  commands:
+  - OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash
+    scripts/sl_eval_v100.sh --evtmax 100
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: CONTRACT
+    description: 'The production FCN remains directly exercised and all frozen evaluator assets, thresholds,
+      and checks remain intact.
 
-execution:
-  backend: local
+      '
+  - key: FCN
+    description: 'Production OMILRECV2::Calculate_EVLikelihood produces exactly 16 finite unique results
+      with relative error below 1e-13 against the frozen v1.0.0 values.
+
+      '
+  - key: CONSISTENCY
+    description: 'All 18 reconstructed events are finite and remain within 4 mm position, 7 keV energy,
+      10 ps t0, and 0.1 PE peSum of the v1.0.0 references.
+
+      '
+  - key: EVAL_RESULT
+    description: 'The complete evaluator, including both builds, tests, and benchmark, finishes successfully
+      and emits every required metric.
+
+      '
+  - key: SINGLE_THREADED
+    description: 'The benchmark ran single-threaded (Sniper NTHREADS=1 and OMP/MKL/ROOT pinned to 1).
+      Speedups must come from algorithm or code improvements, not from parallelism — multi-threading would
+      reduce SPEED_MS without a real improvement.
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5.2
+  base_url: sk-GHrvyBmucuHRAJjrlKKpPXsKPkbxgitHamnlUZkIJTIlobo
+rsi:
+  enabled: false

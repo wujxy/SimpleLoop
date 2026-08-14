@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..harness.handoff import write_handoff
+from .handoff import write_handoff
 from ..round import RoundRequest
 from ..stages.proposer import ProposalBatch
 

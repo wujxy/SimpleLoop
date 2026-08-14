@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from simpleloop.harness.store import eligible
+from simpleloop.persistence.history import eligible
 from simpleloop.persistence.artifacts import decode_candidate_result
 from simpleloop.round import RoundResult
 from simpleloop.stages.proposer import Abstention, ProposalBatch

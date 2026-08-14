@@ -1,125 +1,113 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Minimize reconstruction SPEED_MS while satisfying every configured gate. The current implementation
+  is the starting artifact, not a constraint on the form or scale of a valid solution.
 
-task:
-  goal: >
-    Minimize reconstruction SPEED_MS while satisfying every configured gate.
-    The current implementation is the starting artifact, not a constraint on
-    the form or scale of a valid solution.
-  hints:
-    # --- where the time goes ---
-    - "SPEED_MS is dominated by per-event work in Calculate_EVLikelihood and the Minuit FCN; the FCN is called many times per event, so anything hoisted out of it is amplified."
-    - "Pure allocation/refactor changes (TH1D→stack, vector.assign) have already been tried and give ~0 gain — spend budget on algorithmic/loop-structure changes instead."
-
-    # --- data-layout flattening (bit-identical-safe) ---
-    - "Flatten per-LPMT constants (position, radius, isDyn, LPDE, gain, Q1, QRes, timeOffset) into contiguous arrays in OMILRECV2 init; removes TVector3 access and tool virtual calls, improves cache locality."
-    - "In Load_ExpectedPEQTime, cache the nPE map / charge PDF / time PDF as raw array pointers; eliminates ROOT histogram accessor and pointer-chasing in the hot loop."
-
-    # --- hoist Minuit-invariant work (bit-identical-safe) ---
-    - "Precompute per-event invariants (PMT_Hit, hitTime, hitNPE, dmu, fdmu, QPDF params) once after RemoveDN and before FCN — cache charge AFTER RemoveDN, which changes hit charge."
-    - "Reuse the geometry-pass PMT-vertex distance Rsp to compute LTOF inside FCN, instead of recomputing sqrt via CalLTOF on every call."
-    - "Precompute reciprocals and scalar constants once (1/(LPMTCalibEnergy*nHESF), grid inverse widths, PMT_R/LS_R powers, 1e6/c) instead of repeating divides in FCN."
-
-    # --- per-vertex / bin-finding hoist (bit-identical-safe) ---
-    - "For the trial vertex, precompute expected nPE over the 1440 theta bins once; the per-PMT inner loop then does only a linear blend. Invalidate cache correctly on Use3DMap / isMixingPhase / R / theta changes."
-    - "Compute QPDF and time-PDF x/y bins + interpolation weights once per fired PMT; reuse across the Poisson k-loop and time-PDF interpolation instead of re-doing floor/clamp/bin-search."
-
-    # --- loop-structure / fast path (bit-identical-safe) ---
-    - "Split the PMT loop by fit phase: QMLE charge-only, TMLE time-only, QTMLE combined — removes inner phase branches and dead work."
-    - "Prebuild per-event index lists (unfired_idx, fired_idx, time_eligible_idx) so FCN skips per-PMT threshold/eligibility checks; TMLE-only then iterates ~1.7k time-eligible PMTs, not all 17k."
-    - "RecNpe==1 && !enableQTimePdf fast path: compute only the two needed Ge time-PDF interpolations, skip integral PDFs and the general path."
-
-    # --- arithmetic-changing (require FCN drift <= 1e-13 gate) ---
-    - "Unfired charge likelihood can switch from exp(-pe)*(1+ProbQ*pe) to 2*pe - 2*log1p(ProbQ*pe), removing an exp() per unfired PMT — but this changes FP rounding, so verify against the FCN gate."
-    - "A better QMLE seed (online/OEC energy-radius estimate, old fixed seed as fallback) cuts Minuit iterations ~20-30%, but changes the minimizer path — watch the 4 mm / 7 keV gate on near-boundary events."
-
-safety:
-  # The writable world: source under optimization + gitignored build-output
-  # dirs the eval writes. Everything else (tests, scripts, baseline,
-  # reference, CMakeLists, docs, ...) is mounted read-only AUTOMATICALLY —
-  # visible and runnable; edits outside this set fail with EROFS.
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
+hints:
+- SPEED_MS is dominated by per-event work in Calculate_EVLikelihood and the Minuit FCN; the FCN is called
+  many times per event, so anything hoisted out of it is amplified.
+- Pure allocation/refactor changes (TH1D→stack, vector.assign) have already been tried and give ~0 gain
+  — spend budget on algorithmic/loop-structure changes instead.
+- Flatten per-LPMT constants (position, radius, isDyn, LPDE, gain, Q1, QRes, timeOffset) into contiguous
+  arrays in OMILRECV2 init; removes TVector3 access and tool virtual calls, improves cache locality.
+- In Load_ExpectedPEQTime, cache the nPE map / charge PDF / time PDF as raw array pointers; eliminates
+  ROOT histogram accessor and pointer-chasing in the hot loop.
+- Precompute per-event invariants (PMT_Hit, hitTime, hitNPE, dmu, fdmu, QPDF params) once after RemoveDN
+  and before FCN — cache charge AFTER RemoveDN, which changes hit charge.
+- Reuse the geometry-pass PMT-vertex distance Rsp to compute LTOF inside FCN, instead of recomputing sqrt
+  via CalLTOF on every call.
+- Precompute reciprocals and scalar constants once (1/(LPMTCalibEnergy*nHESF), grid inverse widths, PMT_R/LS_R
+  powers, 1e6/c) instead of repeating divides in FCN.
+- For the trial vertex, precompute expected nPE over the 1440 theta bins once; the per-PMT inner loop
+  then does only a linear blend. Invalidate cache correctly on Use3DMap / isMixingPhase / R / theta changes.
+- Compute QPDF and time-PDF x/y bins + interpolation weights once per fired PMT; reuse across the Poisson
+  k-loop and time-PDF interpolation instead of re-doing floor/clamp/bin-search.
+- 'Split the PMT loop by fit phase: QMLE charge-only, TMLE time-only, QTMLE combined — removes inner phase
+  branches and dead work.'
+- Prebuild per-event index lists (unfired_idx, fired_idx, time_eligible_idx) so FCN skips per-PMT threshold/eligibility
+  checks; TMLE-only then iterates ~1.7k time-eligible PMTs, not all 17k.
+- 'RecNpe==1 && !enableQTimePdf fast path: compute only the two needed Ge time-PDF interpolations, skip
+  integral PDFs and the general path.'
+- Unfired charge likelihood can switch from exp(-pe)*(1+ProbQ*pe) to 2*pe - 2*log1p(ProbQ*pe), removing
+  an exp() per unfired PMT — but this changes FP rounding, so verify against the FCN gate.
+- A better QMLE seed (online/OEC energy-radius estimate, old fixed seed as fallback) cuts Minuit iterations
+  ~20-30%, but changes the minimizer path — watch the 4 mm / 7 keV gate on near-boundary events.
 loop:
   max_rounds: 30
   candidates_per_round: 4
-  max_workers: 4
+  max_parallel_candidates: 4
   agent_timeout_seconds: 7200
-
-# self_improvement:
-#   interval_rounds: 10
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5.2
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /lustrefs/juno26/users/lidian
-
-eval:
-  commands:
-    # RecMap (4 LFS .root files, ~979MB) lives in the source pkg and is shared
-    # read-only across all candidate/baseline worktrees instead of being
-    # smudged (and duplicated) into each worktree. OMILRECV2_BENCH_RECMAP
-    # defaults to OMILRECV2_TEST_RECMAP inside sl_eval_v100.sh, so one var
-    # covers both the pytest gates and the benchmark. The path is visible
-    # inside the container because /lustrefs/juno26/users/lidian is bound.
-    - "OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash scripts/sl_eval_v100.sh --evtmax 100"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: CONTRACT
-        description: >
-          The production FCN remains directly exercised and all frozen evaluator
-          assets, thresholds, and checks remain intact.
-      - key: FCN
-        description: >
-          Production OMILRECV2::Calculate_EVLikelihood produces exactly 16
-          finite unique results with relative error below 1e-13 against the
-          frozen v1.0.0 values.
-      - key: CONSISTENCY
-        description: >
-          All 18 reconstructed events are finite and remain within 4 mm position,
-          7 keV energy, 10 ps t0, and 0.1 PE peSum of the v1.0.0 references.
-      - key: EVAL_RESULT
-        description: >
-          The complete evaluator, including both builds, tests, and benchmark,
-          finishes successfully and emits every required metric.
-
 source:
-  path: ../../../omilrec-v100-opt-pkg 
-  baseline_ref: simpleloop-v100-gated-baseline
+  repo: ../../../omilrec-v100-opt-pkg
+  baseline: simpleloop-v100-gated-baseline
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /lustrefs/juno26/users/lidian
+evaluation:
+  commands:
+  - OMILRECV2_TEST_RECMAP=/lustrefs/juno26/users/lidian/omilrec-v100-opt-pkg/assets/OMILREC_maps bash
+    scripts/sl_eval_v100.sh --evtmax 100
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: CONTRACT
+    description: 'The production FCN remains directly exercised and all frozen evaluator assets, thresholds,
+      and checks remain intact.
 
-execution:
-  backend: hepjob
-  hepjob:
+      '
+  - key: FCN
+    description: 'Production OMILRECV2::Calculate_EVLikelihood produces exactly 16 finite unique results
+      with relative error below 1e-13 against the frozen v1.0.0 values.
+
+      '
+  - key: CONSISTENCY
+    description: 'All 18 reconstructed events are finite and remain within 4 mm position, 7 keV energy,
+      10 ps t0, and 0.1 PE peSum of the v1.0.0 references.
+
+      '
+  - key: EVAL_RESULT
+    description: 'The complete evaluator, including both builds, tests, and benchmark, finishes successfully
+      and emits every required metric.
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: hepjob
     schedd_name: scheduler@schedd12.ihep.ac.cn
     collector: cm01.ihep.ac.cn
     accounting_group: JUNO.juno.default
     cpu_model: zen5
-    machine_constraint: 'Machine == "lhws316.ihep.ac.cn"'
+    machine_constraint: Machine == "lhws316.ihep.ac.cn"
     memory_mb: 4096
     poll_seconds: 15
     max_attempts: 2
     run_timeout_seconds: 7200
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5.2
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+rsi:
+  enabled: false

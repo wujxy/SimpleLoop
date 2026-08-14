@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from ... import config as config_mod
-from ...roles.agent import Agent
+from ...stages.agent import Agent
 from ...world import (
     ApptainerSandbox,
     SandboxSpec,
@@ -43,7 +43,7 @@ def _build_agent(raw: Mapping[str, object], observe_usage):
         Path(str(raw["worktree_path"])),
         "",
     )
-    sandbox = ApptainerSandbox()
+    sandbox = ApptainerSandbox(userns=bool(cfg.get("sandbox_userns", True)))
     spec = SandboxSpec(
         Path(cfg["runtime_image"]),
         executor_environment(

@@ -176,6 +176,7 @@ class ApptainerRuntime:
         run_dir: str | Path,
         *,
         executable: str = "apptainer",
+        userns: bool = True,
     ):
         self.image = Path(image).expanduser().resolve()
         self.binds = tuple(
@@ -184,6 +185,7 @@ class ApptainerRuntime:
         self.run_dir = Path(run_dir).expanduser().resolve()
         self.executor_home = _account_home()
         self.executable = executable
+        self.userns = userns
 
     def exec_argv(
         self,
@@ -215,9 +217,7 @@ class ApptainerRuntime:
         scratch-cwd commands). ``--containall`` + ``--no-mount cwd,home,hostfs``
         prevent the host worktree from leaking into the container."""
         argv = [self.executable, "exec", "--cleanenv", "--no-eval"]
-        # --userns (default) avoids needing setuid on shared HPC nodes; set
-        # SIMPLELOOP_APPTAINER_USERNS=0 to fall back to setuid.
-        if os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0":
+        if self.userns:
             argv.append("--userns")
         if mounts is None:
             for bind in self.binds:

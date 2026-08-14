@@ -20,8 +20,8 @@ From: almalinux:9
 #
 # JUNO source packages, reconstruction maps, fixtures, and inputs remain
 # external; task.yaml exposes /cvmfs, /data/juno, and project storage through
-# same-path runtime binds. Reuse this one SIF across omilrec-opt and
-# omilrec-post-v107-opt by setting runtime.image to its path.
+# same-path World mounts. Reuse this SIF across omilrec-opt and
+# omilrec-post-v107-opt by setting world.image to its path.
 #
 # Build:   simpleloop image build examples/junosw-apptainer.def
 #          (or simpleloop image build examples/junosw-apptainer.def \

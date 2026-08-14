@@ -11,8 +11,8 @@ import yaml
 
 from simpleloop import config as config_mod
 from simpleloop import app as app_mod
-from simpleloop.harness import export as export_mod
-from simpleloop.harness.store import Store
+from simpleloop.reporting import export as export_mod
+from simpleloop.persistence.history import Store
 from simpleloop.reporting.summary import write_summary
 from simpleloop.world import CommitRequest, WorkspaceSpec
 from simpleloop.world.git import GitWorkspaceProvider

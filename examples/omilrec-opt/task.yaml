@@ -1,82 +1,64 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Minimize reconstruction SPEED_MS while satisfying every configured gate. The current implementation
+  is the starting artifact, not a constraint on the form or scale of a valid solution.
 
-# SimpleLoop task config for optimizing OMILRECV2 speed, against the UNOPTIMIZED
-# v1.0.0 baseline (~514 ms/evt, 1x). This is the widest optimization space.
-#
-# Source repo: ../../omilrec-v100  (real git repo at v1.0.0 / b51f3b8; the
-#               reference/ref_10evt.root baseline is a real blob — no LFS, so
-#               `git clone --local` gets it directly).
-# Eval runs in the round's worktree (the committed candidate) BEFORE the worktree
-# is removed, so the speed measurement reflects the candidate, not the baseline.
-#
-# The single eval command (scripts/sl_eval.sh) does the whole chain in one shot —
-# source JUNO env, build the lib, run the e2e bit-identical gate, run quick_bench —
-# because SimpleLoop gives each eval command a 600s budget and a fresh worktree
-# (no build artifacts). It prints CORRECTNESS=/SPEED_MS=/EVAL_RESULT= lines for
-# the harness. Default --evtmax 10 fits the 600s budget.
-
-task:
-  goal: >
-    Minimize reconstruction SPEED_MS while satisfying every configured gate.
-    The current implementation is the starting artifact, not a constraint on
-    the form or scale of a valid solution.
-
-safety:
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
 loop:
   max_rounds: 40
   candidates_per_round: 3
-  max_workers: 3
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
-
-eval:
-  commands:
-    # One self-contained command: env + build + e2e bit-identical gate + speed bench.
-    # Prints CORRECTNESS=, SPEED_MS=, EVAL_RESULT= — the harness parses these into
-    # the authoritative metrics dict.
-    - "bash scripts/sl_eval.sh --evtmax 10"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: CORRECTNESS
-        description: >
-          All 15 reconstructed fields for 10 events are bit-identical to
-          reference/ref_10evt.root (tolerance 0).
-      - key: EVAL_RESULT
-        description: >
-          The eval script ran to completion and produced all metrics. Fails on build
-          failure, timeout, or crash before gates could be measured.
-
+  max_parallel_candidates: 3
 source:
-  path: ../../../omilrec-v100    # relative to this task.yaml; real git repo at v1.0.0
-  baseline_ref: main             # b51f3b8 (v1.0.0)
+  repo: ../../../omilrec-v100
+  baseline: main
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /data/juno
+  - /datafs/users/wujxy/agent-sci/omilrec_opt
+evaluation:
+  commands:
+  - bash scripts/sl_eval.sh --evtmax 10
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: CORRECTNESS
+    description: 'All 15 reconstructed fields for 10 events are bit-identical to reference/ref_10evt.root
+      (tolerance 0).
+
+      '
+  - key: EVAL_RESULT
+    description: 'The eval script ran to completion and produced all metrics. Fails on build failure,
+      timeout, or crash before gates could be measured.
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false

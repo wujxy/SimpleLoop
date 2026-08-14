@@ -19,8 +19,7 @@ from typing import Mapping
 import yaml
 
 from . import config as config_mod
-from .harness import evals
-from .harness.store import Store
+from .persistence.history import Store
 from .loop import LoopRequest, LoopState, run_loop
 from .persistence.journal import JobJournal
 from .persistence.round_artifacts import RoundArtifacts
@@ -45,7 +44,7 @@ from .scheduling.supervisor import JobSupervisor
 from .scheduling.task import (
     BaselineRequest, ScheduledBaseline, ScheduledCandidates, ScheduledProposer,
 )
-from .stages.evaluator import BaselineAcceptanceError
+from .stages.evaluator import BaselineAcceptanceError, objective_delta
 from .stages.proposer import StaticProposer
 from .stages.selector import select_candidate
 from .world import (
@@ -144,7 +143,7 @@ def _run_locked(
     stop_round = _stop_round(cfg, static, continue_run, target_rounds)
 
     telemetry = RunTelemetry(run_dir, resume=continue_run)
-    sandbox = ApptainerSandbox()
+    sandbox = ApptainerSandbox(userns=bool(cfg.get("sandbox_userns", True)))
     sandbox_spec = _executor_sandbox_spec(cfg)
     sandbox.preflight(sandbox_spec)
     _assert_executor_ready(cfg)
@@ -386,7 +385,7 @@ def _stop_round(cfg, static, continue_run, target_rounds):
         return len(static)
     if cfg.get("roles", {}).get("researcher") is None:
         raise config_mod.ConfigError(
-            "roles.researcher: required for agent-driven runs"
+            "proposer: required for agent-driven runs"
         )
     if target_rounds is None:
         return int(cfg["max_rounds"])
@@ -415,7 +414,7 @@ def _assert_executor_ready(cfg: Mapping[str, object]) -> None:
     executor = (cfg.get("roles") or {}).get("executor")
     if not executor or not str(executor.get("base_url", "")).strip():
         raise config_mod.ConfigError(
-            "roles.executor.base_url: required for candidate execution"
+            "executor.base_url: required for candidate execution"
         )
     if not (
         os.environ.get("ANTHROPIC_AUTH_TOKEN")
@@ -444,7 +443,7 @@ def _print_round_performance(
         text = f"{key}=unavailable (no eligible candidate)"
     else:
         value = best.metrics[key]
-        delta = evals.objective_delta(
+        delta = objective_delta(
             value, (prior_metrics or {}).get(key),
             objective["lower_is_better"],
         )
@@ -484,7 +483,7 @@ def _requirements(cfg: Mapping[str, object]) -> str | None:
     hep = cfg.get("hepjob") or {}
     parts = []
     if hep.get("cpu_model"):
-        parts.append(config_mod._CPU_MODEL_REQUIREMENTS[str(hep["cpu_model"])])
+        parts.append(config_mod.cpu_model_requirement(str(hep["cpu_model"])))
     if hep.get("machine_constraint"):
         parts.append(str(hep["machine_constraint"]))
     return " && ".join(parts) or None

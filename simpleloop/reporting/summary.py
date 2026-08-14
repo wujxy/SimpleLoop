@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Mapping
 
-from ..harness.store import best_candidate
+from ..persistence.history import best_candidate
 
 
 def write_summary(

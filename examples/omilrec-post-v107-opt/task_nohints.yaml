@@ -1,88 +1,75 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Optimize the runtime performance of the OMILRECV2 reconstruction algorithm under OMILRECV2/src/.
 
-# Independent OMILRECV2 optimization experiment.
-# Every run starts from the same v1.0.0-based gated baseline.
+  Minimize OMILRECV2 milliseconds per event, reported as SPEED_MS, while passing every configured correctness
+  gate.
 
-task:
-  goal: >
-    Optimize the runtime performance of the OMILRECV2 reconstruction algorithm
-    under OMILRECV2/src/.
+  Any implementation strategy is allowed within the editable paths. A change is valid only when EVAL_RESULT,
+  FCN, and CONSISTENCY all pass. Among valid candidates, lower SPEED_MS is better.
 
-    Minimize OMILRECV2 milliseconds per event, reported as SPEED_MS, while
-    passing every configured correctness gate.
-
-    Any implementation strategy is allowed within the editable paths. A change
-    is valid only when EVAL_RESULT, FCN, and CONSISTENCY all pass. Among valid
-    candidates, lower SPEED_MS is better.
-
-safety:
-  # The writable world: source under optimization + gitignored build-output
-  # dirs the eval writes. Everything else (tests, scripts, reference,
-  # CMakeLists, docs, ...) is mounted read-only AUTOMATICALLY — visible and
-  # runnable; edits outside this set fail with EROFS.
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
 loop:
   max_rounds: 20
   candidates_per_round: 3
-  max_workers: 3
+  max_parallel_candidates: 3
   agent_timeout_seconds: 4500
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
-
-eval:
-  commands:
-    - "bash scripts/sl_eval_post_v107.sh --evtmax 10"
-
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-
-    gates:
-      - key: FCN
-        description: >
-          Replay the charge and time likelihood evaluation against the
-          post-v1.0.7 golden fixture. The maximum allowed relative drift is
-          1e-13.
-
-      - key: CONSISTENCY
-        description: >
-          Compare end-to-end reconstructed physics output against the
-          post-v1.0.7 reference. The allowed differences are 4 mm for vertex,
-          7 keV for energy, 10 ps for t0, and 0.1 PE for peSum.
-
-      - key: EVAL_RESULT
-        description: >
-          The evaluation command must complete successfully without build
-          failure, timeout, or runtime crash.
-
 source:
-  path: ../../../omilrec-v100-postv107-gated
-  baseline_ref: postv107-gated-v100
+  repo: ../../../omilrec-v100-postv107-gated
+  baseline: postv107-gated-v100
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /data/juno
+  - /datafs/users/wujxy/agent-sci/omilrec_opt
+evaluation:
+  commands:
+  - bash scripts/sl_eval_post_v107.sh --evtmax 10
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: FCN
+    description: 'Replay the charge and time likelihood evaluation against the post-v1.0.7 golden fixture.
+      The maximum allowed relative drift is 1e-13.
+
+      '
+  - key: CONSISTENCY
+    description: 'Compare end-to-end reconstructed physics output against the post-v1.0.7 reference. The
+      allowed differences are 4 mm for vertex, 7 keV for energy, 10 ps for t0, and 0.1 PE for peSum.
+
+      '
+  - key: EVAL_RESULT
+    description: 'The evaluation command must complete successfully without build failure, timeout, or
+      runtime crash.
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false

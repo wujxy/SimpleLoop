@@ -1,681 +1,242 @@
-"""Read and validate a task config (YAML or JSON).
-
-Minimal schema:
-  kind: task
-  task.goal: str                      (required)
-  safety.editable_paths: [path]      (required; the WRITABLE world — real dirs/files relative to the worktree
-                                      root, mounted read-write into both lane containers. This is the only
-                                      thing the proposer may edit AND the executor may change, so list the
-                                      source under optimization PLUS any build-output dirs the eval writes
-                                      (e.g. build, TEMP). A trailing /** is tolerated and stripped to its dir
-                                      (src/** -> src); any other glob char (* ? [) is rejected — list real
-                                      paths. Everything NOT listed here is mounted read-only automatically:
-                                      the whole worktree is visible and runnable, only the editable subset is
-                                      writable. The writable/editable distinction is enforced by the mount
-                                      (EROFS outside editable), not by a post-hoc gate.)
-  loop.max_rounds: int                (required)
-  loop.agent_timeout_seconds: int    (optional, default 3600; per claude call budget)
-  loop.agent_max_output_tokens: int  (optional, default 64000; per claude call output ceiling)
-  loop.candidates_per_round: int     (optional, default 1; self-loop candidate fanout — the Scientist's proposal-slot pool)
-  loop.max_workers: int              (optional, default 1; candidate concurrency)
-  loop.scientist_steps: int          (optional, default 200; Scientist step budget per lane — one agent doing what
-                                      the old generator+cognitive pipeline split between two. Legacy gen_steps /
-                                      cognitive_steps are accepted as aliases.)
-  loop.context: object               (optional; Scientist live-context compaction — emergency_threshold_tokens
-                                      [int|null, default 100000], window_pairs [int, default 3],
-                                      window_max_chars [int, default 24000]. When prompt tokens cross the
-                                      threshold, oldest (assistant, observation) pairs are shed. Set
-                                      emergency_threshold_tokens: null to disable.)
-  roles.researcher: object           (optional; required by agent-driven runs, omitted in static mode)
-  roles.executor: object             (required for candidate execution; api/model/base_url — auth via ANTHROPIC_AUTH_TOKEN env)
-  runtime.image: path                (required; readable SIF image)
-  runtime.definition: path           (optional; defaults beside image with .def suffix)
-  runtime.binds: [absolute dir]      (optional, default [])
-  runtime.read_only_binds: [absolute dir] (optional, default []; absolute dirs mounted read-only into BOTH lane containers — data/env deps like /cvmfs the build or eval needs)
-  eval.commands: [str]                (required non-empty; harness-run after each commit)
-  eval.metrics: {objective, gates}    (required; the key=value lines the harness parses)
-  eval.timeout_seconds: int           (optional, default 600; per eval command budget)
-  eval.output_cap_chars: int          (optional, default 16000; retained output per command)
-  eval.history_cap_chars: int         (optional, default 6000; eval text kept per round in history.jsonl)
-  execution.backend: local|hepjob     (optional, default local; candidate execution backend)
-  execution.hepjob.schedd_name: str   (required for hepjob; condor schedd, e.g. scheduler@schedd11.ihep.ac.cn)
-  execution.hepjob.collector: str     (optional; condor collector/pool, e.g. cm01.ihep.ac.cn — needed when the
-                                       login node's default collector cannot locate the named schedd)
-  execution.hepjob.accounting_group: str   (required for hepjob; e.g. JUNO.juno.default)
-  execution.hepjob.accounting_group_user: str  (optional, default current user)
-  execution.hepjob.ihep_group: str    (optional; +IHEP_RealGroup job attribute)
-  execution.hepjob.request_os: str    (optional, default AlmaLinux9)
-  execution.hepjob.cpu_model: str    (optional; target a CPU model — zen4/genoa or zen5/turin — emitted as a condor Requirements expression)
-  execution.hepjob.machine_constraint: str  (optional; extra condor Requirements clause appended to cpu_model, e.g. 'Machine == "slot1@herdws001.ihep.ac.cn"' to pin all jobs to one host so SPEED_MS is comparable across candidates)
-  execution.hepjob.memory_mb: int     (optional, default 6000)
-  execution.hepjob.cpus: int          (optional, default 1)
-  execution.hepjob.poll_seconds: int  (optional, default 30)
-  execution.hepjob.max_attempts: int  (optional, default 2; job-level retries for Held/Lost)
-  execution.hepjob.idle_warn_seconds: int   (optional, default 7200; warn only, never kills)
-  execution.hepjob.run_timeout_seconds: int (optional, default 21600; running job is removed)
-  execution.hepjob.disappearance_grace_seconds: int (optional, default 120)
-  execution.hepjob.python_executable: str  (optional, default the frontend's sys.executable)
-  execution.hepjob.submit_cmd/query_cmd/remove_cmd: str  (optional condor_* overrides)
-  source.path: path                   (required; the repo to optimize)
-  source.baseline_ref: str            (optional, default HEAD)
-
-Paths are relative to the config file; unknown keys are errors (strict).
-"""
+"""The single external configuration boundary for SimpleLoop."""
 from __future__ import annotations
 
-import getpass
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-TASK_TOP_KEYS = {
-    "kind", "task", "safety", "loop", "runtime", "eval", "source", "execution",
-    "roles",
-}
-
-_RESEARCHER_DEFAULTS = {
-    "api": "hepai",
-    "model": "gpt-5.5",
-    "base_url": "https://aiapi.ihep.ac.cn/apiv2",
-    "command_timeout_seconds": 120,
-    "command_output_cap_chars": 12000,
-}
-
-# Only `api` carries a default; the executor's `model` and `base_url` are
-# required (no implicit endpoint) so candidate execution never silently falls
-# back to an unreachable default Anthropic URL on isolated worker nodes.
-_EXECUTOR_DEFAULTS = {
-    "api": "anthropic",
-}
+from . import _config_runtime, legacy_config
 
 
-class ConfigError(ValueError):
-    """User-facing config error with a field path."""
-
-
-# Provenance snapshot written into every run_dir at loop start: the RESOLVED
-# config dict (absolute paths, defaults filled in). `simpleloop plot` and
-# `simpleloop export` read it back so a run stays self-describing after the
-# original config file moves or changes.
+ConfigError = _config_runtime.ConfigError
 RESOLVED_SNAPSHOT_NAME = "config.resolved.json"
+
+_TOP_KEYS = {
+    "schema", "goal", "hints", "loop", "source", "world", "evaluation",
+    "providers", "proposer", "executor", "rsi",
+}
+
+
+def load(config_path: str | Path, *, require_ready: bool = True) -> dict[str, Any]:
+    """Load either ``simpleloop.v1`` or one transitional legacy task file."""
+    path = Path(config_path).expanduser().resolve()
+    raw = _read_document(path)
+    if raw.get("schema") == "simpleloop.v1":
+        return _resolve_v1(raw, path, require_ready=require_ready)
+    if "schema" in raw:
+        raise ConfigError(
+            f"config.schema: expected 'simpleloop.v1', got {raw['schema']!r}"
+        )
+    resolved = legacy_config.resolve(raw, path, require_ready=require_ready)
+    resolved["sandbox_userns"] = (
+        os.environ.get("SIMPLELOOP_APPTAINER_USERNS", "1") != "0"
+    )
+    resolved["rsi"] = {"enabled": False}
+    return resolved
+
+
+def cpu_model_requirement(name: str) -> str:
+    """Return the validated HTCondor requirement for a configured CPU name."""
+    return _config_runtime._CPU_MODEL_REQUIREMENTS[name]
 
 
 def load_resolved(run_dir: str | Path) -> dict[str, Any]:
-    """Read the resolved-config snapshot a run wrote into its run_dir."""
+    """Read a run's normalized snapshot, including pre-v1 snapshots."""
     path = Path(run_dir).expanduser().resolve() / RESOLVED_SNAPSHOT_NAME
     if not path.exists():
         raise ConfigError(
             f"no {RESOLVED_SNAPSHOT_NAME} in {path.parent} — the run predates "
-            "config snapshots; pass --config explicitly")
+            "config snapshots; pass --config explicitly"
+        )
     try:
         resolved = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
     if not isinstance(resolved, dict):
         raise ConfigError(f"{path}: top-level value must be an object")
-    # Backward compatibility: runs written before the `roles:` refactor stored
-    # the researcher config under a top-level `researcher` key. Lift it into the
-    # current `roles.researcher` shape so plot/export/--continue still work.
     if "researcher" in resolved and "roles" not in resolved:
         resolved["roles"] = {
-            "researcher": resolved.pop("researcher"),
-            "executor": None,
+            "researcher": resolved.pop("researcher"), "executor": None,
         }
-    # Back-compat: runs resolved before the Scientist refactor stored the step
-    # budget as cognitive_steps/gen_steps. Map them so --continue still works.
     if "scientist_steps" not in resolved:
         resolved["scientist_steps"] = resolved.get(
             "cognitive_steps", resolved.get("gen_steps", 200)
         )
+    resolved.setdefault("sandbox_userns", True)
+    resolved.setdefault("rsi", {"enabled": False})
     return resolved
 
 
-def load(
-    config_path: str | Path,
-    *,
-    require_ready: bool = True,
-) -> dict[str, Any]:
-    """Load and validate a task config.
-
-    ``require_ready=False`` still validates the complete schema, but permits
-    ``simpleloop init`` to create missing Git metadata and the runtime image.
-    """
-    path = Path(config_path).expanduser().resolve()
-    text = path.read_text(encoding="utf-8")
-    if path.suffix.lower() == ".json":
-        raw = json.loads(text)
-    elif path.suffix.lower() in (".yaml", ".yml"):
-        raw = yaml.safe_load(text)
-    else:
-        raise ConfigError(f"config: unsupported extension {path.suffix!r}; use .json/.yaml/.yml")
+def _read_document(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() == ".json":
+            raw = json.loads(text)
+        elif path.suffix.lower() in (".yaml", ".yml"):
+            raw = yaml.safe_load(text)
+        else:
+            raise ConfigError(
+                f"config: unsupported extension {path.suffix!r}; "
+                "use .json/.yaml/.yml"
+            )
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise ConfigError(f"could not read config {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError("config: top-level value must be an object")
-    return _resolve(raw, path, require_ready=require_ready)
+    return raw
 
 
-def _resolve(
-    raw: dict,
-    path: Path,
-    *,
-    require_ready: bool,
-) -> dict:
-    unknown = set(raw) - TASK_TOP_KEYS
-    if unknown:
-        hint = ""
-        if "researcher" in unknown:
-            hint = (" — 'researcher:' moved under 'roles:'; use "
-                    "'roles.researcher:' (and add 'roles.executor:')")
-        raise ConfigError(
-            f"config: unknown top-level key(s): {sorted(unknown)}{hint}")
-    if raw.get("kind") != "task":
-        raise ConfigError("config: kind must be 'task'")
+def _resolve_v1(raw: dict, path: Path, *, require_ready: bool) -> dict:
+    _reject_unknown(raw, _TOP_KEYS, "config")
+    goal = raw.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        raise ConfigError("goal: required non-empty string")
 
-    task = _need(raw, "task", dict)
-    safety = _need(raw, "safety", dict)
-    _safety_unknown = set(safety) - {"editable_paths"}
-    if _safety_unknown:
-        raise ConfigError(
-            f"safety: unknown key(s): {sorted(_safety_unknown)} "
-            "(only editable_paths is supported — everything not listed is "
-            "mounted read-only automatically)"
-        )
-    loop = _need(raw, "loop", dict)
-    source = _need(raw, "source", dict)
-    (runtime_image, runtime_definition, runtime_binds,
-     read_only_binds) = _resolve_runtime(
-        raw.get("runtime"),
-        path,
-        require_ready=require_ready,
-    )
-    goal = task.get("goal")
-    if not goal:
-        raise ConfigError("task.goal: required and must be non-empty")
-    hints = task.get("hints", [])
-    if hints is not None and not isinstance(hints, list):
-        raise ConfigError("task.hints: must be a list of strings")
-    if hints:
-        for i, h in enumerate(hints):
-            if not isinstance(h, str) or not h.strip():
-                raise ConfigError(f"task.hints[{i}]: must be a non-empty string")
+    loop = _block(raw, "loop")
+    source = _block(raw, "source")
+    world = _block(raw, "world")
+    evaluation = _block(raw, "evaluation")
+    providers = _block(raw, "providers")
+    proposer = _optional_block(raw, "proposer")
+    executor = _optional_block(raw, "executor")
+    rsi = _optional_block(raw, "rsi")
 
-    editable = safety.get("editable_paths")
-    if not isinstance(editable, list) or not editable:
-        raise ConfigError(
-            "safety.editable_paths: required non-empty list of worktree-relative "
-            "paths (the writable world — mounted read-write into both lane "
-            "containers; everything else is mounted read-only automatically)")
-    editable = [_normalize_mount_path(str(p)) for p in editable]
-    # editable_paths is the writable world, overlaid :rw on a whole-worktree :ro
-    # base — so entries must be real dirs/files a bind can target. A trailing
-    # /** (legacy form) was stripped to its dir above; reject anything that still
-    # carries a glob char (e.g. src/**/*.cc), which used to create a literal '**'
-    # directory instead of mounting the source.
-    for p in editable:
-        if any(ch in p for ch in ("*", "?", "[")):
-            raise ConfigError(
-                f"safety.editable_paths: glob pattern not supported ({p!r}); "
-                "list real directory/file paths (the writable world). Everything "
-                "not listed is mounted read-only automatically.")
+    _reject_unknown(loop, {
+        "max_rounds", "candidates_per_round", "max_parallel_candidates",
+        "agent_timeout_seconds", "agent_max_output_tokens", "context",
+    }, "loop")
+    _reject_unknown(source, {"repo", "baseline"}, "source")
+    _reject_unknown(world, {
+        "image", "definition", "writable", "external_writable",
+        "external_readonly",
+    }, "world")
+    _reject_unknown(evaluation, {
+        "commands", "objective", "gates", "timeout_seconds",
+        "output_cap_chars", "history_cap_chars",
+    }, "evaluation")
+    _reject_unknown(providers, {"sandbox", "scheduler"}, "providers")
+    _reject_unknown(proposer, {
+        "api", "model", "base_url", "max_steps",
+        "command_timeout_seconds", "command_output_cap_chars",
+    }, "proposer")
+    _reject_unknown(executor, {"api", "model", "base_url"}, "executor")
+    _reject_unknown(rsi, {"enabled", "first_review_round"}, "rsi")
 
-    max_rounds = loop.get("max_rounds")
-    if not isinstance(max_rounds, int) or max_rounds < 1:
-        raise ConfigError("loop.max_rounds: required positive integer")
+    sandbox = _block(providers, "sandbox")
+    scheduler = _block(providers, "scheduler")
+    _reject_unknown(sandbox, {"kind", "userns"}, "providers.sandbox")
+    if sandbox.get("kind") != "apptainer":
+        raise ConfigError("providers.sandbox.kind: only 'apptainer' is supported")
+    userns = sandbox.get("userns", True)
+    if not isinstance(userns, bool):
+        raise ConfigError("providers.sandbox.userns: must be a boolean")
 
-    agent_timeout = loop.get("agent_timeout_seconds", 3600)
-    if not isinstance(agent_timeout, int) or agent_timeout < 60:
-        raise ConfigError("loop.agent_timeout_seconds: must be an integer >= 60 (seconds)")
-    agent_max_output_tokens = loop.get("agent_max_output_tokens", 64000)
-    if not isinstance(agent_max_output_tokens, int) or agent_max_output_tokens < 8000:
-        raise ConfigError("loop.agent_max_output_tokens: must be an integer >= 8000")
-    candidates_per_round = loop.get("candidates_per_round", 1)
-    if not isinstance(candidates_per_round, int) or candidates_per_round < 1:
-        raise ConfigError("loop.candidates_per_round: must be a positive integer")
-    max_workers = loop.get("max_workers", 1)
-    if not isinstance(max_workers, int) or max_workers < 1:
-        raise ConfigError("loop.max_workers: must be a positive integer")
-
-    # Scientist step budget per lane. The Scientist is one agent doing what the
-    # old generator+cognitive pipeline split between two, so there is a single
-    # budget. Legacy `cognitive_steps` / `gen_steps` are accepted as aliases so
-    # existing configs keep working.
-    scientist_steps = loop.get("scientist_steps")
-    if scientist_steps is None:
-        scientist_steps = loop.get(
-            "cognitive_steps", loop.get("gen_steps", 200)
-        )
-    if not isinstance(scientist_steps, int) or scientist_steps < 4:
-        raise ConfigError(
-            "loop.scientist_steps: must be an integer >= 4")
-
-    src_path = source.get("path")
-    if not src_path:
-        raise ConfigError("source.path: required")
-    repo = Path(_rel(src_path, path)).resolve()
-    if not repo.is_dir():
-        raise ConfigError(
-            f"source.path: does not exist or is not a directory: {repo}"
-        )
-    if require_ready and not (repo / ".git").exists():
-        raise ConfigError(f"source.path: not a git repo: {repo}")
-    baseline_ref = str(source.get("baseline_ref") or "HEAD")
-
-    eval_block = _need(raw, "eval", dict)
-    eval_commands = eval_block.get("commands")
-    if (not isinstance(eval_commands, list) or not eval_commands
-            or not all(isinstance(c, str) and c.strip() for c in eval_commands)):
-        raise ConfigError("eval.commands: required non-empty list of strings")
-    eval_commands = [str(c) for c in eval_commands]
-
-    eval_timeout = eval_block.get("timeout_seconds", 600)
-    if not isinstance(eval_timeout, int) or eval_timeout < 1:
-        raise ConfigError("eval.timeout_seconds: must be a positive integer (seconds)")
-    eval_output_cap = eval_block.get("output_cap_chars", 16000)
-    if not isinstance(eval_output_cap, int) or eval_output_cap < 1000:
-        raise ConfigError("eval.output_cap_chars: must be an integer >= 1000")
-    eval_history_cap = eval_block.get("history_cap_chars", 6000)
-    if not isinstance(eval_history_cap, int) or eval_history_cap < 500:
-        raise ConfigError("eval.history_cap_chars: must be an integer >= 500")
-
-    # eval.metrics declares the key=value lines the harness parses (objective +
-    # gates); required so best selection always has an objective measurement.
-    if "metrics" not in eval_block:
-        raise ConfigError(
-            "eval.metrics: required — declare the objective (and gates) the "
-            "harness parses out of eval output; score-based best selection "
-            "without metrics is no longer supported")
-    metrics = _resolve_metrics(eval_block["metrics"])
-
-    execution_backend, hepjob = _resolve_execution(raw.get("execution"))
-    roles = _resolve_roles(raw.get("roles"))
-
-    return {
-        "goal": str(goal),
-        "hints": [str(h) for h in hints] if hints else [],
-        "editable_paths": [str(p) for p in editable],
-        "max_rounds": int(max_rounds),
-        "agent_timeout_seconds": int(agent_timeout),
-        "agent_max_output_tokens": int(agent_max_output_tokens),
-        "candidates_per_round": int(candidates_per_round),
-        "max_workers": int(max_workers),
-        "scientist_steps": int(scientist_steps),
-        # Optional Scientist live-context compaction policy (emergency token
-        # threshold + window). Passed through raw; ContextPolicy.from_config
-        # validates. None = use ContextPolicy defaults (compaction ON at 100k).
-        "context": loop.get("context"),
-        "runtime_image": runtime_image,
-        "runtime_definition": runtime_definition,
-        "runtime_binds": runtime_binds,
-        "read_only_binds": read_only_binds,
-        "eval_commands": eval_commands,
-        "eval_timeout_seconds": int(eval_timeout),
-        "eval_output_cap_chars": int(eval_output_cap),
-        "eval_history_cap_chars": int(eval_history_cap),
-        "metrics": metrics,
-        "execution_backend": execution_backend,
-        "hepjob": hepjob,
-        "repo_path": str(repo),
-        "baseline_ref": baseline_ref,
-        "config_dir": str(path.parent),
-        "roles": roles,
+    scheduler_kind = scheduler.get("kind", "local")
+    scheduler_values = {
+        key: value for key, value in scheduler.items() if key != "kind"
     }
+    if scheduler_kind == "local" and scheduler_values:
+        raise ConfigError("providers.scheduler: local accepts only 'kind'")
+    if scheduler_kind not in ("local", "hepjob"):
+        raise ConfigError("providers.scheduler.kind: expected local or hepjob")
 
-
-def _resolve_researcher(raw: object) -> dict:
-    if not isinstance(raw, dict):
-        raise ConfigError("researcher: must be an object")
-    unknown = set(raw) - set(_RESEARCHER_DEFAULTS)
-    if unknown:
-        raise ConfigError(f"researcher: unknown key(s): {sorted(unknown)}")
-    result = {**_RESEARCHER_DEFAULTS, **raw}
-    if result["api"] not in ("hepai", "zhipu"):
+    objective = _block(evaluation, "objective")
+    _reject_unknown(objective, {"key", "direction"}, "evaluation.objective")
+    direction = objective.get("direction")
+    if direction not in ("minimize", "maximize"):
         raise ConfigError(
-            "researcher.api: supported values are 'hepai' and 'zhipu'"
+            "evaluation.objective.direction: expected minimize or maximize"
         )
-    for key in ("model", "base_url"):
-        if not isinstance(result[key], str) or not result[key].strip():
-            raise ConfigError(
-                f"researcher.{key}: must be a non-empty string"
-            )
-    for key, minimum in (
-        ("command_timeout_seconds", 1),
-        ("command_output_cap_chars", 1000),
+
+    manifest = {
+        "goal": goal,
+        "hints": raw.get("hints", []),
+        "loop": {
+            "max_rounds": loop.get("max_rounds"),
+            "candidates_per_round": loop.get("candidates_per_round", 1),
+            "max_parallel_candidates": loop.get("max_parallel_candidates", 1),
+            "proposer_max_steps": proposer.get("max_steps", 200),
+            **{
+                key: loop[key] for key in (
+                    "agent_timeout_seconds", "agent_max_output_tokens", "context",
+                ) if key in loop
+            },
+        },
+        "world": {
+            "image": world.get("image"),
+            "writable": world.get("writable"),
+            "external_writable": world.get("external_writable", []),
+            "external_readonly": world.get("external_readonly", []),
+            **({"definition": world["definition"]} if "definition" in world else {}),
+        },
+        "evaluation": {
+            "commands": evaluation.get("commands"),
+            "objective": {
+                "key": objective.get("key"),
+                "lower_is_better": direction == "minimize",
+            },
+            "gates": evaluation.get("gates", []),
+            **{
+                key: evaluation[key] for key in (
+                    "timeout_seconds", "output_cap_chars", "history_cap_chars",
+                ) if key in evaluation
+            },
+        },
+        "source": {
+            "repo": source.get("repo"),
+            "baseline": source.get("baseline", "HEAD"),
+        },
+        "scheduler": {
+            "kind": scheduler_kind,
+            "options": scheduler_values,
+        },
+        "proposer": (
+            {key: value for key, value in proposer.items() if key != "max_steps"}
+            if any(key != "max_steps" for key in proposer) else None
+        ),
+        "executor": executor or None,
+    }
+    resolved = _config_runtime.resolve_manifest(
+        manifest, path, require_ready=require_ready,
+    )
+    enabled = rsi.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("rsi.enabled: must be a boolean")
+    first = rsi.get("first_review_round")
+    if enabled and (
+        not isinstance(first, int) or isinstance(first, bool) or first < 0
     ):
-        value = result[key]
-        if (not isinstance(value, int) or isinstance(value, bool)
-                or value < minimum):
-            raise ConfigError(
-                f"researcher.{key}: must be an integer >= {minimum}"
-            )
-    return result
-
-
-def _resolve_roles(raw: object) -> dict:
-    """Resolve the unified `roles:` block (researcher + executor). Both roles
-    are optional in the schema; whether each is required is enforced by the
-    caller (researcher: required for agent-driven runs; executor: required for
-    candidate execution, checked in the loop's fail-fast guard)."""
-    if raw is None:
-        return {"researcher": None, "executor": None}
-    if not isinstance(raw, dict):
-        raise ConfigError("roles: must be an object")
-    unknown = set(raw) - {"researcher", "executor"}
-    if unknown:
-        raise ConfigError(f"roles: unknown key(s): {sorted(unknown)}")
-    return {
-        "researcher": (
-            _resolve_researcher(raw["researcher"])
-            if "researcher" in raw
-            else None
-        ),
-        "executor": (
-            _resolve_executor(raw["executor"])
-            if "executor" in raw
-            else None
-        ),
-    }
-
-
-def _resolve_executor(raw: object) -> dict:
-    """Resolve `roles.executor`: the claude/Anthropic-compatible endpoint the
-    executor agent runs against. model and base_url are required and
-    declarative (secrets stay in the environment via ANTHROPIC_AUTH_TOKEN /
-    ANTHROPIC_API_KEY, never in config)."""
-    if not isinstance(raw, dict):
-        raise ConfigError("roles.executor: must be an object")
-    unknown = set(raw) - set(_EXECUTOR_DEFAULTS) - {"model", "base_url"}
-    if unknown:
-        raise ConfigError(f"roles.executor: unknown key(s): {sorted(unknown)}")
-    result = {**_EXECUTOR_DEFAULTS, **raw}
-    if result["api"] != "anthropic":
         raise ConfigError(
-            "roles.executor.api: first version supports only 'anthropic'"
+            "rsi.first_review_round: required non-negative integer when enabled"
         )
-    for key in ("model", "base_url"):
-        value = result.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError(
-                f"roles.executor.{key}: must be a non-empty string"
-            )
-    return result
-
-
-def _resolve_runtime(
-    raw: object,
-    config_path: Path,
-    *,
-    require_ready: bool,
-) -> tuple[str, str, list[str], list[str]]:
-    """Validate and resolve the mandatory Apptainer runtime block."""
-    if not isinstance(raw, dict):
-        raise ConfigError("runtime: required and must be an object")
-    unknown = set(raw) - {
-        "image", "definition", "binds", "read_only_binds",
+    if not enabled and first is not None:
+        raise ConfigError("rsi.first_review_round requires rsi.enabled: true")
+    resolved["sandbox_userns"] = userns
+    resolved["rsi"] = {
+        "enabled": enabled,
+        **({"first_self_review_round": first} if enabled else {}),
     }
-    if unknown:
-        raise ConfigError(f"runtime: unknown key(s): {sorted(unknown)}")
-
-    image_value = raw.get("image")
-    if not isinstance(image_value, str) or not image_value.strip():
-        raise ConfigError("runtime.image: required non-empty path")
-    image = Path(_rel(image_value, config_path)).expanduser().resolve()
-    definition_value = raw.get("definition")
-    if definition_value is None:
-        definition = image.with_suffix(".def")
-    elif not isinstance(definition_value, str) or not definition_value.strip():
-        raise ConfigError("runtime.definition: must be a non-empty path")
-    else:
-        definition = Path(
-            _rel(definition_value, config_path)
-        ).expanduser().resolve()
-    if require_ready:
-        if not image.is_file():
-            raise ConfigError(
-                f"runtime.image: does not exist or is not a file: {image}"
-            )
-        if not os.access(image, os.R_OK):
-            raise ConfigError(f"runtime.image: not readable: {image}")
-
-    binds = _resolve_bind_dirs(raw.get("binds", []), "runtime.binds")
-    read_only_binds = _resolve_bind_dirs(
-        raw.get("read_only_binds", []),
-        "runtime.read_only_binds",
-    )
-    return str(image), str(definition), binds, read_only_binds
+    return resolved
 
 
-def _resolve_bind_dirs(raw_binds: object, field: str) -> list[str]:
-    if not isinstance(raw_binds, list):
-        raise ConfigError(f"{field}: must be a list of absolute directories")
-    binds: list[str] = []
-    for index, value in enumerate(raw_binds):
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError(f"{field}[{index}]: must be a non-empty path")
-        bind = Path(value).expanduser()
-        if not bind.is_absolute():
-            raise ConfigError(f"{field}[{index}]: must be absolute: {value}")
-        bind = bind.resolve()
-        if not bind.is_dir():
-            raise ConfigError(f"{field}[{index}]: not an existing directory: {bind}")
-        if ":" in str(bind) or "," in str(bind):
-            raise ConfigError(
-                f"{field}[{index}]: contains an unsupported bind "
-                f"separator (':' or ','): {bind}"
-            )
-        binds.append(str(bind))
-    return binds
-
-
-def _resolve_metrics(raw: object) -> dict:
-    """Validate the eval.metrics block. Returns a normalized dict:
-    {objective: {key, lower_is_better}, gates: [{key, description?}]}."""
-    if not isinstance(raw, dict):
-        raise ConfigError("eval.metrics: must be an object")
-    unknown = set(raw) - {"objective", "gates"}
-    if unknown:
-        raise ConfigError(f"eval.metrics: unknown key(s): {sorted(unknown)} "
-                          "(only 'objective' and 'gates' are declared; noise_floor/"
-                          "reps are deferred until a run proves they're needed)")
-
-    obj = raw.get("objective")
-    if not isinstance(obj, dict):
-        raise ConfigError("eval.metrics.objective: required object (the metric being optimized)")
-    obj_key = obj.get("key")
-    if not isinstance(obj_key, str) or not obj_key.strip():
-        raise ConfigError("eval.metrics.objective.key: required non-empty string "
-                          "(the key=value line the harness parses, e.g. SPEED_MS)")
-    obj_key = obj_key.strip()
-    reserved = {"PATHS", "EVAL_COMMANDS"}
-    if obj_key in reserved:
-        raise ConfigError(
-            f"eval.metrics.objective.key: {obj_key} is reserved by the harness"
-        )
-    obj_unknown = set(obj) - {"key", "lower_is_better"}
-    if obj_unknown:
-        raise ConfigError(f"eval.metrics.objective: unknown key(s): {sorted(obj_unknown)}")
-    lower_is_better = obj.get("lower_is_better")
-    if not isinstance(lower_is_better, bool):
-        raise ConfigError("eval.metrics.objective.lower_is_better: required bool "
-                          "(direction is not guessable — declare it)")
-
-    gates: list[dict] = []
-    raw_gates = raw.get("gates", [])
-    if not isinstance(raw_gates, list):
-        raise ConfigError("eval.metrics.gates: must be a list of {key: str} objects")
-    seen = {obj_key}
-    for i, g in enumerate(raw_gates):
-        if not isinstance(g, dict):
-            raise ConfigError(f"eval.metrics.gates[{i}]: must be an object with a 'key' field")
-        g_unknown = set(g) - {"key", "description"}
-        if g_unknown:
-            raise ConfigError(f"eval.metrics.gates[{i}]: unknown key(s): {sorted(g_unknown)}")
-        gk = g.get("key")
-        if not isinstance(gk, str) or not gk.strip():
-            raise ConfigError(f"eval.metrics.gates[{i}].key: required non-empty string")
-        gk = gk.strip()
-        if gk in reserved:
-            raise ConfigError(
-                f"eval.metrics.gates[{i}].key: {gk} is reserved by the harness"
-            )
-        if gk in seen:
-            raise ConfigError(
-                "eval.metrics objective and gate keys must be unique: " + gk
-            )
-        seen.add(gk)
-        description = g.get("description")
-        if description is not None and not isinstance(description, str):
-            raise ConfigError(f"eval.metrics.gates[{i}].description: must be a string")
-        gate: dict = {"key": gk}
-        if description and description.strip():
-            gate["description"] = description.strip()
-        gates.append(gate)
-
-    return {"objective": {"key": obj_key, "lower_is_better": lower_is_better},
-            "gates": gates}
-
-
-_HEPJOB_DEFAULTS = {
-    "accounting_group_user": None,   # filled with the current OS user
-    "collector": None,               # condor collector/pool host, e.g. cm01.ihep.ac.cn
-    "ihep_group": None,
-    "request_os": "AlmaLinux9",
-    "cpu_model": None,
-    "machine_constraint": None,
-    "memory_mb": 6000,
-    "cpus": 1,
-    "poll_seconds": 30,
-    "max_attempts": 2,
-    "idle_warn_seconds": 7200,
-    "run_timeout_seconds": 21600,
-    "disappearance_grace_seconds": 120,
-    "python_executable": None,       # filled with sys.executable
-    "submit_cmd": "condor_submit",
-    "query_cmd": "condor_q",
-    "remove_cmd": "condor_rm",
-}
-
-_HEPJOB_INT_RANGES = {
-    "memory_mb": (1, None),
-    "cpus": (1, None),
-    "poll_seconds": (5, None),
-    "max_attempts": (1, None),
-    "idle_warn_seconds": (60, None),
-    "run_timeout_seconds": (300, None),
-    "disappearance_grace_seconds": (0, None),
-}
-
-# CPU model -> condor Requirements expression targeting the IHEP pool's
-# machine ads (CpuFamily/CpuModelNumber). The pool advertises no CPU brand
-# string, so targeting by model name requires this explicit map. Verified
-# against the JUNO main pool (collector cm01.ihep.ac.cn) on 2026-08-03:
-#   family  6 / model  62 -> Intel Ivy Bridge,           ~32 slots
-#   family  6 / model  63 -> Intel Haswell,            ~4025 slots
-#   family  6 / model  79 -> Intel Skylake-X,           ~144 slots
-#   family  6 / model  85 -> Intel Skylake/Cascade Lake, ~21296 slots (pool bulk)
-#   family  6 / model 106 -> Intel Ice Lake,           ~10924 slots
-#   family  6 / model 143 -> Intel Sapphire/Emerald Rapids, ~1384 slots
-#   family 25 / model  17 -> AMD Zen 4 (Genoa),         ~5866 slots
-#   family 26 / model   2 -> AMD Zen 5 (Turin),         ~6256 slots
-_CPU_MODEL_REQUIREMENTS = {
-    "zen4": "CpuFamily==25 && CpuModelNumber==17",
-    "genoa": "CpuFamily==25 && CpuModelNumber==17",
-    "zen5": "CpuFamily==26 && CpuModelNumber==2",
-    "turin": "CpuFamily==26 && CpuModelNumber==2",
-    "ivybridge": "CpuFamily==6 && CpuModelNumber==62",
-    "haswell": "CpuFamily==6 && CpuModelNumber==63",
-    "skylake-x": "CpuFamily==6 && CpuModelNumber==79",
-    "skylake": "CpuFamily==6 && CpuModelNumber==85",
-    "cascadelake": "CpuFamily==6 && CpuModelNumber==85",
-    "icelake": "CpuFamily==6 && CpuModelNumber==106",
-    "sapphirerapids": "CpuFamily==6 && CpuModelNumber==143",
-}
-
-
-def _resolve_execution(raw: object) -> tuple[str, dict]:
-    """Validate the optional execution block. Returns (backend, hepjob_cfg);
-    hepjob_cfg carries defaults even for the local backend so a resolved
-    snapshot stays self-describing."""
-    if raw is None:
-        raw = {}
-    if not isinstance(raw, dict):
-        raise ConfigError("execution: must be an object")
-    unknown = set(raw) - {"backend", "hepjob"}
-    if unknown:
-        raise ConfigError(f"execution: unknown key(s): {sorted(unknown)}")
-    backend = raw.get("backend", "local")
-    if backend not in ("local", "hepjob"):
-        raise ConfigError(
-            f"execution.backend: expected 'local' or 'hepjob', got {backend!r}")
-
-    hepjob_raw = raw.get("hepjob", {})
-    if not isinstance(hepjob_raw, dict):
-        raise ConfigError("execution.hepjob: must be an object")
-    allowed = {"schedd_name", "collector", "accounting_group"} | set(_HEPJOB_DEFAULTS)
-    unknown = set(hepjob_raw) - allowed
-    if unknown:
-        raise ConfigError(
-            f"execution.hepjob: unknown key(s): {sorted(unknown)}")
-
-    hepjob = dict(_HEPJOB_DEFAULTS)
-    hepjob["accounting_group_user"] = getpass.getuser()
-    hepjob["python_executable"] = sys.executable
-    for key, value in hepjob_raw.items():
-        hepjob[key] = value
-
-    for key in ("schedd_name", "accounting_group"):
-        value = hepjob.get(key)
-        if backend == "hepjob" and (not isinstance(value, str)
-                                    or not value.strip()):
-            raise ConfigError(
-                f"execution.hepjob.{key}: required when backend is hepjob")
-    for key in ("schedd_name", "collector", "accounting_group",
-                "accounting_group_user", "ihep_group", "request_os", "cpu_model",
-                "machine_constraint",
-                "python_executable", "submit_cmd", "query_cmd", "remove_cmd"):
-        value = hepjob.get(key)
-        if value is not None and not isinstance(value, str):
-            raise ConfigError(f"execution.hepjob.{key}: must be a string")
-    if hepjob.get("cpu_model") is not None:
-        model = hepjob["cpu_model"].strip().lower()
-        if model not in _CPU_MODEL_REQUIREMENTS:
-            raise ConfigError(
-                f"execution.hepjob.cpu_model: unknown model "
-                f"{hepjob['cpu_model']!r}; choose from "
-                f"{sorted(_CPU_MODEL_REQUIREMENTS)}")
-        hepjob["cpu_model"] = model
-    for key, (low, _high) in _HEPJOB_INT_RANGES.items():
-        value = hepjob[key]
-        if not isinstance(value, int) or isinstance(value, bool) or value < low:
-            raise ConfigError(
-                f"execution.hepjob.{key}: must be an integer >= {low}")
-    return backend, hepjob
-
-
-def _need(raw: dict, key: str, kind: type) -> dict:
-    val = raw.get(key)
-    if not isinstance(val, dict):
+def _block(raw: dict, key: str) -> dict:
+    value = raw.get(key)
+    if not isinstance(value, dict):
         raise ConfigError(f"{key}: required and must be an object")
-    return val
+    return value
 
 
-def _rel(value: str, config_path: Path) -> str:
-    p = Path(value)
-    if not p.is_absolute():
-        p = (config_path.parent / p)
-    return str(p)
+def _optional_block(raw: dict, key: str) -> dict:
+    value = raw.get(key, {})
+    if not isinstance(value, dict):
+        raise ConfigError(f"{key}: must be an object")
+    return value
 
 
-def _normalize_mount_path(path: str) -> str:
-    """Normalize a worktree-relative mount path. Mounts bind dirs/files, not
-    content globs, so a trailing ``/**`` (legacy editable-glob form like
-    ``src/**``) is stripped to its directory prefix (``src``). A bare ``*`` or
-    ``**`` segment is left alone — list real paths in config."""
-    p = path.strip().rstrip("/")
-    if p.endswith("/**"):
-        return p[:-3]
-    if p.endswith("/**/"):
-        return p[:-4]
-    return p
+def _reject_unknown(raw: dict, allowed: set[str], field: str) -> None:
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ConfigError(f"{field}: unknown key(s): {sorted(unknown)}")

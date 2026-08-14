@@ -3,7 +3,8 @@ From: almalinux:9
 
 # Generic SimpleLoop runtime — the lean image. Keep repositories and large task
 # resources out of the SIF; expose them at their existing paths with
-# runtime.binds. This carries only the base SimpleLoop runtime (bash/git/python
+# world.external_writable/read-only mounts. This carries only the base
+# SimpleLoop runtime (bash/git/python
 # + claude/node for the agent roles, no C++ toolchain). If your task compiles
 # C/C++ or drives the JUNO offline stack (junosw/SNiPER), use the shared
 # examples/junosw-apptainer.def instead — it adds gcc/cmake plus the freetype /

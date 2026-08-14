@@ -11,7 +11,7 @@ from ..candidate import (
     ExecutionResult,
     GateDecision,
 )
-from ..harness.handoff import write_handoff
+from .handoff import write_handoff
 
 
 class HandoffCandidateTrace:

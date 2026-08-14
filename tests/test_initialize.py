@@ -168,7 +168,7 @@ def test_prepare_git_rejects_missing_baseline_in_existing_repo(
 
     source = _committed_repo(tmp_path / "source")
 
-    with pytest.raises(InitError, match="baseline_ref.*missing"):
+    with pytest.raises(InitError, match="source.baseline.*missing"):
         prepare_git(source, "missing")
 
 
@@ -318,7 +318,7 @@ def test_initialize_reports_missing_definition(
 
     with pytest.raises(
         initialize_mod.InitError,
-        match="runtime.definition.*runtime.def",
+        match="world.definition.*runtime.def",
     ):
         initialize_mod.initialize(task_path)
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from ..world.apptainer import BLOCKED_LAUNCHER_PREFIXES
+from .apptainer import BLOCKED_LAUNCHER_PREFIXES
 
 
 class ImageBuildError(RuntimeError):

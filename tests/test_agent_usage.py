@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from simpleloop.roles.agent import Agent, _decode_output
+from simpleloop.stages.agent import Agent, _decode_output
 from simpleloop.world import ProcessResult
 
 

@@ -33,10 +33,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from simpleloop import config as config_mod
-from simpleloop.container.runtime import ApptainerRuntime, RuntimePreflightError, world_mount_map
-from simpleloop.harness import memory
-from simpleloop.harness import views
-from simpleloop.harness.workspace import Workspace, WorkspaceError
+from proposer.runtime import (
+    ApptainerRuntime,
+    RuntimePreflightError,
+    world_mount_map,
+)
+from simpleloop.persistence import history
+from simpleloop.stages.gate import gate_block
+from simpleloop.world import WorkspaceError
+from simpleloop.world.git import GitWorkspaceProvider
 from proposer.memory import MemoryService
 from proposer.memory.models import (
     ExistingFindingTarget,
@@ -83,7 +88,7 @@ def _history_state(history_dir: Path, baseline_sha: str) -> tuple[str, int]:
 
     base_sha advances to the last selected candidate's sha; round is one past
     the last recorded round. With no history, falls back to baseline_sha / 0."""
-    rows = memory.read_history(Path(history_dir) / "history.jsonl")
+    rows = history.read_history(Path(history_dir) / "history.jsonl")
     base_sha = baseline_sha
     for row in rows:
         if row.get("selected_sha"):
@@ -232,7 +237,7 @@ def run_proposer(
         "history_source": str(history_dir) if from_run is not None else None,
     }
     workspace = None
-    worktree_created = False
+    lane = None
     proposal_result = None
     caught: Exception | None = None
     cleanup_error: Exception | None = None
@@ -243,12 +248,13 @@ def run_proposer(
         researcher = (cfg.get("roles") or {}).get("researcher")
         if researcher is None:
             raise ProposerHarnessError(
-                "roles.researcher is required for standalone proposer"
+                "proposer is required for standalone proposer"
             )
         runtime = ApptainerRuntime(
             image=cfg["runtime_image"],
             binds=cfg["runtime_binds"],
             run_dir=output_dir,
+            userns=bool(cfg.get("sandbox_userns", True)),
         )
         runtime.preflight()
         workspace_repo = (
@@ -260,11 +266,10 @@ def run_proposer(
             raise ProposerHarnessError(
                 f"proposer source repository does not exist: {workspace_repo}"
             )
-        workspace = Workspace(
+        workspace = GitWorkspaceProvider(
             run_dir=output_dir,
             repo_path=str(workspace_repo),
             baseline_ref=cfg["baseline_ref"],
-            editable=list(cfg["editable_paths"]),
         )
         if from_run is not None:
             # Reuse the history run's already-cloned repo; just stage a fresh
@@ -272,7 +277,7 @@ def run_proposer(
             workspace.repo = workspace_repo
             workspace.wt_root = output_dir / "worktrees"
         else:
-            workspace.setup()
+            workspace.initialize()
         baseline_sha = workspace.baseline_sha()
         base_sha, current_round = _history_state(history_dir, baseline_sha)
         input_record.update({
@@ -282,12 +287,12 @@ def run_proposer(
             "simpleloop_revision": _simpleloop_revision(),
             "goal": cfg["goal"],
             "editable_paths": list(cfg["editable_paths"]),
-            "gate_block": views.gate_block(cfg.get("metrics")),
+            "gate_block": gate_block(cfg.get("metrics")),
             "candidates_per_round": cfg["candidates_per_round"],
             "scientist_steps": cfg["scientist_steps"],
         })
-        source_path = workspace.add_worktree("proposer-test", base_sha)
-        worktree_created = True
+        lane = workspace.create_lane("proposer-test", base_sha)
+        source_path = lane.path
         memory_service = MemoryService(
             run_dir=history_dir,
             metrics_schema=cfg["metrics"],
@@ -325,9 +330,9 @@ def run_proposer(
     except Exception as exc:
         caught = exc
     finally:
-        if workspace is not None and worktree_created:
+        if workspace is not None and lane is not None:
             try:
-                workspace.remove_worktree("proposer-test")
+                workspace.remove_lane(lane)
             except Exception as exc:
                 cleanup_error = exc
 

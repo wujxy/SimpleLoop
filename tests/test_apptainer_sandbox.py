@@ -12,14 +12,15 @@ from simpleloop.world.apptainer import (
     evaluator_environment,
     executor_environment,
 )
+from proposer.runtime import ApptainerRuntime
 
 
-def _bound(tmp_path, *, network=True, environment=None):
+def _bound(tmp_path, *, network=True, environment=None, userns=True):
     image = tmp_path / "runtime.sif"
     image.write_bytes(b"sif")
     repo = tmp_path / "repo"
-    repo.mkdir()
-    return ApptainerSandbox(executable="apptainer").bind(
+    repo.mkdir(exist_ok=True)
+    return ApptainerSandbox(executable="apptainer", userns=userns).bind(
         SandboxSpec(image, environment or {}, network),
         (MountSpec(repo, PurePosixPath("/work"), MountMode.READ_ONLY),),
     )
@@ -52,6 +53,21 @@ def test_network_none_is_explicit_and_environment_is_clean(tmp_path):
         "APPTAINERENV_TOKEN": "secret"
     }
     assert "secret" not in "\n".join(sandbox.summary_lines())
+
+
+def test_user_namespace_is_an_explicit_provider_choice(tmp_path):
+    request = ProcessRequest(("true",), PurePosixPath("/work"), 10)
+
+    assert "--userns" in _bound(tmp_path).argv(request)
+    assert "--userns" not in _bound(tmp_path, userns=False).argv(request)
+
+
+def test_proposer_uses_the_same_explicit_user_namespace_choice(tmp_path):
+    runtime = ApptainerRuntime(
+        tmp_path / "runtime.sif", (), tmp_path, userns=False,
+    )
+
+    assert "--userns" not in runtime.exec_argv(("true",), cwd=tmp_path)
 
 
 def test_role_environments_keep_credentials_out_of_evaluator():

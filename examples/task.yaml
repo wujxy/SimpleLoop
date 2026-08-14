@@ -1,88 +1,45 @@
-kind: task
-
-# ============================================================================
-#  SimpleLoop task.yaml — reference template
-#  ============================================================================
-#  Copy this file, fill in the required task / safety / loop / runtime / source
-#  blocks plus `roles` (researcher + executor), and point `--config` at it.
-#  `simpleloop validate --config <file>`
-#  checks the schema before you run. Build runtime.image before validating.
-#
-#  Paths in `source.path` are resolved RELATIVE TO THIS FILE, not cwd.
-#  `source.path` must point at a real git repo (has a .git/).
-#
-#  Full schema + validation lives in simpleloop/config.py. Strict: unknown
-#  top-level keys are errors so a misspelled knob fails at validate, not
-#  silently mid-run. Concrete filled-in examples live in the three folders:
-#    tiny_algo_opt/            — self-contained toy target (Python)
-#    omilrec-opt/              — OMILRECV2 FCN optimization (v1.0.0 + v1.11.0)
-#    omilrec-post-v107-opt/    — OMILRECV2 from v1.0.0, post-v1.0.7-gated
-# ============================================================================
-
-task:
-  goal: >
-    One sentence: what to optimize, where it lives, and the correctness
-    constraint. E.g. "Optimize the speed of <algo> under src/. Lower
-    <metric> while keeping <gate> passing. Edit only the admitted source
-    files." The proposer reads this verbatim — be specific about the hot
-    code and the arithmetic constraint.
-
-safety:
-  # The writable world: the source dir either lane MAY change + the build-output
-  # dir the eval writes. Everything else (tests, scripts, CMakeLists, docs, ...)
-  # is mounted read-only AUTOMATICALLY — visible and runnable; edits outside
-  # this set fail with EROFS. The mount IS the ro/rw boundary.
-  editable_paths:
-    - src
-    - build
-
+schema: simpleloop.v1
+goal: >
+  State what to optimize, where it lives, and the correctness constraint. The
+  proposer reads this verbatim, so name the hot code, objective, and gates.
 loop:
-  max_rounds: 10                 # required, positive int
-  # candidates_per_round: 1       # optional, default 1 — fanout per round
-  # max_workers: 1                # optional, default 1 — candidate concurrency
-  # gen_steps: 216                # optional, default 216 — generator step budget per lane
-  # cognitive_steps: 148          # optional, default 148 — cognitive element step budget per lane
-  # agent_timeout_seconds: 3600   # optional, default 3600 — per agent turn budget
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: apptainer.sif
-  binds: []
-
-eval:
-  # commands (required non-empty): run by the harness after each commit, in the
-  # round worktree, before it is removed. Each command should print `KEY=value`
-  # lines for the metrics block below to parse.
-  commands:
-    - "python -m pytest -q tests/"
-  metrics:
-    # metrics (required): the harness owns and parses these numbers.
-    # objective: the key=value line to optimize, and its direction (not
-    # guessable).
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    # gates (optional): pass/fail keys that veto a round regardless of score.
-    # `description` (optional, recommended): one sentence on WHAT the gate
-    # measures and WHAT change makes it fail. The proposer/executor read it
-    # verbatim to judge which optimizations are safe.
-    gates:
-      - key: CORRECTNESS
-        description: >
-          WHAT this gate measures and WHAT change makes it fail (the proposer and
-          executor read this to decide which optimizations are safe).
-
+  max_rounds: 10
+  candidates_per_round: 1
+  max_parallel_candidates: 1
 source:
-  path: ../../path/to/your/repo  # relative to THIS file; must be a git repo
-  baseline_ref: HEAD             # optional, default HEAD
+  repo: ../../path/to/your/repo
+  baseline: HEAD
+world:
+  image: apptainer.sif
+  writable:
+  - src
+  - build
+evaluation:
+  commands:
+  - python -m pytest -q tests/
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: CORRECTNESS
+    description: >
+      Explain what this gate measures and what kind of change makes it fail.
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false

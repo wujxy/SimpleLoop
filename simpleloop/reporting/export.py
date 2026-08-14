@@ -21,9 +21,8 @@ import subprocess
 from pathlib import Path
 
 from .. import config as config_mod
-from ..reporting import telemetry as telemetry_mod
-from . import memory as memory_mod
-from .store import best_candidate
+from . import telemetry as telemetry_mod
+from ..persistence.history import best_candidate, read_history
 
 
 class ExportError(RuntimeError):
@@ -79,7 +78,7 @@ def export_run(run_dir: str | Path, what: str = "best",
     if not (repo / ".git").exists():
         raise ExportError(f"no per-run repo at {repo} — is this a run_dir?")
     cfg = config_mod.load_resolved(run_path)
-    history = memory_mod.read_history(run_path / "history.jsonl")
+    history = read_history(run_path / "history.jsonl")
     if not history:
         raise ExportError(
             f"no rounds recorded in {run_path / 'history.jsonl'} — nothing to export")

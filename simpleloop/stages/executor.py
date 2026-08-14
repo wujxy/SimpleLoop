@@ -9,7 +9,7 @@ from typing import Protocol
 
 from ..candidate import ExecutionResult
 from ..prompts import load_semantic
-from ..roles.agent import Agent, AgentError
+from .agent import Agent, AgentError
 from ..world import SourceWorkspace
 from .proposer import Proposal
 

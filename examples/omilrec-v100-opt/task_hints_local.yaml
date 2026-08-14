@@ -1,103 +1,91 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Understand how a JUNO event is reconstructed end to end and develop an account of what computational
+  structure produces the time required for that reconstruction. Minimize the time per event (SPEED_MS)
+  while satisfying the evaluation contract. Follow the reconstruction logic and evidence wherever they
+  lead. The current implementation is only a starting point, not the boundary of the solution: you may
+  redesign the implementation as warranted, including changes across files, classes, modules, data representations,
+  or algorithmic structure.
 
-task:
-  goal: >
-    Understand how a JUNO event is reconstructed end to end and develop an
-    account of what computational structure produces the time required for that
-    reconstruction. Minimize the time per event (SPEED_MS) while satisfying the
-    evaluation contract. Follow the reconstruction logic and evidence wherever
-    they lead. The current implementation is only a starting point, not the
-    boundary of the solution: you may redesign the implementation as warranted,
-    including changes across files, classes, modules, data representations, or
-    algorithmic structure.
-
-safety:
-  # The executor's writable world: these worktree-relative paths are mounted
-  # read-write into the executor container. Source + build config + build-output
-  # dirs (build/InstallArea/TEMP are gitignored). CMakeLists is writable — the
-  # executor may need to adjust build config for an optimization, and the eval
-  # gates catch any correctness regression. Everything NOT listed (tests/,
-  # baseline/, scripts/, docs/) is absent from the executor container: it can
-  # neither see nor edit the eval assets, so no after-the-fact path gate.
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
 loop:
   max_rounds: 100
   candidates_per_round: 4
-  max_workers: 4
+  max_parallel_candidates: 4
   agent_timeout_seconds: 7200
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5.2
-    base_url: https://aiapi.ihep.ac.cn/apiv2/anthropic
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
-  read_only_binds:
-    - /cvmfs
-    - /data/juno
-
-eval:
-  commands:
-    - "bash scripts/sl_eval_v100.sh --evtmax 100"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: CONTRACT
-        description: >
-          Checks that the external evaluation contract remains intact: protected
-          evaluator assets, reference data, thresholds, and checks are unchanged,
-          and evaluation continues to reflect the intended production behavior.
-      - key: FCN
-        description: >
-          Checks numerical equivalence on 16 frozen likelihood probe cases.
-          The resulting production reconstruction is expected to return 16 finite,
-          distinct values within 1e-13 relative error of the v1.0.0 references,
-          independent of how the internal implementation is organized.
-      - key: CONSISTENCY
-        description: >
-          Checks reconstruction-level consistency on 18 frozen events. Final
-          reconstructed outputs are compared with the v1.0.0 references using
-          tolerances of 4 mm in position, 7 keV in energy, 10 ps in t0,
-          and 0.1 PE in peSum.
-      - key: EVAL_RESULT
-        description: >
-          Checks that the resulting artifact can be built and exercised by the
-          complete external evaluator and that all expected evaluation metrics
-          are produced successfully.
-      - key: SINGLE_THREADED
-        description: >
-          Checks that the benchmark ran single-threaded (Sniper NTHREADS=1 and
-          OMP/MKL/ROOT pinned to 1). Speedups must come from algorithm or code
-          improvements, not from parallelism — multi-threading the reconstruction
-          would reduce SPEED_MS without a real improvement.
-
 source:
-  path: ../../../omilrec-v100-gated
-  baseline_ref: simpleloop-v100-gated-baseline
+  repo: ../../../omilrec-v100-gated
+  baseline: simpleloop-v100-gated-baseline
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /data/juno
+  - /datafs/users/wujxy/agent-sci/omilrec_opt
+  external_readonly:
+  - /cvmfs
+  - /data/juno
+evaluation:
+  commands:
+  - bash scripts/sl_eval_v100.sh --evtmax 100
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: CONTRACT
+    description: 'Checks that the external evaluation contract remains intact: protected evaluator assets,
+      reference data, thresholds, and checks are unchanged, and evaluation continues to reflect the intended
+      production behavior.
 
-execution:
-  backend: local
+      '
+  - key: FCN
+    description: 'Checks numerical equivalence on 16 frozen likelihood probe cases. The resulting production
+      reconstruction is expected to return 16 finite, distinct values within 1e-13 relative error of the
+      v1.0.0 references, independent of how the internal implementation is organized.
+
+      '
+  - key: CONSISTENCY
+    description: 'Checks reconstruction-level consistency on 18 frozen events. Final reconstructed outputs
+      are compared with the v1.0.0 references using tolerances of 4 mm in position, 7 keV in energy, 10
+      ps in t0, and 0.1 PE in peSum.
+
+      '
+  - key: EVAL_RESULT
+    description: 'Checks that the resulting artifact can be built and exercised by the complete external
+      evaluator and that all expected evaluation metrics are produced successfully.
+
+      '
+  - key: SINGLE_THREADED
+    description: 'Checks that the benchmark ran single-threaded (Sniper NTHREADS=1 and OMP/MKL/ROOT pinned
+      to 1). Speedups must come from algorithm or code improvements, not from parallelism — multi-threading
+      the reconstruction would reduce SPEED_MS without a real improvement.
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5.2
+  base_url: https://aiapi.ihep.ac.cn/apiv2/anthropic
+rsi:
+  enabled: false

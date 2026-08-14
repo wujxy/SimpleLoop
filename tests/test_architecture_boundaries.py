@@ -160,7 +160,7 @@ def test_condor_commands_are_owned_only_by_config_and_scheduler():
         ))
     }
     assert owners <= {
-        "simpleloop/config.py", "simpleloop/scheduling/hepjob.py",
+        "simpleloop/_config_runtime.py", "simpleloop/scheduling/hepjob.py",
     }
 
 
@@ -176,7 +176,7 @@ def test_standalone_proposer_does_not_import_simpleloop():
 def test_business_modules_depend_only_on_world_contracts():
     for relative in (
         "simpleloop/candidate.py",
-        "simpleloop/roles/agent.py",
+        "simpleloop/stages/agent.py",
         "simpleloop/stages/artifacts.py",
         "simpleloop/stages/executor.py",
         "simpleloop/stages/evaluator.py",
@@ -190,6 +190,32 @@ def test_business_modules_depend_only_on_world_contracts():
 def test_old_world_owners_are_removed():
     assert not (ROOT / "simpleloop/container/runtime.py").exists()
     assert not (ROOT / "simpleloop/harness/workspace.py").exists()
+
+
+def test_phase7_transition_packages_are_removed():
+    for package in ("container", "harness", "roles"):
+        assert not (ROOT / "simpleloop" / package).exists(), package
+
+
+def test_phase7_production_has_no_transition_package_imports():
+    production = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "simpleloop").rglob("*.py")
+    )
+    for old_import in (".harness", ".roles", ".container"):
+        assert old_import not in production
+
+
+def test_phase7_removes_dead_executor_smoke_for_deleted_apis():
+    assert not (ROOT / "scripts/executor_smoke.py").exists()
+    scripts = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (ROOT / "scripts").glob("*.py")
+    )
+    for old_package in (
+        "simpleloop.harness", "simpleloop.roles", "simpleloop.container",
+    ):
+        assert old_package not in scripts
 
 
 def test_proposer_package_remains_independent_of_simpleloop_world():

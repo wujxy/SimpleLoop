@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from simpleloop.harness import views
-from simpleloop.harness import store as store_mod
-from simpleloop.harness.store import Store
+from simpleloop.stages import gate as views
+from simpleloop.persistence import history as store_mod
+from simpleloop.persistence.history import Store
 from round_helpers import append_round
 
 

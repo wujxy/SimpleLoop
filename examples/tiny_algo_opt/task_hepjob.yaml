@@ -1,66 +1,42 @@
-kind: task
-
-task:
-  goal: >
-    Optimize the tinyalgo pair-counting implementation in tinyalgo/__init__.py for
-    speed (lower ms_per_call) while keeping results exactly correct: the pytest
-    suite and scripts/check_drift.py must still pass. Edit only tinyalgo source.
-
-safety:
-  # The writable world: the tinyalgo source dir. Everything else (tests,
-  # scripts, benchmarks, docs) is mounted read-only AUTOMATICALLY — visible
-  # and runnable; edits outside this set fail with EROFS.
-  editable_paths:
-    - tinyalgo
-
+schema: simpleloop.v1
+goal: >
+  Optimize the tinyalgo pair-counting implementation in tinyalgo/__init__.py
+  for speed (lower ms_per_call) while keeping results exactly correct: the
+  pytest suite and scripts/check_drift.py must still pass. Edit only tinyalgo.
 loop:
   max_rounds: 3
   candidates_per_round: 3
-  max_workers: 3
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: apptainer.sif
-  binds: []
-
-eval:
-  commands:
-    - "PYTHONPATH=. python -m pytest tests/ -q && echo CORRECTNESS=PASS || echo CORRECTNESS=FAIL"
-    - "PYTHONPATH=. python scripts/check_drift.py && echo DRIFT=PASS || echo DRIFT=FAIL"
-    - "PYTHONPATH=. python scripts/bench.py"
-  metrics:
-    objective:
-      key: ms_per_call
-      lower_is_better: true
-    gates:
-      - key: CORRECTNESS
-        description: >
-          The pytest suite passes. Pair counts must be exactly correct — a change
-          that alters any computed count fails.
-      - key: DRIFT
-        description: >
-          Per-call output bit-identical to a frozen reference (scripts/check_drift.py).
-          Any change to op order, accumulation, or control flow that shifts the
-          result fails.
-
+  max_parallel_candidates: 3
 source:
-  path: repo
-  baseline_ref: HEAD
-
-execution:
-  backend: hepjob
-  hepjob:
+  repo: repo
+  baseline: HEAD
+world:
+  image: apptainer.sif
+  writable:
+  - tinyalgo
+evaluation:
+  commands:
+  - PYTHONPATH=. python -m pytest tests/ -q && echo CORRECTNESS=PASS || echo CORRECTNESS=FAIL
+  - PYTHONPATH=. python scripts/check_drift.py && echo DRIFT=PASS || echo DRIFT=FAIL
+  - PYTHONPATH=. python scripts/bench.py
+  objective:
+    key: ms_per_call
+    direction: minimize
+  gates:
+  - key: CORRECTNESS
+    description: >
+      The pytest suite passes. Pair counts must be exactly correct; a change
+      that alters any computed count fails.
+  - key: DRIFT
+    description: >
+      Per-call output is identical to the frozen reference. Any change to
+      operation order, accumulation, or control flow that shifts it fails.
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: hepjob
     schedd_name: scheduler@schedd11.ihep.ac.cn
     collector: cm01.ihep.ac.cn
     accounting_group: JUNO.juno.default
@@ -69,3 +45,16 @@ execution:
     poll_seconds: 15
     max_attempts: 2
     run_timeout_seconds: 1800
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false

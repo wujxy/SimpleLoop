@@ -1,72 +1,69 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Minimize reconstruction SPEED_MS while satisfying every configured gate. The current implementation
+  is the starting artifact, not a constraint on the form or scale of a valid solution.
 
-# Independent OMILRECV2 experiment: start from v1.0.0 source, gate with
-# post-v1.0.7 FCN fixture replay (tight 1e-13, arithmetic-preserving only) and
-# relaxed reconstruction physics tolerances (4mm/7keV/10ps/0.1PE).
-
-task:
-  goal: >
-    Minimize reconstruction SPEED_MS while satisfying every configured gate.
-    The current implementation is the starting artifact, not a constraint on
-    the form or scale of a valid solution.
-
-safety:
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
 loop:
   max_rounds: 20
   candidates_per_round: 3
-  max_workers: 3
-  agent_timeout_seconds: 4500   # per claude call budget; raised from default 3600
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
-
-eval:
-  commands:
-    - "bash scripts/sl_eval_post_v107.sh --evtmax 10"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: FCN
-        description: >
-          The production likelihood matches the v1.0.7-rev1 golden pack within
-          1e-13 relative drift.
-      - key: CONSISTENCY
-        description: >
-          Reconstructed vertex, energy, t0, and peSum stay within
-          4 mm, 7 keV, 10 ps, and 0.1 PE of v1.0.7-rev1.
-      - key: EVAL_RESULT
-        description: >
-          Eval script completed (fails on build/timeout/crash).
-
+  max_parallel_candidates: 3
+  agent_timeout_seconds: 4500
 source:
-  path: ../../../omilrec-v100-postv107-gated   # real git repo, freshly-prepared gated package
-  baseline_ref: postv107-gated-v100            # the prepared start commit
+  repo: ../../../omilrec-v100-postv107-gated
+  baseline: postv107-gated-v100
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /data/juno
+  - /datafs/users/wujxy/agent-sci/omilrec_opt
+evaluation:
+  commands:
+  - bash scripts/sl_eval_post_v107.sh --evtmax 10
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: FCN
+    description: 'The production likelihood matches the v1.0.7-rev1 golden pack within 1e-13 relative
+      drift.
+
+      '
+  - key: CONSISTENCY
+    description: 'Reconstructed vertex, energy, t0, and peSum stay within 4 mm, 7 keV, 10 ps, and 0.1
+      PE of v1.0.7-rev1.
+
+      '
+  - key: EVAL_RESULT
+    description: 'Eval script completed (fails on build/timeout/crash).
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false

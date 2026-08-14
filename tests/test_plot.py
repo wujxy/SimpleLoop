@@ -9,7 +9,7 @@ import pytest
 from simpleloop import app as loop_mod
 from simpleloop.reporting import plot as plot_mod
 from simpleloop.reporting.plot import build_series
-from simpleloop.harness.store import Store
+from simpleloop.persistence.history import Store
 from simpleloop.reporting.telemetry import RunTelemetry
 from simpleloop.world import ProcessResult, SourceWorkspace
 from round_helpers import append_round
@@ -26,6 +26,9 @@ _EXECUTOR = {
 
 
 class _FakeSandbox:
+    def __init__(self, **_kwargs):
+        pass
+
     def preflight(self, _spec):
         pass
 

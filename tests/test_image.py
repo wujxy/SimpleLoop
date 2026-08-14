@@ -6,8 +6,8 @@ import subprocess
 import pytest
 
 from simpleloop import cli as cli_mod
-from simpleloop.container import image as image_mod
-from simpleloop.container.image import ImageBuildError, build_image, default_output
+from simpleloop.world import image as image_mod
+from simpleloop.world.image import ImageBuildError, build_image, default_output
 
 
 def _write_definition(tmp_path: Path) -> Path:

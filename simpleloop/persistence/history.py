@@ -1,18 +1,93 @@
-"""Append-only factual experiment history and objective selection."""
+"""Append-only factual history, selection, and episode queries."""
 from __future__ import annotations
 
 import json
 import math
 import os
+import re
 from pathlib import Path
 
-from . import memory as memory_mod
 from ..persistence.artifacts import encode_candidate_result
 from ..round import RoundResult
 
 
 class HistoryConflictError(RuntimeError):
     """One round id has two different terminal facts."""
+
+
+_EPISODE_REF_RE = re.compile(r"^r(0|[1-9]\d*)c(0|[1-9]\d*)$")
+
+
+def read_history(path: Path) -> list[dict]:
+    """Read append-only history JSONL, returning an empty list if absent."""
+    path = Path(path)
+    if not path.exists():
+        return []
+    try:
+        with path.open(encoding="utf-8") as stream:
+            rows = [json.loads(line) for line in stream if line.strip()]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read history memory {path}: {exc}") from exc
+    required_candidate = {"status", "gate_passed", "eligible"}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError(f"history memory {path} contains a non-object row")
+        candidates = row.get("candidates")
+        if not isinstance(candidates, list):
+            raise ValueError(
+                f"history memory {path} row is missing 'candidates' list"
+            )
+        for candidate in candidates:
+            if (
+                not isinstance(candidate, dict)
+                or not required_candidate <= candidate.keys()
+            ):
+                raise ValueError(
+                    f"history memory {path} does not use the current "
+                    "candidate schema"
+                )
+    return rows
+
+
+def resolve_episode(history: list[dict], ref: str) -> dict:
+    """Resolve one stable ``r<round>c<candidate>`` history reference."""
+    match = _EPISODE_REF_RE.fullmatch(str(ref).strip())
+    if match is None:
+        raise ValueError(
+            f"invalid memory reference {ref!r}; expected r<round>c<candidate>"
+        )
+    round_id, candidate_id = int(match.group(1)), int(match.group(2))
+    record = next(
+        (item for item in history if item.get("round") == round_id), None,
+    )
+    if record is None:
+        raise ValueError(f"memory reference not found: {ref}")
+    candidate = next((
+        item for item in (record.get("candidates") or [])
+        if item.get("candidate") == candidate_id
+    ), None)
+    if candidate is None:
+        raise ValueError(f"memory reference not found: {ref}")
+    experiment_id = str(
+        candidate.get("experiment_id") or f"r{round_id}c{candidate_id}"
+    )
+    return {
+        "ref": experiment_id,
+        "experiment_id": experiment_id,
+        "finding_id": candidate.get("finding_id"),
+        "proposal": candidate.get("proposal") or "",
+        "parent_sha": candidate.get("parent_sha") or record.get("parent_sha"),
+        "candidate_sha": candidate.get("sha"),
+        "status": candidate.get("status"),
+        "selected": bool(candidate.get("selected")),
+        "gate_passed": candidate.get("gate_passed"),
+        "eligible": candidate.get("eligible"),
+        "gates": candidate.get("gates") or {},
+        "metrics": candidate.get("metrics") or {},
+        "changed_paths": candidate.get("changed_paths") or [],
+        "eval_block": candidate.get("eval_block") or "",
+    }
+
 
 def eligible(candidate: dict, metrics_schema: dict) -> bool:
     """Return whether a candidate may enter objective selection."""
@@ -67,7 +142,7 @@ class Store:
 
     def history(self) -> list[dict]:
         """Read all rounds back (for the proposer's prompt)."""
-        return memory_mod.read_history(self.path)
+        return read_history(self.path)
 
     def append_round(self, result: RoundResult) -> None:
         """Project one typed terminal round into the legacy JSONL format.

@@ -48,51 +48,47 @@ fixed proposal batch for controlled experiments.
 ## Minimal configuration
 
 ```yaml
-kind: task
-task:
-  goal: >
-    Minimize SPEED_MS while satisfying every configured gate. The current
-    implementation is the starting artifact, not a constraint on a solution.
-safety:
-  editable_paths: ["src/**", "CMakeLists.txt"]
-  read_only_paths: ["tests/**", "scripts/**", "references/**"]
+schema: simpleloop.v1
+goal: Minimize SPEED_MS while satisfying every configured gate.
 loop:
   max_rounds: 10
   candidates_per_round: 1
-  max_workers: 1
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-runtime:
+  max_parallel_candidates: 1
+source:
+  repo: /path/to/repo
+  baseline: HEAD
+world:
   image: /path/to/runtime.sif
-  binds: []
-eval:
+  writable: [src, CMakeLists.txt]
+evaluation:
   commands:
     - "python -m pytest -q tests/ && echo CORRECTNESS=PASS || echo CORRECTNESS=FAIL"
     - "python scripts/bench.py"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: CORRECTNESS
-        description: "The frozen correctness suite passes."
-source:
-  path: /path/to/repo
-  baseline_ref: HEAD
+  objective: {key: SPEED_MS, direction: minimize}
+  gates:
+    - key: CORRECTNESS
+      description: The frozen correctness suite passes.
+providers:
+  sandbox: {kind: apptainer, userns: true}
+  scheduler: {kind: local}  # or kind: hepjob plus HTCondor settings
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false
 ```
 
 The Goal states the outcome, not a menu of implementation techniques.
-`editable_paths` defines the artifact surface the Researcher may redesign;
+`world.writable` defines the artifact surface the Researcher may redesign;
 tests, evaluators, references, and thresholds normally remain frozen.
+Legacy `kind: task` files remain readable for one transition release through
+`simpleloop/legacy_config.py`; new files should use `simpleloop.v1`.
 
 ## Scientific Proposer runtime
 
@@ -102,7 +98,8 @@ all compact Insights, and older factual episodes on demand. It may propose a
 small edit, broad refactor, or replacement implementation, but it cannot modify
 a candidate, invoke the Executor, run the authoritative evaluation, or decide
 whether a claim is true. Research Bash is read-only, offline, time/output
-bounded, and uses temporary scratch space.
+bounded, and uses temporary scratch space. Agent/model traffic may use the
+network; filesystem authority still comes only from the prepared World.
 
 An Insight is one short Proposer-written hypothesis/index per completed round;
 it points back to factual candidate records and never overrides Harness facts.
@@ -140,6 +137,7 @@ that factual history and can inspect the repository and diffs itself.
 | `rsi/body.py` | run-local proposer revisions over Git workspaces |
 | `rsi/history.py` | authoritative self events and derived review view |
 | `stages/proposer.py` | typed proposer input/output boundary |
+| `stages/agent.py` | shell-free Claude process adapter over a prepared World |
 | `stages/executor.py` | one proposal → implementation result |
 | `candidate.py` | shared typed candidate pipeline and result assembly |
 | `scheduling/jobs.py` | domain-neutral worker job construction and journal |
@@ -150,13 +148,14 @@ that factual history and can inspect the repository and diffs itself.
 | `scheduling/worker.py` | one worker-envelope dispatch entrypoint |
 | `scheduling/handlers/` | candidate and standalone proposer composition |
 | `stages/gate.py` | eval-command and configured gate normalization |
-| `stages/evaluator.py` | evaluator port, adapter, and baseline policy |
-| `harness/evals.py` | evaluator execution and `KEY=VALUE` metric parsing |
-| `harness/store.py` | factual JSONL history and objective selection |
+| `stages/evaluator.py` | evaluator execution, metric parsing, port, and baseline policy |
+| `persistence/history.py` | factual JSONL history, episode queries, and objective selection |
 | `world/contracts.py` | mechanism-neutral workspace, sandbox, and process values |
 | `world/git.py` | isolated Git workspaces and candidate commits |
 | `world/apptainer.py` | contained process execution and environment policy |
+| `world/image.py` | explicit Apptainer SIF construction |
 | `world/builder.py` | validated Executor/Evaluator filesystem worlds |
+| `reporting/export.py` | offline winning-commit handover |
 | `reporting/plot.py` | 2×3 factual progress overview |
 
 The live path is `app → loop → round/rsi → typed ports`. Local and HTCondor

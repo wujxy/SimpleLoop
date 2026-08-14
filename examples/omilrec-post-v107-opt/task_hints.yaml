@@ -1,110 +1,90 @@
-kind: task
-
-# Independent OMILRECV2 experiment: start from v1.0.0 source, gate with
-# post-v1.0.7 FCN fixture replay (tight 1e-13, arithmetic-preserving only) and
-# relaxed reconstruction physics tolerances (4mm/7keV/10ps/0.1PE).
-
-task:
-  goal: >
-    Optimize the speed of the v1.0.0 OMILRECV2 reconstruction algorithm under
-    OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the post-v1.0.7
-    FCN replay gate (1e-13 drift) and the end-to-end reconstruction within
-    4 mm vertex, 7 keV energy, 10 ps t0, and 0.1 PE peSum tolerances.
-
-    The two gates differ in strictness and must not be conflated:
-    - The FCN gate (omilrec_charge_ll.cc, omilrec_time_pdf.cc) is TIGHT: 1e-13
-      only absorbs compiler/libm reorderings that don't change accuracy. Any
-      change to the likelihood's float-op order/rounding — reassociation,
-      log<->log1p, pow<->cube, double<->float, reordering accumulation, or
-      precomputing "equivalent" normalization constants — drifts past 1e-13 and
-      fails. Minuit amplifies sub-ULP differences across the ~15k-term reduction.
-      SAFE FCN changes alter only fetch/layout, not what is computed: hoisting,
-      caching, SoA, index partitioning, precomputing loop-invariant magnitudes.
-    - The CONSISTENCY gate (omilrec_reconstruction.cc) is a PHYSICS tolerance
-      (4mm/7keV/10ps/0.1PE): float-op changes there are fine as long as the
-      reconstructed physics output stays within range.
-
-    Reference directions include loop-invariant hoisting, repeated-value caching, SoA data 
-    layout, precomputation, index partitioning, removal of demonstrably unused work, and other 
-    structural rather than arithmetic optimizations. These examples are not an exhaustive search space; 
-    new code-grounded directions may also be proposed.
-    Edit only the admitted source files.
-
-safety:
-  # The writable world: source under optimization + gitignored build-output
-  # dirs the eval writes. Everything else (tests, scripts, reference,
-  # CMakeLists, docs, ...) is mounted read-only AUTOMATICALLY — visible and
-  # runnable; edits outside this set fail with EROFS.
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+schema: simpleloop.v1
+goal: "Optimize the speed of the v1.0.0 OMILRECV2 reconstruction algorithm under OMILRECV2/src/. Lower\
+  \ OMILRECV2 ms/event while keeping the post-v1.0.7 FCN replay gate (1e-13 drift) and the end-to-end\
+  \ reconstruction within 4 mm vertex, 7 keV energy, 10 ps t0, and 0.1 PE peSum tolerances.\nThe two gates\
+  \ differ in strictness and must not be conflated: - The FCN gate (omilrec_charge_ll.cc, omilrec_time_pdf.cc)\
+  \ is TIGHT: 1e-13\n  only absorbs compiler/libm reorderings that don't change accuracy. Any\n  change\
+  \ to the likelihood's float-op order/rounding — reassociation,\n  log<->log1p, pow<->cube, double<->float,\
+  \ reordering accumulation, or\n  precomputing \"equivalent\" normalization constants — drifts past 1e-13\
+  \ and\n  fails. Minuit amplifies sub-ULP differences across the ~15k-term reduction.\n  SAFE FCN changes\
+  \ alter only fetch/layout, not what is computed: hoisting,\n  caching, SoA, index partitioning, precomputing\
+  \ loop-invariant magnitudes.\n- The CONSISTENCY gate (omilrec_reconstruction.cc) is a PHYSICS tolerance\n\
+  \  (4mm/7keV/10ps/0.1PE): float-op changes there are fine as long as the\n  reconstructed physics output\
+  \ stays within range.\n\nReference directions include loop-invariant hoisting, repeated-value caching,\
+  \ SoA data  layout, precomputation, index partitioning, removal of demonstrably unused work, and other\
+  \  structural rather than arithmetic optimizations. These examples are not an exhaustive search space;\
+  \  new code-grounded directions may also be proposed. Edit only the admitted source files.\n"
 loop:
   max_rounds: 60
   candidates_per_round: 3
-  max_workers: 3
+  max_parallel_candidates: 3
   agent_timeout_seconds: 4500
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
-
-eval:
-  commands:
-    - "bash scripts/sl_eval_post_v107.sh --evtmax 10"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: FCN
-        description: >
-          The likelihood value Minuit minimizes, replayed against the v1.0.7-rev1
-          golden pack at 1e-13 relative drift. This tolerance is narrow by design:
-          it only absorbs compiler/libm reorderings that do NOT change accuracy
-          (FMA contraction, instruction scheduling). Any change to the reduction's
-          float-op order/rounding shifts the result and fails it, because Minuit
-          amplifies sub-ULP differences across the ~15k charge-term accumulation.
-          Therefore FORBIDDEN in the FCN path (omilrec_charge_ll.cc,
-          omilrec_time_pdf.cc): reassociation of sums, log<->log1p, pow<->x*x*x,
-          sqrt<->1/sqrt+mul, double<->float casts, reordering of accumulation,
-          and precomputing "equivalent" normalization constants (e.g. folding
-          1/(sigma*sqrt(2*pi)) out of TMath::Gaus) — these look structural but
-          change the reduction order and drift past 1e-13. SAFE in the FCN path
-          are changes that alter only fetch/layout, not what is computed: hoisting
-          loop-invariant work, caching repeated values, SoA data layout, index
-          partitioning, precomputing loop-invariant magnitudes.
-      - key: CONSISTENCY
-        description: >
-          Reconstructed physics (vertex/energy/t0/peSum) within 4mm/7keV/10ps/0.1PE
-          of v1.0.7-rev1. Allows float op changes as long as physics output stays
-          within range. The reconstruction code lives in OMILRECV2/src/omilrec_reconstruction.cc.
-      - key: EVAL_RESULT
-        description: >
-          Eval script completed (fails on build/timeout/crash).
-
 source:
-  path: ../../../omilrec-v100-postv107-gated   # real git repo, freshly-prepared gated package
-  baseline_ref: postv107-gated-v100            # the prepared start commit
+  repo: ../../../omilrec-v100-postv107-gated
+  baseline: postv107-gated-v100
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /data/juno
+  - /datafs/users/wujxy/agent-sci/omilrec_opt
+evaluation:
+  commands:
+  - bash scripts/sl_eval_post_v107.sh --evtmax 10
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: FCN
+    description: 'The likelihood value Minuit minimizes, replayed against the v1.0.7-rev1 golden pack
+      at 1e-13 relative drift. This tolerance is narrow by design: it only absorbs compiler/libm reorderings
+      that do NOT change accuracy (FMA contraction, instruction scheduling). Any change to the reduction''s
+      float-op order/rounding shifts the result and fails it, because Minuit amplifies sub-ULP differences
+      across the ~15k charge-term accumulation. Therefore FORBIDDEN in the FCN path (omilrec_charge_ll.cc,
+      omilrec_time_pdf.cc): reassociation of sums, log<->log1p, pow<->x*x*x, sqrt<->1/sqrt+mul, double<->float
+      casts, reordering of accumulation, and precomputing "equivalent" normalization constants (e.g. folding
+      1/(sigma*sqrt(2*pi)) out of TMath::Gaus) — these look structural but change the reduction order
+      and drift past 1e-13. SAFE in the FCN path are changes that alter only fetch/layout, not what is
+      computed: hoisting loop-invariant work, caching repeated values, SoA data layout, index partitioning,
+      precomputing loop-invariant magnitudes.
+
+      '
+  - key: CONSISTENCY
+    description: 'Reconstructed physics (vertex/energy/t0/peSum) within 4mm/7keV/10ps/0.1PE of v1.0.7-rev1.
+      Allows float op changes as long as physics output stays within range. The reconstruction code lives
+      in OMILRECV2/src/omilrec_reconstruction.cc.
+
+      '
+  - key: EVAL_RESULT
+    description: 'Eval script completed (fails on build/timeout/crash).
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false

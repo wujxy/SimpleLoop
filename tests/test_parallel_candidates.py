@@ -19,8 +19,8 @@ from simpleloop.candidate import (
     GateDecision,
 )
 from proposer.memory import MemoryService
-from simpleloop.roles.agent import Agent, AgentError, AgentResult
-from simpleloop.harness.store import Store, best_candidate
+from simpleloop.stages.agent import Agent, AgentError, AgentResult
+from simpleloop.persistence.history import Store, best_candidate
 from simpleloop.stages.proposer import Proposal, ProposalBatch, ProposerRequest, StaticProposer
 from simpleloop.stages.selector import select_candidate
 from simpleloop.world import ProcessResult, SourceWorkspace
@@ -131,10 +131,14 @@ def test_fanout_examples_declare_gate_descriptions_and_matched_workers(
     # Real conformance invariants (not example-specific pins): every gate
     # declares a description the harness renders, and parallel fanout runs as
     # many workers as candidates per round.
-    gates = raw["eval"]["metrics"]["gates"]
+    gates = raw["evaluation"]["gates"]
     assert gates and all("description" in g for g in gates)
     loop = raw["loop"]
-    assert loop["candidates_per_round"] == loop["max_workers"] >= 1
+    assert (
+        loop["candidates_per_round"]
+        == loop["max_parallel_candidates"]
+        >= 1
+    )
 
 
 @pytest.mark.parametrize("relative_path", [
@@ -146,7 +150,7 @@ def test_default_omilrec_tasks_define_outcomes_not_research_methods(
     relative_path: str,
 ):
     raw = _example_yaml(relative_path)
-    goal = raw["task"]["goal"].lower()
+    goal = raw["goal"].lower()
 
     assert "speed_ms" in goal
     assert "every configured gate" in goal
@@ -155,13 +159,13 @@ def test_default_omilrec_tasks_define_outcomes_not_research_methods(
         "second likelihood",
     ):
         assert prescribed not in goal
-    assert "OMILRECV2/src" in raw["safety"]["editable_paths"]
-    assert "OMILRECV2/CMakeLists.txt" in raw["safety"]["editable_paths"]
+    assert "OMILRECV2/src" in raw["world"]["writable"]
+    assert "OMILRECV2/CMakeLists.txt" in raw["world"]["writable"]
     # frozen_paths AND read_only_paths are both gone — the read-only world is
     # the whole worktree minus editable, enforced by the mount (ro base + :rw
     # overlay for editable), not by an explicit frozen list.
-    assert "frozen_paths" not in raw["safety"]
-    assert "read_only_paths" not in raw["safety"]
+    assert "frozen_paths" not in raw["world"]
+    assert "read_only_paths" not in raw["world"]
 
 
 def test_runtime_architecture_has_no_judger_module_or_packaged_prompt():

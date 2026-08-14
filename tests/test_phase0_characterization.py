@@ -15,7 +15,7 @@ from simpleloop.persistence.artifacts import (
     decode_candidate_result,
     encode_candidate_result,
 )
-from simpleloop.harness.store import Store
+from simpleloop.persistence.history import Store
 from simpleloop.persistence.journal import JobJournal
 from simpleloop.round import RoundResult
 from simpleloop.stages.gate import GateSpec

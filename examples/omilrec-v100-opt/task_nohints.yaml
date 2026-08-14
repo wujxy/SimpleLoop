@@ -1,97 +1,86 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Optimize the OMILREC v1.0.0 production reconstruction under OMILRECV2/src by minimizing probe-free
+  SPEED_MS. OMILREC v1.0.0 is the sole source of algorithm and numerical truth, and a candidate is usable
+  only when CONTRACT, FCN, CONSISTENCY, and EVAL_RESULT all pass. Inspect the production implementation
+  and independently identify new code-grounded optimization directions; no particular optimization recipe
+  is prescribed. Do not weaken, regenerate, bypass, or replace the evaluator, fixtures, references, thresholds,
+  or build wiring, and do not introduce a second likelihood implementation.
 
-task:
-  goal: >
-    Optimize the OMILREC v1.0.0 production reconstruction under OMILRECV2/src
-    by minimizing probe-free SPEED_MS. OMILREC v1.0.0 is the sole source of
-    algorithm and numerical truth, and a candidate is usable only when
-    CONTRACT, FCN, CONSISTENCY, and EVAL_RESULT all pass. Inspect the production
-    implementation and independently identify new code-grounded optimization
-    directions; no particular optimization recipe is prescribed. Do not
-    weaken, regenerate, bypass, or replace the evaluator, fixtures, references,
-    thresholds, or build wiring, and do not introduce a second likelihood
-    implementation.
-
-safety:
-  # The writable world: source under optimization + gitignored build-output
-  # dirs the eval writes. Everything else (tests, scripts, baseline,
-  # reference, CMakeLists, docs, ...) is mounted read-only AUTOMATICALLY —
-  # visible and runnable; edits outside this set fail with EROFS.
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
 loop:
   max_rounds: 20
   candidates_per_round: 3
-  max_workers: 3
+  max_parallel_candidates: 3
   agent_timeout_seconds: 4500
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
-
-eval:
-  commands:
-    - "bash scripts/sl_eval_v100.sh --evtmax 10"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: CONTRACT
-        description: >
-          Protects the measuring system itself: the FCN test must remain linked
-          directly to the production member, and the frozen numerical assets,
-          thresholds, and complete evaluator structure must remain intact.
-          Modifying, reducing, bypassing, or replacing any check, including
-          introducing a second likelihood implementation for testing, fails
-          this gate.
-      - key: FCN
-        description: >
-          Evaluates the real production OMILRECV2::Calculate_EVLikelihood at
-          QMLE, TMLE, QTMLE, and ENERGY for four fixed events. It requires
-          exactly 16 finite unique results, each with relative error strictly
-          below 1e-13 against frozen v1.0.0 truth. Reordering or reassociating
-          reductions, changing floating-point types or casts, replacing
-          mathematical expressions with nominally equivalent forms, or folding
-          constants can change rounding and fail this gate.
-      - key: CONSISTENCY
-        description: >
-          Requires all 18 reconstructed events to be finite and within the
-          v1.0.0 end-to-end limits: Euclidean 3D position <= 4 mm, energy
-          <= 7 keV, t0 <= 10 ps, and peSum <= 0.1 PE. Arithmetic and structural
-          changes are allowed only when every reconstructed result remains
-          within every limit.
-      - key: EVAL_RESULT
-        description: >
-          Requires the complete evaluator to finish successfully: the
-          probe-enabled build and tests, the probe-free production rebuild, and
-          the benchmark. A build or test failure, crash, timeout, missing metric,
-          or incomplete evaluator execution fails this gate.
-
 source:
-  path: ../../../omilrec-v100-gated
-  baseline_ref: simpleloop-v100-gated-baseline
+  repo: ../../../omilrec-v100-gated
+  baseline: simpleloop-v100-gated-baseline
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /data/juno
+  - /datafs/users/wujxy/agent-sci/omilrec_opt
+evaluation:
+  commands:
+  - bash scripts/sl_eval_v100.sh --evtmax 10
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: CONTRACT
+    description: 'Protects the measuring system itself: the FCN test must remain linked directly to the
+      production member, and the frozen numerical assets, thresholds, and complete evaluator structure
+      must remain intact. Modifying, reducing, bypassing, or replacing any check, including introducing
+      a second likelihood implementation for testing, fails this gate.
+
+      '
+  - key: FCN
+    description: 'Evaluates the real production OMILRECV2::Calculate_EVLikelihood at QMLE, TMLE, QTMLE,
+      and ENERGY for four fixed events. It requires exactly 16 finite unique results, each with relative
+      error strictly below 1e-13 against frozen v1.0.0 truth. Reordering or reassociating reductions,
+      changing floating-point types or casts, replacing mathematical expressions with nominally equivalent
+      forms, or folding constants can change rounding and fail this gate.
+
+      '
+  - key: CONSISTENCY
+    description: 'Requires all 18 reconstructed events to be finite and within the v1.0.0 end-to-end limits:
+      Euclidean 3D position <= 4 mm, energy <= 7 keV, t0 <= 10 ps, and peSum <= 0.1 PE. Arithmetic and
+      structural changes are allowed only when every reconstructed result remains within every limit.
+
+      '
+  - key: EVAL_RESULT
+    description: 'Requires the complete evaluator to finish successfully: the probe-enabled build and
+      tests, the probe-free production rebuild, and the benchmark. A build or test failure, crash, timeout,
+      missing metric, or incomplete evaluator execution fails this gate.
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false

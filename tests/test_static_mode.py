@@ -41,7 +41,7 @@ def test_static_mode_rejects_continue_combination(monkeypatch, tmp_path):
 
 
 def test_agent_mode_requires_researcher_before_context(monkeypatch, tmp_path):
-    with pytest.raises(app_mod.config_mod.ConfigError, match="researcher"):
+    with pytest.raises(app_mod.config_mod.ConfigError, match="proposer"):
         app_mod._run_locked(
             _config(tmp_path), tmp_path / "run", proposals=None,
             continue_run=False,

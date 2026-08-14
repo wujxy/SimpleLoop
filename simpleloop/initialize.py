@@ -7,7 +7,7 @@ import shutil
 import subprocess
 
 from . import config as config_mod
-from .container.image import ImageBuildError, build_image
+from .world.image import ImageBuildError, build_image
 from .world import (
     ApptainerSandbox,
     SandboxPreflightError,
@@ -79,7 +79,7 @@ def _verify_ref(repo: Path, baseline_ref: str) -> None:
     )
     if completed.returncode:
         raise InitError(
-            "source.baseline_ref does not resolve to a commit: "
+            "source.baseline does not resolve to a commit: "
             f"{baseline_ref}"
         )
 
@@ -89,7 +89,7 @@ def prepare_git(repo: str | Path, baseline_ref: str) -> str:
     path = Path(repo).expanduser().resolve()
     if not path.is_dir():
         raise InitError(
-            f"source.path does not exist or is not a directory: {path}"
+            f"source.repo does not exist or is not a directory: {path}"
         )
 
     if _is_repo_root(path) and _has_head(path):
@@ -118,9 +118,11 @@ def _preflight_image(cfg: dict) -> None:
     for bind in cfg.get("runtime_binds", ()):
         if not Path(bind).expanduser().is_dir():
             raise SandboxPreflightError(
-                f"runtime bind directory does not exist: {bind}"
+                f"world.external_writable directory does not exist: {bind}"
             )
-    ApptainerSandbox().preflight(SandboxSpec(
+    ApptainerSandbox(
+        userns=bool(cfg.get("sandbox_userns", True)),
+    ).preflight(SandboxSpec(
         Path(cfg["runtime_image"]), evaluator_environment(), True,
     ))
 
@@ -149,7 +151,7 @@ def initialize(
     else:
         if not definition.is_file():
             raise InitError(
-                "runtime.definition does not exist or is not a file: "
+                "world.definition does not exist or is not a file: "
                 f"{definition}"
             )
         try:

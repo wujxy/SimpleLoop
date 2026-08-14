@@ -1,87 +1,64 @@
-kind: task
+schema: simpleloop.v1
+goal: 'Optimize the speed of the OMILRECV2 reconstruction algorithm under OMILRECV2/src/. Lower OMILRECV2
+  ms/event while keeping the FCN numerical drift <= 1e-13 (test_fcn must stay 16/16 PASS) and the e2e
+  reconstruction within 4 mm / 7 keV. Edit only the admitted source files. The hot code is OMILRECV2/src/omilrec_fcn.cc
+  (Calculate_EVLikelihood, the Minuit objective) and OMILRECV2/src/omilrec_likelihood.cc (qmle_unfired_ll
+  / qmle_fired_ll / tmle_ll). Any arithmetic change inside the FCN is amplified by Minuit — a sub-ULP
+  difference can flip a degenerate event''s basin — so prefer bit- identical refactors (hoisting, caching,
+  index partitioning) over precision changes. See CLAUDE.md "FCN Idempotency" for the rules.
 
-# SimpleLoop task config for optimizing OMILRECV2 speed.
-#
-# Source repo: ../../omilrec  (a real git repo at baseline ff71809 / v1.11.0,
-#               fixtures de-LFS'd so `git clone --local` gets real binaries).
-# Eval runs in the round's worktree (the committed candidate) BEFORE the worktree
-# is removed, so the speed measurement reflects the candidate, not the baseline.
-#
-# The single eval command (scripts/sl_eval.sh) does the whole chain in one shot —
-# source JUNO env, build lib + test_fcn, run the FCN drift gate, run quick_bench —
-# because SimpleLoop gives each eval command a 600s budget and a fresh worktree
-# (no build artifacts). It prints FCN=/SPEED_MS=/EVAL_RESULT= lines for the harness.
-# Default --evtmax 10 fits the 600s budget; raise the SimpleLoop eval timeout or
-# use --evtmax 100 for a less noisy delta.
-
-task:
-  goal: >
-    Optimize the speed of the OMILRECV2 reconstruction algorithm under
-    OMILRECV2/src/. Lower OMILRECV2 ms/event while keeping the FCN numerical
-    drift <= 1e-13 (test_fcn must stay 16/16 PASS) and the e2e reconstruction
-    within 4 mm / 7 keV. Edit only the admitted source files. The hot code is
-    OMILRECV2/src/omilrec_fcn.cc (Calculate_EVLikelihood, the Minuit objective)
-    and OMILRECV2/src/omilrec_likelihood.cc (qmle_unfired_ll / qmle_fired_ll /
-    tmle_ll). Any arithmetic change inside the FCN is amplified by Minuit — a
-    sub-ULP difference can flip a degenerate event's basin — so prefer bit-
-    identical refactors (hoisting, caching, index partitioning) over precision
-    changes. See CLAUDE.md "FCN Idempotency" for the rules.
-
-safety:
-  # The writable world: the source under optimization + the build-output dirs
-  # the eval writes (build, TEMP — gitignored, so they never get committed).
-  # Everything else in the repo (tests, scripts, CMakeLists, docs, ...) is
-  # mounted read-only AUTOMATICALLY: the whole tree is visible and runnable,
-  # and edits outside this set fail with EROFS. The mount IS the ro/rw boundary.
-  editable_paths:
-    - OMILRECV2/src
-    - OMILRECV2/python
-    - CMakeLists.txt
-    - OMILRECV2/CMakeLists.txt
-    - build
-    - build-asan
-    - InstallArea
-    - TEMP
-
+  '
 loop:
   max_rounds: 4
-
-roles:
-  researcher:
-    api: hepai
-    model: gpt-5.5
-    base_url: https://aiapi.ihep.ac.cn/apiv2
-    command_timeout_seconds: 120
-    command_output_cap_chars: 12000
-  executor:
-    api: anthropic
-    model: glm-5
-    base_url: https://open.bigmodel.cn/api/anthropic
-
-runtime:
-  image: ../junosw-apptainer.sif
-  definition: ../junosw-apptainer.def
-  binds:
-    - /cvmfs
-    - /data/juno
-    - /datafs/users/wujxy/agent-sci/omilrec_opt
-
-eval:
-  commands:
-    # One self-contained command: env + build + FCN gate + speed bench.
-    # Prints FCN=, SPEED_MS=, EVAL_RESULT= for the harness.
-    - "bash scripts/sl_eval.sh --evtmax 10"
-  metrics:
-    objective:
-      key: SPEED_MS
-      lower_is_better: true
-    gates:
-      - key: FCN
-        description: >
-          FCN numerical drift gate: test_fcn replays the golden FCN values and
-          must stay 16/16 PASS (relative drift <= 1e-13). A FAIL vetoes the
-          round regardless of measured speed.
-
+  candidates_per_round: 1
+  max_parallel_candidates: 1
 source:
-  path: ../../../omilrec       # relative to this task.yaml; real git repo at v1.11.0
-  baseline_ref: main          # ff71809 (v1.11.0)
+  repo: ../../../omilrec
+  baseline: main
+world:
+  image: ../junosw-apptainer.sif
+  writable:
+  - OMILRECV2/src
+  - OMILRECV2/python
+  - CMakeLists.txt
+  - OMILRECV2/CMakeLists.txt
+  - build
+  - build-asan
+  - InstallArea
+  - TEMP
+  definition: ../junosw-apptainer.def
+  external_writable:
+  - /cvmfs
+  - /data/juno
+  - /datafs/users/wujxy/agent-sci/omilrec_opt
+evaluation:
+  commands:
+  - bash scripts/sl_eval.sh --evtmax 10
+  objective:
+    key: SPEED_MS
+    direction: minimize
+  gates:
+  - key: FCN
+    description: 'FCN numerical drift gate: test_fcn replays the golden FCN values and must stay 16/16
+      PASS (relative drift <= 1e-13). A FAIL vetoes the round regardless of measured speed.
+
+      '
+providers:
+  sandbox:
+    kind: apptainer
+    userns: true
+  scheduler:
+    kind: local
+proposer:
+  api: hepai
+  model: gpt-5.5
+  base_url: https://aiapi.ihep.ac.cn/apiv2
+  command_timeout_seconds: 120
+  command_output_cap_chars: 12000
+  max_steps: 200
+executor:
+  api: anthropic
+  model: glm-5
+  base_url: https://open.bigmodel.cn/api/anthropic
+rsi:
+  enabled: false
