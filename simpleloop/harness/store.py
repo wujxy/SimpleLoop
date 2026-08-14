@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 
 from . import memory as memory_mod
 from ..persistence.artifacts import encode_candidate_result
 from ..round import RoundResult
+
+
+class HistoryConflictError(RuntimeError):
+    """One round id has two different terminal facts."""
 
 def eligible(candidate: dict, metrics_schema: dict) -> bool:
     """Return whether a candidate may enter objective selection."""
@@ -112,8 +117,22 @@ class Store:
             record["deliberation_telemetry"] = dict(
                 result.proposals.telemetry
             )
+        existing = self.history()
+        same_round = [row for row in existing if row.get("round") == result.round_id]
+        if len(same_round) > 1:
+            raise HistoryConflictError(
+                f"history already contains duplicate round {result.round_id}"
+            )
+        if same_round:
+            if same_round[0] == record:
+                return
+            raise HistoryConflictError(
+                f"round {result.round_id} conflicts with persisted history"
+            )
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def _iter_candidates(rounds: list[dict]):

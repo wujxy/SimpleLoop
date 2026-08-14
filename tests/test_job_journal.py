@@ -36,3 +36,25 @@ def test_journal_rejects_unknown_schema(tmp_path):
 
     with pytest.raises(ProtocolError, match="schema"):
         JobJournal(path).load()
+
+
+def test_journal_transition_atomically_replaces_expected_stage(tmp_path):
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin("proposer", 2, {"proposal": "p"}, [])
+
+    record = journal.transition(
+        "proposer", "candidates", 2,
+        {"proposals": [{"instruction": "p"}]},
+        [{"request_id": "r2-c0"}],
+    )
+
+    assert record.stage == "candidates"
+    assert journal.load() == record
+
+
+def test_journal_transition_rejects_wrong_active_stage(tmp_path):
+    journal = JobJournal(tmp_path / "inflight.json")
+    journal.begin("viability", 2, {}, [])
+
+    with pytest.raises(ProtocolError, match="expected active stage"):
+        journal.transition("proposer", "candidates", 2, {}, [])

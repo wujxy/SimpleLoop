@@ -53,6 +53,34 @@ class JobJournal:
             tuple(dict(job) for job in jobs),
         ))
 
+    def transition(
+        self,
+        expected_stage: str,
+        stage: str,
+        round_id: int,
+        context: Mapping[str, object],
+        jobs: Sequence[Mapping[str, object]],
+    ) -> JournalRecord:
+        current = self.load()
+        if current is None:
+            raise ProtocolError(
+                f"expected active stage {expected_stage!r}, found none"
+            )
+        if current.stage != expected_stage or current.round_id != round_id:
+            raise ProtocolError(
+                f"expected active stage {expected_stage!r} for round "
+                f"{round_id}, found {current.stage!r} for round "
+                f"{current.round_id}"
+            )
+        record = JournalRecord(
+            round_id,
+            stage,
+            dict(context),
+            tuple(dict(job) for job in jobs),
+        )
+        self._write(record)
+        return record
+
     def load(self) -> JournalRecord | None:
         if not self.path.exists():
             return None
