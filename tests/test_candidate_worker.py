@@ -20,6 +20,7 @@ from simpleloop.candidate_worker import (
     write_result,
 )
 from simpleloop.stages.executor import parse_self_report
+from simpleloop.world import MountMode, SourceWorkspace
 
 
 _SCHEMA = {"objective": {"key": "SPEED_MS", "lower_is_better": True},
@@ -53,11 +54,20 @@ def test_build_deps_passes_external_read_only_binds_to_executor(tmp_path: Path):
         "repo_path": tmp_path / "repo",
         "baseline_ref": "HEAD",
     }
+    for path in (
+        tmp_path / "wt", tmp_path / "wt" / "src",
+        tmp_path / "evaluation-data", tmp_path / "executor-data",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    workspace = SourceWorkspace("3-c7", tmp_path / "wt", "abc123")
 
-    ports = worker_mod.build_ports(cfg, tmp_path / "run")
+    ports = worker_mod.build_ports(cfg, tmp_path / "run", workspace)
 
-    assert ports.executor.agent.mounts.external_ro == (
-        tmp_path / "executor-data",
+    mounts = ports.executor.agent.world.sandbox.mounts
+    assert any(
+        mount.source == tmp_path / "executor-data"
+        and mount.mode is MountMode.READ_ONLY
+        for mount in mounts
     )
 
 
@@ -102,7 +112,7 @@ def test_cli_writes_terminal_result(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         worker_mod,
         "build_ports",
-        lambda cfg, run_dir, usage_observer=None, prompt_dir=None: (
+        lambda cfg, run_dir, workspace, usage_observer=None, prompt_dir=None: (
             SimpleNamespace(
                 executor=object(), artifacts=object(), evaluator=object(),
                 gate_spec=object(), trace=object(), preflight=lambda: None,
@@ -143,7 +153,7 @@ def test_worker_delegates_business_to_shared_pipeline(
     monkeypatch.setattr(
         worker_mod,
         "build_ports",
-        lambda cfg, run_dir, usage_observer=None, prompt_dir=None: (
+        lambda cfg, run_dir, workspace, usage_observer=None, prompt_dir=None: (
             SimpleNamespace(
                 executor=object(), artifacts=object(), evaluator=object(),
                 gate_spec=object(), trace=object(), preflight=lambda: None,
@@ -173,7 +183,7 @@ def test_cli_catch_all_still_finishes(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         worker_mod,
         "build_ports",
-        lambda cfg, run_dir, usage_observer=None, prompt_dir=None: (
+        lambda cfg, run_dir, workspace, usage_observer=None, prompt_dir=None: (
             SimpleNamespace(
                 executor=object(), artifacts=object(), evaluator=object(),
                 gate_spec=None, trace=object(), preflight=lambda: None,

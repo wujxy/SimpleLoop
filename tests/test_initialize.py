@@ -9,7 +9,7 @@ import yaml
 from simpleloop import cli as cli_mod
 from simpleloop import config as config_mod
 from simpleloop import initialize as initialize_mod
-from simpleloop.container.runtime import RuntimePreflightError
+from simpleloop.world import SandboxPreflightError
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -232,7 +232,7 @@ def test_initialize_reports_bad_existing_image_without_force(
         initialize_mod,
         "_preflight_image",
         lambda cfg: (_ for _ in ()).throw(
-            RuntimePreflightError("bad image")
+                SandboxPreflightError("bad image")
         ),
     )
 

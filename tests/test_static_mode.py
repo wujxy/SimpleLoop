@@ -41,8 +41,6 @@ def _config(tmp_path, max_rounds=99):
 def test_static_mode_rejects_continue_combination(monkeypatch, tmp_path):
     monkeypatch.setattr(loop_mod.config_mod, "load",
                         lambda _path: _config(tmp_path))
-    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
-
     try:
         loop_mod.run("config.yaml", tmp_path / "run",
                      proposals=["p0"], continue_run=True)

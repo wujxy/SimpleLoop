@@ -5,11 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 
 from . import config as config_mod
 from .container.image import ImageBuildError, build_image
-from .container.runtime import ApptainerRuntime, RuntimePreflightError
+from .world import (
+    ApptainerSandbox,
+    SandboxPreflightError,
+    SandboxSpec,
+    evaluator_environment,
+)
 
 
 class InitError(RuntimeError):
@@ -111,13 +115,14 @@ def prepare_git(repo: str | Path, baseline_ref: str) -> str:
 
 
 def _preflight_image(cfg: dict) -> None:
-    with tempfile.TemporaryDirectory(prefix="simpleloop-init-") as run_dir:
-        runtime = ApptainerRuntime(
-            image=cfg["runtime_image"],
-            binds=cfg["runtime_binds"],
-            run_dir=run_dir,
-        )
-        runtime.preflight()
+    for bind in cfg.get("runtime_binds", ()):
+        if not Path(bind).expanduser().is_dir():
+            raise SandboxPreflightError(
+                f"runtime bind directory does not exist: {bind}"
+            )
+    ApptainerSandbox().preflight(SandboxSpec(
+        Path(cfg["runtime_image"]), evaluator_environment(), True,
+    ))
 
 
 def initialize(
@@ -135,7 +140,7 @@ def initialize(
     if image_existed and not force:
         try:
             _preflight_image(cfg)
-        except RuntimePreflightError as exc:
+        except SandboxPreflightError as exc:
             raise InitError(
                 f"configured Apptainer image is not usable: {exc}; "
                 "pass --force to rebuild it"
@@ -153,7 +158,7 @@ def initialize(
             raise InitError(str(exc)) from exc
         try:
             _preflight_image(cfg)
-        except RuntimePreflightError as exc:
+        except SandboxPreflightError as exc:
             raise InitError(
                 f"built Apptainer image failed preflight: {exc}"
             ) from exc

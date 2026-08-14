@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import os
+import pwd
 import signal
+import shutil
 import subprocess
+import tempfile
 import time
-from pathlib import Path
-from typing import Mapping
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 
 from .contracts import (
     MountSpec,
@@ -19,6 +22,43 @@ from .contracts import (
 
 _BLOCKED_PREFIXES = ("APPTAINER_", "APPTAINERENV_", "SINGULARITY_", "SINGULARITYENV_", "BASH_FUNC_")
 _BLOCKED_EXACT = frozenset({"which_declare"})
+_FORWARDED_ENV = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+    "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
+})
+
+
+class SandboxPreflightError(RuntimeError):
+    """The configured executable, image, mounts, or image tools are unusable."""
+
+
+def forwarded_payload_env(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    source = os.environ if environ is None else environ
+    return {key: source[key] for key in _FORWARDED_ENV if key in source}
+
+
+def executor_environment(
+    *, base_url: str | None, max_output_tokens: int,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    result = forwarded_payload_env(environ)
+    if base_url:
+        result["ANTHROPIC_BASE_URL"] = base_url
+    result["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
+    result["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+    return result
+
+
+def evaluator_environment(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    return {
+        key: value for key, value in forwarded_payload_env(environ).items()
+        if not key.startswith("ANTHROPIC_")
+    }
 
 
 class ApptainerSandbox:
@@ -32,6 +72,30 @@ class ApptainerSandbox:
     ) -> "_BoundApptainerSandbox":
         return _BoundApptainerSandbox(self.executable, spec, mounts)
 
+    def preflight(self, spec: SandboxSpec) -> None:
+        executable = shutil.which(self.executable)
+        if executable is None:
+            raise SandboxPreflightError("apptainer executable not found on host")
+        image = Path(spec.image).expanduser().resolve()
+        if not image.is_file() or not os.access(image, os.R_OK):
+            raise SandboxPreflightError(
+                f"runtime image is not a readable file: {image}"
+            )
+        sandbox = _BoundApptainerSandbox(executable, spec, ())
+        result = sandbox.run(ProcessRequest(
+            ("bash", "-c", "for t in bash git node claude; do command -v \"$t\" >/dev/null || exit 127; done"),
+            PurePosixPath("/"),
+            60,
+            label="preflight",
+        ))
+        if result.timed_out:
+            raise SandboxPreflightError("Apptainer preflight timed out after 60s")
+        if result.exit_code:
+            detail = (result.stderr or result.stdout).strip()[:4000]
+            raise SandboxPreflightError(
+                f"Apptainer preflight failed with exit {result.exit_code}: {detail}"
+            )
+
 
 class _BoundApptainerSandbox:
     def __init__(
@@ -44,7 +108,12 @@ class _BoundApptainerSandbox:
         self.spec = spec
         self.mounts = mounts
 
-    def argv(self, request: ProcessRequest) -> list[str]:
+    def argv(
+        self,
+        request: ProcessRequest,
+        *,
+        home: Path | None = None,
+    ) -> list[str]:
         argv = [
             self.executable,
             "exec",
@@ -56,6 +125,9 @@ class _BoundApptainerSandbox:
         argv.extend(["--containall", "--no-mount", "cwd,home,hostfs"])
         if not self.spec.network:
             argv.extend(["--net", "--network", "none"])
+        if home is not None:
+            account_home = pwd.getpwuid(os.getuid()).pw_dir
+            argv.extend(["--bind", f"{home}:{account_home}:rw"])
         for mount in self.mounts:
             argv.extend([
                 "--bind",
@@ -83,36 +155,37 @@ class _BoundApptainerSandbox:
         return result
 
     def run(self, request: ProcessRequest) -> ProcessResult:
-        argv = self.argv(request)
         started = time.monotonic()
-        try:
-            process = subprocess.Popen(
-                argv,
-                stdin=subprocess.PIPE if request.stdin is not None else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                shell=False,
-                start_new_session=True,
-                env=self.launcher_env(),
-            )
-        except OSError as exc:
-            raise SandboxLaunchError(
-                f"could not launch {self.executable}: {exc}"
-            ) from exc
-        timed_out = False
-        try:
-            stdout, stderr = process.communicate(
-                request.stdin,
-                timeout=request.timeout_seconds,
-            )
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        with tempfile.TemporaryDirectory(prefix="simpleloop-home-") as home:
+            argv = self.argv(request, home=Path(home))
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            stdout, stderr = process.communicate()
+                process = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.PIPE if request.stdin is not None else None,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    shell=False,
+                    start_new_session=True,
+                    env=self.launcher_env(),
+                )
+            except OSError as exc:
+                raise SandboxLaunchError(
+                    f"could not launch {self.executable}: {exc}"
+                ) from exc
+            timed_out = False
+            try:
+                stdout, stderr = process.communicate(
+                    request.stdin,
+                    timeout=request.timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
         return ProcessResult(
             request.argv,
             int(process.returncode),

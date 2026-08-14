@@ -13,7 +13,7 @@ from simpleloop.loop import RunContext, _finalize_candidates
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry, processed_tokens
 from simpleloop.stages.proposer import Proposal
-from simpleloop.world import SourceWorkspace
+from simpleloop.world import ProcessResult, SourceWorkspace
 from round_helpers import append_round
 
 
@@ -23,6 +23,44 @@ class Clock:
 
     def __call__(self) -> float:
         return self.now
+
+
+class _FakeSandbox:
+    def preflight(self, _spec):
+        pass
+
+
+class _FakeWorld:
+    def run(self, request):
+        return ProcessResult(request.argv, 0, "", "", 0.1)
+
+
+class _FakeWorldBuilder:
+    def __init__(self, _sandbox):
+        pass
+
+    def build(self, _workspace, _sandbox, _world):
+        return _FakeWorld()
+
+
+class _FakeWorkspaceProvider:
+    def __init__(self, run_dir, *_args, **_kwargs):
+        self.repo = Path(run_dir) / "repo"
+
+    def initialize(self):
+        self.repo.mkdir(parents=True, exist_ok=True)
+        return "baseline"
+
+    def baseline_sha(self):
+        return "baseline"
+
+    def create(self, spec):
+        path = self.repo.parent / "worktrees" / spec.workspace_id
+        path.mkdir(parents=True, exist_ok=True)
+        return SourceWorkspace(spec.workspace_id, path, spec.revision)
+
+    def remove(self, _workspace):
+        pass
 
 
 def test_processed_tokens_sums_claude_usage_fields():
@@ -267,9 +305,10 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
             return []
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
-    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
+    monkeypatch.setattr(loop_mod, "ApptainerSandbox", _FakeSandbox)
+    monkeypatch.setattr(loop_mod, "WorldBuilder", _FakeWorldBuilder)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
-    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(loop_mod, "GitWorkspaceProvider", _FakeWorkspaceProvider)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 
     loop_mod.run("config.yaml", run_dir)
@@ -277,16 +316,12 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
     # Only the executor agent is wired in-process now (S2a.5a): the proposer
     # runs as a subprocess, so its model usage arrives via usage.json and is
     # ingested by collect_lane_results, not an in-process observer.
-    assert len(observers) == 1
-    assert all(callable(observer) for observer in observers)
+    # Agents are now candidate-scoped and therefore not constructed in a
+    # zero-round run.
+    assert observers == []
     state = json.loads((run_dir / "telemetry.json").read_text())
     assert state["baseline_metrics"] == {"SPEED_MS": 100.0}
     assert state["baseline_telemetry"]["processed_tokens"] == 0
-
-    observers[0]({"input_tokens": 2, "output_tokens": 1})
-    updated = json.loads((run_dir / "telemetry.json").read_text())
-    assert updated["processed_tokens"] == 3
-
 
 # ---- store/candidate telemetry integration (merged from test_telemetry_integration.py) ----
 

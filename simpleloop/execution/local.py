@@ -40,6 +40,16 @@ from ..stages.evaluator import (
 from ..stages.executor import AgentExecutor, ExecutorConfig
 from ..stages.gate import GateSpec
 from ..stages.proposer import ProposalBatch, ProposerRequest
+from ..roles.agent import Agent
+from ..world import (
+    SandboxSpec,
+    SourceWorkspace,
+    WorkspaceSpec,
+    evaluator_environment,
+    evaluator_world_spec,
+    executor_environment,
+    executor_world_spec,
+)
 
 
 def stamp() -> str:
@@ -98,18 +108,18 @@ class LocalBackend(ExecutionBackend):
 
     def _run_plan(self, round_id, plan) -> CandidateResult:
         worktree_id = f"{round_id}-c{plan.candidate_id}"
-        worktree = None
+        workspace = None
         request = None
         try:
-            worktree = self.ctx.workspace.add_worktree(
-                worktree_id, plan.parent_sha,
+            workspace = self.ctx.workspace.create(
+                WorkspaceSpec(worktree_id, plan.parent_sha)
             )
             request = CandidateRequest(
                 round_id,
                 plan.candidate_id,
                 plan.parent_sha,
                 plan.proposal,
-                Path(worktree),
+                workspace,
             )
             return self._candidate_runner(request)
         except Exception as exc:
@@ -119,7 +129,7 @@ class LocalBackend(ExecutionBackend):
                     plan.candidate_id,
                     plan.parent_sha,
                     plan.proposal,
-                    Path(worktree) if worktree else Path("."),
+                    workspace or SourceWorkspace(worktree_id, Path("."), plan.parent_sha),
                 )
             print(
                 f"[{stamp()}] candidate r{round_id}-c{plan.candidate_id} "
@@ -132,8 +142,8 @@ class LocalBackend(ExecutionBackend):
                 gate_spec=self._candidate_gate_spec(),
             )
         finally:
-            if worktree is not None:
-                self.ctx.workspace.remove_worktree(worktree_id)
+            if workspace is not None:
+                self.ctx.workspace.remove(workspace)
 
     def _candidate_gate_spec(self) -> GateSpec:
         schema = self.ctx.cfg.get("metrics") or {}
@@ -150,10 +160,40 @@ class LocalBackend(ExecutionBackend):
     def _run_pipeline(self, request: CandidateRequest) -> CandidateResult:
         cfg = self.ctx.cfg
         gate_spec = self._candidate_gate_spec()
+        workspace = request.workspace
+        role = cfg["roles"]["executor"]
+        executor_world = self.ctx.world_builder.build(
+            workspace,
+            SandboxSpec(
+                Path(cfg["runtime_image"]),
+                executor_environment(
+                    base_url=role.get("base_url"),
+                    max_output_tokens=int(cfg.get("agent_max_output_tokens", 64000)),
+                ),
+                True,
+            ),
+            executor_world_spec(
+                cfg.get("editable_paths", ()), cfg.get("read_only_binds", ()),
+            ),
+        )
+        evaluator_world = self.ctx.world_builder.build(
+            workspace,
+            SandboxSpec(
+                Path(cfg["runtime_image"]), evaluator_environment(), True,
+            ),
+            evaluator_world_spec(cfg.get("runtime_binds", ())),
+        )
         return run_candidate_guarded(
             request,
             executor=AgentExecutor(
-                self.ctx.executor_agent,
+                Agent(
+                    world=executor_world, command="claude",
+                    timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
+                    allowed_tools="Read,Edit,Write,Bash",
+                    max_output_tokens=cfg.get("agent_max_output_tokens", 64000),
+                    model=role.get("model"), base_url=role.get("base_url"),
+                    usage_observer=self.ctx.telemetry.record_usage,
+                ),
                 ExecutorConfig(
                     str(cfg.get("goal") or ""),
                     gate_block=str(getattr(self.ctx, "gate_lines", "")),
@@ -162,7 +202,7 @@ class LocalBackend(ExecutionBackend):
             ),
             artifacts=GitArtifactWorkspace(self.ctx.workspace),
             evaluator=HarnessEvaluator(
-                self.ctx.runtime,
+                evaluator_world,
                 EvaluationConfig(
                     tuple(str(command) for command in cfg.get("eval_commands", ())),
                     gate_spec.objective_key,
@@ -189,10 +229,10 @@ class LocalBackend(ExecutionBackend):
         lane_id = 0
         result_dir = pl.lane_result_dir(run_dir, round_id, lane_id)
         result_dir.mkdir(parents=True, exist_ok=True)
-        workspace = ctx.workspace.add_lane_workspace(lane_id, base_sha)
+        lane_workspace = ctx.workspace.create_lane(lane_id, base_sha)
         spec = ProposerLaneSpec(
             lane_id=lane_id, round_id=round_id, base_sha=base_sha,
-            run_dir=str(run_dir), workspace_path=str(workspace),
+            run_dir=str(run_dir), workspace_path=str(lane_workspace.path),
             result_dir=str(result_dir),
             prompt_dir=str(getattr(ctx, "prompt_dir", None) or ""),
             proposal_slots=cfg.get("candidates_per_round", 1),
@@ -209,7 +249,7 @@ class LocalBackend(ExecutionBackend):
                 telemetry=getattr(ctx, "telemetry", None))
         finally:
             pl.clear_inflight_proposer(run_dir)
-            ctx.workspace.remove_lane_workspace(lane_id)
+            ctx.workspace.remove_lane(lane_workspace)
 
     def run_self_review(self, *, round_id: int) -> dict:
         """Run one RSI self-review round as the same proposer-lane worker
@@ -330,28 +370,31 @@ class LocalBackend(ExecutionBackend):
         Returns (eval_block, metrics). Raises BaselineAcceptanceError on failure.
         """
         cfg = self.ctx.cfg
-        runtime = self.ctx.runtime
-        workspace = self.ctx.workspace
+        workspace_provider = self.ctx.workspace
         print(f"[{stamp()}] running baseline eval (on {baseline_sha[:10]})...",
               flush=True)
-        wt = None
+        workspace = None
         try:
-            wt = workspace.add_worktree("baseline", baseline_sha)
-            bind_paths = [
-                *(str(path) for path in runtime.binds
-                  if path != runtime.run_dir),
-                str(runtime.run_dir),
-            ]
+            workspace = workspace_provider.create(
+                WorkspaceSpec("baseline", baseline_sha)
+            )
+            world = self.ctx.world_builder.build(
+                workspace,
+                SandboxSpec(
+                    Path(cfg["runtime_image"]), evaluator_environment(), True,
+                ),
+                evaluator_world_spec(cfg.get("runtime_binds", ())),
+            )
+            bind_paths = [str(path) for path in cfg.get("runtime_binds", ())]
             context = (
-                f"image: {runtime.image}\n"
+                f"image: {cfg['runtime_image']}\n"
                 f"binds: {', '.join(bind_paths)}\n"
-                f"cwd: {wt}"
+                f"cwd: {workspace.path}"
             )
             try:
                 result = evals.run_eval(
                     cfg["eval_commands"],
-                    cwd=wt,
-                    runtime=runtime,
+                    world=world,
                     metrics_schema=cfg.get("metrics"),
                     timeout_seconds=cfg.get("eval_timeout_seconds", 600),
                     output_cap=cfg.get("eval_output_cap_chars", 16000),
@@ -370,8 +413,8 @@ class LocalBackend(ExecutionBackend):
             print(f"[{stamp()}] baseline eval done.", flush=True)
             return result.text, result.metrics
         finally:
-            if wt is not None:
-                workspace.remove_worktree("baseline")
+            if workspace is not None:
+                workspace_provider.remove(workspace)
 
     def _require_baseline_acceptance(
         self, result: evals.EvalResult,

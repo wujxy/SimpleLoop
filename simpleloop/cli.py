@@ -13,7 +13,7 @@ from . import loop
 from . import config as config_mod
 from .harness import memory
 from .container.image import ImageBuildError, build_image
-from .container.runtime import RuntimePreflightError
+from .world import SandboxPreflightError
 from .initialize import InitError, initialize
 from .reporting import plot as plot_mod
 from .reporting import telemetry as telemetry_mod
@@ -263,7 +263,7 @@ def main(argv: list[str] | None = None) -> None:
         except loop.RunLockError as exc:
             print(f"Lock error: {exc}", file=sys.stderr)
             raise SystemExit(1)
-        except RuntimePreflightError as exc:
+        except SandboxPreflightError as exc:
             print(f"Runtime error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         except loop.BaselineAcceptanceError as exc:

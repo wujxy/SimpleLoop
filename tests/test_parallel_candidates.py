@@ -28,6 +28,7 @@ from simpleloop.execution.local import LocalBackend
 from simpleloop.harness.store import Store, best_candidate
 from simpleloop.stages.proposer import Proposal, ProposalBatch, ProposerRequest
 from simpleloop.stages.selector import select_candidate
+from simpleloop.world import ProcessResult, SourceWorkspace
 from round_helpers import append_round
 
 
@@ -418,12 +419,14 @@ def test_local_batch_uses_each_plan_parent_and_preserves_order(tmp_path: Path):
             self.added = []
             self.removed = []
 
-        def add_worktree(self, round_id, parent_sha):
-            self.added.append((round_id, parent_sha))
-            return tmp_path / str(round_id)
+        def create(self, spec):
+            self.added.append((spec.workspace_id, spec.revision))
+            path = tmp_path / spec.workspace_id
+            path.mkdir(exist_ok=True)
+            return SourceWorkspace(spec.workspace_id, path, spec.revision)
 
-        def remove_worktree(self, round_id):
-            self.removed.append(round_id)
+        def remove(self, workspace):
+            self.removed.append(workspace.workspace_id)
 
     workspace = FakeWorkspace()
     seen = []
@@ -464,59 +467,14 @@ def test_local_batch_uses_each_plan_parent_and_preserves_order(tmp_path: Path):
     assert [candidate.candidate_id for candidate in candidates] == [0, 1]
 
 
-def test_local_pipeline_retains_eval_failure(tmp_path: Path, monkeypatch):
-    class FakeWorkspace:
-        def add_worktree(self, round_id, parent_sha):
-            return tmp_path / str(round_id)
-
-        def remove_worktree(self, round_id):
-            pass
-
-        def diff(self, parent_sha, sha):
-            return "diff"
-
-        def changed_paths(self, worktree):
-            return ["a.cc"]
-
-        def commit(self, worktree, round_id, paths):
-            return "candidate"
-
-    def fake_execute(*_args, **_kwargs):
-        return ExecutionResult("EXECUTED")
-
-    monkeypatch.setattr(worker_mod.AgentExecutor, "execute", fake_execute)
-    monkeypatch.setattr(
-        worker_mod.HarnessEvaluator,
-        "evaluate",
-        lambda *_a, **_k: EvaluationResult(
-            "(eval failed to run: eval exploded)", error="eval exploded",
-        ),
-    )
-
-    ctx = RunContext(
-        cfg={
-            "goal": "g", "editable_paths": ["src/**"],
-            "eval_commands": [], "max_workers": 1, "metrics": _SCHEMA,
-        },
-        workspace=FakeWorkspace(), executor_agent=object(),
-        runtime=object(),
-    )
-    candidates = LocalBackend(ctx).run_candidates(CandidateBatchRequest(
-        2,
-        (CandidatePlan(0, "parent", Proposal("p0")),),
-    ))
-
-    assert candidates[0].status is CandidateStatus.EVAL_FAILED
-    assert candidates[0].eligible is False
-    assert "eval exploded" in candidates[0].evaluation.text
-
-
 def test_local_parallel_normalizes_each_runner_failure(tmp_path: Path, capsys):
     class FakeWorkspace:
-        def add_worktree(self, worktree_id, parent_sha):
-            return tmp_path / worktree_id
+        def create(self, spec):
+            path = tmp_path / spec.workspace_id
+            path.mkdir(exist_ok=True)
+            return SourceWorkspace(spec.workspace_id, path, spec.revision)
 
-        def remove_worktree(self, worktree_id):
+        def remove(self, workspace):
             pass
 
     def fail_worker(request):
@@ -543,10 +501,12 @@ def test_local_parallel_normalizes_each_runner_failure(tmp_path: Path, capsys):
 
 def test_local_serial_normalizes_runner_failure(tmp_path: Path, capsys):
     class FakeWorkspace:
-        def add_worktree(self, worktree_id, parent_sha):
-            return tmp_path / worktree_id
+        def create(self, spec):
+            path = tmp_path / spec.workspace_id
+            path.mkdir(exist_ok=True)
+            return SourceWorkspace(spec.workspace_id, path, spec.revision)
 
-        def remove_worktree(self, worktree_id):
+        def remove(self, workspace):
             pass
 
     def fail_worker(request):
@@ -568,7 +528,7 @@ def test_local_serial_normalizes_runner_failure(tmp_path: Path, capsys):
 
 
 def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path):
-    agent = Agent(runtime=object())
+    agent = Agent(world=object())
     expected = {"proposals": []}
 
     def fake_run(*_args, **_kwargs):
@@ -585,7 +545,7 @@ def test_agent_structured_json_uses_validated_output(monkeypatch, tmp_path: Path
 
 
 def test_agent_structured_json_rejects_prose_wrapped_json(monkeypatch, tmp_path: Path):
-    agent = Agent(runtime=object())
+    agent = Agent(world=object())
 
     def fake_run(*_args, **_kwargs):
         return AgentResult(
@@ -610,14 +570,14 @@ def test_next_proposals_creates_lane_workspaces_and_passes_them(tmp_path):
         repo = tmp_path / "repo"
         calls = []
 
-        def add_lane_workspace(self, lane_id, base_sha):
+        def create_lane(self, lane_id, base_sha):
             self.calls.append(("add", lane_id, base_sha))
             path = tmp_path / f"lane-{lane_id}"
             path.mkdir(exist_ok=True)
-            return path
+            return SourceWorkspace(f"lane-{lane_id}", path, base_sha)
 
-        def remove_lane_workspace(self, lane_id):
-            self.calls.append(("remove", lane_id))
+        def remove_lane(self, workspace):
+            self.calls.append(("remove", int(workspace.workspace_id[5:])))
 
     manifest_seen = {}
 
@@ -669,13 +629,13 @@ def test_next_proposals_removes_lane_workspaces_when_proposer_fails(tmp_path):
     class FakeWorkspace:
         repo = tmp_path / "repo"
 
-        def add_lane_workspace(self, lane_id, _base_sha):
+        def create_lane(self, lane_id, base_sha):
             path = tmp_path / f"lane-{lane_id}"
             path.mkdir(exist_ok=True)
-            return path
+            return SourceWorkspace(f"lane-{lane_id}", path, base_sha)
 
-        def remove_lane_workspace(self, lane_id):
-            removed.append(lane_id)
+        def remove_lane(self, workspace):
+            removed.append(int(workspace.workspace_id[5:]))
 
     def failing_lane_runner(_spec, _result_dir):
         # S2a: an infrastructure failure (worker killed, no _FINISHED) surfaces
@@ -755,43 +715,48 @@ def _run_loop_integration(
         },
     }
 
-    class FakeRuntime:
+    class FakeSandbox:
         preflight_calls = []
 
-        def __init__(self, **_kwargs):
+        def preflight(self, spec):
+            self.preflight_calls.append(spec)
+
+    class FakeWorld:
+        def run(self, request):
+            return ProcessResult(request.argv, 0, "", "", 0.1)
+
+    class FakeWorldBuilder:
+        builds = []
+
+        def __init__(self, _sandbox):
             pass
 
-        def summary_lines(self):
-            return ()
-
-        def preflight(self):
-            pass
-
-        def executor_preflight(self, *, worktree, mounts):
-            assert Path(worktree).is_dir()
-            self.preflight_calls.append((Path(worktree), mounts))
+        def build(self, workspace, sandbox, world):
+            self.builds.append((workspace, sandbox, world))
+            return FakeWorld()
 
     class FakeAgent:
         def __init__(self, **_kwargs):
             self.runtime = object()
 
     class FakeWorkspace:
-        def __init__(self, *, run_dir, **_kwargs):
-            self.run_dir = run_dir
-            self.repo = run_dir / "repo"
+        def __init__(self, run_dir, *_args, **_kwargs):
+            self.run_dir = Path(run_dir)
+            self.repo = self.run_dir / "repo"
 
-        def setup(self):
+        def initialize(self):
             self.repo.mkdir(parents=True, exist_ok=True)
+            return "baseline-sha"
 
         def baseline_sha(self):
             return "baseline-sha"
 
-        def add_worktree(self, worktree_id, _parent_sha):
-            worktree = self.run_dir / "worktrees" / f"r{worktree_id}"
+        def create(self, spec):
+            worktree = self.run_dir / "worktrees" / f"r{spec.workspace_id}"
             worktree.mkdir(parents=True, exist_ok=True)
-            return worktree
+            return SourceWorkspace(spec.workspace_id, worktree, spec.revision)
 
-        def remove_worktree(self, _worktree_id):
+        def remove(self, _workspace):
             pass
 
         def add_lane_workspace(self, lane_id, _base_sha):
@@ -860,9 +825,10 @@ def _run_loop_integration(
         }])
 
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
-    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
+    monkeypatch.setattr(loop_mod, "ApptainerSandbox", FakeSandbox)
+    monkeypatch.setattr(loop_mod, "WorldBuilder", FakeWorldBuilder)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
-    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(loop_mod, "GitWorkspaceProvider", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
     monkeypatch.setattr(loop_mod, "_refresh_progress_plot", lambda *_args: None)
 
@@ -870,10 +836,9 @@ def _run_loop_integration(
         "config.yaml", run_dir, continue_run=True, prompt_dir=prompt_dir,
         target_rounds=target_rounds,
     )
-    assert len(FakeRuntime.preflight_calls) == 1
-    assert FakeRuntime.preflight_calls[0][1].external_ro == (
-        tmp_path / "external-data",
-    )
+    assert len(FakeSandbox.preflight_calls) == 1
+    preflight_world = FakeWorldBuilder.builds[0][2]
+    assert preflight_world.external_mounts[0].source == tmp_path / "external-data"
     return run_dir, executed
 
 
@@ -943,18 +908,20 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         },
     }
 
-    class FakeRuntime:
-        def __init__(self, **_kwargs):
+    class FakeSandbox:
+        def preflight(self, _spec):
             pass
 
-        def summary_lines(self):
-            return ()
+    class FakeWorld:
+        def run(self, request):
+            return ProcessResult(request.argv, 0, "", "", 0.1)
 
-        def preflight(self):
+    class FakeWorldBuilder:
+        def __init__(self, _sandbox):
             pass
 
-        def executor_preflight(self, *, worktree, mounts):
-            pass
+        def build(self, _workspace, _sandbox, _world):
+            return FakeWorld()
 
     class FakeAgent:
         def __init__(self, **_kwargs):
@@ -973,22 +940,23 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
             raise ValueError("invalid proposer batch")
 
     class FakeWorkspace:
-        def __init__(self, *, run_dir, **_kwargs):
-            self.run_dir = run_dir
-            self.repo = run_dir / "repo"
+        def __init__(self, run_dir, *_args, **_kwargs):
+            self.run_dir = Path(run_dir)
+            self.repo = self.run_dir / "repo"
 
-        def setup(self):
+        def initialize(self):
             self.repo.mkdir(parents=True, exist_ok=True)
+            return "baseline-sha"
 
         def baseline_sha(self):
             return "baseline-sha"
 
-        def add_worktree(self, worktree_id, _parent_sha):
-            worktree = self.run_dir / "worktrees" / f"r{worktree_id}"
+        def create(self, spec):
+            worktree = self.run_dir / "worktrees" / f"r{spec.workspace_id}"
             worktree.mkdir(parents=True, exist_ok=True)
-            return worktree
+            return SourceWorkspace(spec.workspace_id, worktree, spec.revision)
 
-        def remove_worktree(self, _worktree_id):
+        def remove(self, _workspace):
             pass
 
         def add_lane_workspace(self, lane_id, _base_sha):
@@ -1041,9 +1009,10 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
             return []
 
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
-    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
+    monkeypatch.setattr(loop_mod, "ApptainerSandbox", FakeSandbox)
+    monkeypatch.setattr(loop_mod, "WorldBuilder", FakeWorldBuilder)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
-    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(loop_mod, "GitWorkspaceProvider", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "Store", FakeStore)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 

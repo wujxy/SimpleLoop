@@ -350,7 +350,8 @@ class SelfRepo:
         wt = self._add_self_worktree(old_sha)
         try:
             try:
-                agent.run_text(_self_exec_prompt(sc), cwd=wt, label=label)
+                executor = agent(wt) if callable(agent) else agent
+                executor.run_text(_self_exec_prompt(sc), cwd=wt, label=label)
             except Exception as exc:  # noqa: BLE001 — any executor failure keeps incumbent
                 return TransitionResult(None, False, False, f"executor failed: {exc}")
             if not self._self_worktree_has_changes(wt):

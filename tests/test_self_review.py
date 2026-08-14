@@ -201,7 +201,7 @@ def test_run_self_review_lane_result_shape(tmp_path: Path):
     deps = ProposerLaneDeps(
         cfg={"goal": "optimize the FCN",
              "metrics": {"objective": {"key": "SPEED_MS"}}},
-        run_dir=tmp_path, runtime=None, workspace=None,
+        run_dir=tmp_path, runtime=None, repo_path=tmp_path / "repo",
         orchestrator=_FakeOrch(), memory_service=None)
     spec = ProposerLaneSpec(lane_id=0, round_id=7, base_sha="x",
                             run_dir=str(tmp_path), mode="self")
@@ -223,4 +223,3 @@ def test_run_self_review_lane_result_shape(tmp_path: Path):
     assert sr["self_change"]["evidence_refs"] == ["proposer/scientist.py"]
     assert sr["contract_version"] == "proposer-cli-v0"
     assert sr["incumbent_self_sha"]  # read from state.json, non-empty
-

@@ -11,6 +11,7 @@ from simpleloop.reporting import plot as plot_mod
 from simpleloop.reporting.plot import build_series
 from simpleloop.harness.store import Store
 from simpleloop.reporting.telemetry import RunTelemetry
+from simpleloop.world import ProcessResult, SourceWorkspace
 from round_helpers import append_round
 
 
@@ -22,6 +23,44 @@ _RESEARCHER = {
 _EXECUTOR = {
     "model": "glm-5", "base_url": "https://example.invalid",
 }
+
+
+class _FakeSandbox:
+    def preflight(self, _spec):
+        pass
+
+
+class _FakeWorld:
+    def run(self, request):
+        return ProcessResult(request.argv, 0, "", "", 0.1)
+
+
+class _FakeWorldBuilder:
+    def __init__(self, _sandbox):
+        pass
+
+    def build(self, _workspace, _sandbox, _world):
+        return _FakeWorld()
+
+
+class _FakeWorkspaceProvider:
+    def __init__(self, run_dir, *_args, **_kwargs):
+        self.repo = Path(run_dir) / "repo"
+
+    def initialize(self):
+        self.repo.mkdir(parents=True, exist_ok=True)
+        return "baseline"
+
+    def baseline_sha(self):
+        return "baseline"
+
+    def create(self, spec):
+        path = self.repo.parent / "worktrees" / spec.workspace_id
+        path.mkdir(parents=True, exist_ok=True)
+        return SourceWorkspace(spec.workspace_id, path, spec.revision)
+
+    def remove(self, _workspace):
+        pass
 
 
 # The six detail images are drawn by the offline script, not the package.
@@ -328,8 +367,9 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
-    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
-    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(loop_mod, "ApptainerSandbox", _FakeSandbox)
+    monkeypatch.setattr(loop_mod, "WorldBuilder", _FakeWorldBuilder)
+    monkeypatch.setattr(loop_mod, "GitWorkspaceProvider", _FakeWorkspaceProvider)
 
     summary = loop_mod.run("config.yaml", run_dir, continue_run=True)
 
@@ -680,8 +720,9 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
             pass
 
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
-    monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
-    monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
+    monkeypatch.setattr(loop_mod, "ApptainerSandbox", _FakeSandbox)
+    monkeypatch.setattr(loop_mod, "WorldBuilder", _FakeWorldBuilder)
+    monkeypatch.setattr(loop_mod, "GitWorkspaceProvider", _FakeWorkspaceProvider)
     monkeypatch.setattr(
         loop_mod,
         "_refresh_progress_plot",

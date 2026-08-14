@@ -31,6 +31,7 @@ from simpleloop.execution.hepjob import HEPJobBackend
 from simpleloop.loop import INFLIGHT_NAME, _InflightJournal
 from simpleloop.persistence.artifacts import ProtocolError
 from simpleloop.stages.proposer import Proposal, ProposerRequest
+from simpleloop.world import SourceWorkspace
 
 # condor JobStatus codes
 IDLE, RUNNING, HELD = 1, 2, 5
@@ -73,23 +74,27 @@ def _journal(tmp_path, round_id=0, parent_sha="p") -> _InflightJournal:
 
 
 class _FakeWorkspace:
-    def __init__(self):
+    def __init__(self, tmp_path):
         self.added: list = []
         self.removed: list = []
+        self.wt_root = tmp_path / "worktrees"
+        self.lanes_root = tmp_path / "lanes"
 
-    def add_worktree(self, worktree_id, parent_sha):
-        self.added.append((worktree_id, parent_sha))
-        return Path(f"/tmp/wt-{worktree_id}")
+    def create(self, spec):
+        self.added.append((spec.workspace_id, spec.revision))
+        path = self.wt_root / f"r{spec.workspace_id}"
+        path.mkdir(parents=True, exist_ok=True)
+        return SourceWorkspace(spec.workspace_id, path, spec.revision)
 
-    def remove_worktree(self, worktree_id):
-        self.removed.append(worktree_id)
+    def remove(self, workspace):
+        self.removed.append(workspace.workspace_id)
 
 
 class _Ctx:
     def __init__(self, tmp_path):
         self.cfg = {"execution_backend": "hepjob"}
         self.run_dir = tmp_path
-        self.workspace = _FakeWorkspace()
+        self.workspace = _FakeWorkspace(tmp_path)
 
 
 def _hep_cfg(tmp_path, **overrides):

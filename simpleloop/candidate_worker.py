@@ -28,9 +28,7 @@ from .candidate import (
     candidate_failure_from_request,
     run_candidate_guarded,
 )
-from .container.runtime import ApptainerRuntime, world_mount_map
 from .harness import views
-from .harness.workspace import Workspace
 from .persistence.artifacts import encode_candidate_result
 from .persistence.candidate_trace import HandoffCandidateTrace
 from .roles.agent import Agent
@@ -43,7 +41,17 @@ from .stages.evaluator import (
 )
 from .stages.executor import AgentExecutor, Executor, ExecutorConfig
 from .stages.gate import GateSpec, apply_gates
-from .world import SourceWorkspace
+from .world import (
+    ApptainerSandbox,
+    SandboxSpec,
+    SourceWorkspace,
+    WorldBuilder,
+    evaluator_environment,
+    evaluator_world_spec,
+    executor_environment,
+    executor_world_spec,
+)
+from .world.git import GitWorkspaceProvider
 from .stages.proposer import Proposal
 
 
@@ -108,6 +116,7 @@ class CandidateSpec:
 
 @dataclass(frozen=True)
 class CandidatePorts:
+    workspace: SourceWorkspace
     executor: Executor
     artifacts: ArtifactWorkspace
     evaluator: Evaluator
@@ -142,19 +151,40 @@ def _evaluation_config(cfg: dict) -> EvaluationConfig:
 def build_ports(
     cfg: dict,
     run_dir: str | Path,
+    workspace: SourceWorkspace,
     usage_observer=None,
     prompt_dir: str | Path | None = None,
 ) -> CandidatePorts:
     """Compose concrete ports from the resolved worker configuration."""
     run_dir = Path(run_dir)
-    runtime = ApptainerRuntime(
-        image=cfg["runtime_image"],
-        binds=cfg["runtime_binds"],
-        run_dir=run_dir,
-    )
+    sandbox = ApptainerSandbox()
+    builder = WorldBuilder(sandbox)
     role = (cfg.get("roles") or {}).get("executor") or {}
+    image = Path(cfg["runtime_image"])
+    executor_spec = SandboxSpec(
+        image,
+        executor_environment(
+            base_url=role.get("base_url"),
+            max_output_tokens=int(cfg.get("agent_max_output_tokens", 64000)),
+        ),
+        True,
+    )
+    evaluator_spec = SandboxSpec(image, evaluator_environment(), True)
+    executor_world = builder.build(
+        workspace,
+        executor_spec,
+        executor_world_spec(
+            cfg.get("editable_paths", ()),
+            cfg.get("read_only_binds", ()),
+        ),
+    )
+    evaluator_world = builder.build(
+        workspace,
+        evaluator_spec,
+        evaluator_world_spec(cfg.get("runtime_binds", ())),
+    )
     agent = Agent(
-        runtime=runtime,
+        world=executor_world,
         command="claude",
         timeout_seconds=cfg.get("agent_timeout_seconds", 3600),
         allowed_tools="Read,Edit,Write,Bash",
@@ -162,16 +192,15 @@ def build_ports(
         model=role.get("model"),
         base_url=role.get("base_url"),
         usage_observer=usage_observer,
-        mounts=world_mount_map(cfg),
     )
-    workspace = Workspace(
+    workspace_provider = GitWorkspaceProvider(
         run_dir=run_dir,
         repo_path=cfg["repo_path"],
         baseline_ref=cfg["baseline_ref"],
-        editable=cfg["editable_paths"],
     )
     spec = _gate_spec(cfg.get("metrics"))
     return CandidatePorts(
+        workspace=workspace,
         executor=AgentExecutor(
             agent,
             ExecutorConfig(
@@ -180,11 +209,11 @@ def build_ports(
                 prompt_dir=Path(prompt_dir) if prompt_dir else None,
             ),
         ),
-        artifacts=GitArtifactWorkspace(workspace),
-        evaluator=HarnessEvaluator(runtime, _evaluation_config(cfg)),
+        artifacts=GitArtifactWorkspace(workspace_provider),
+        evaluator=HarnessEvaluator(evaluator_world, _evaluation_config(cfg)),
         gate_spec=spec,
         trace=HandoffCandidateTrace(run_dir),
-        preflight=runtime.preflight,
+        preflight=lambda: sandbox.preflight(executor_spec),
     )
 
 
@@ -286,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         ports = build_ports(
             cfg,
             run_dir,
+            spec.to_request().workspace,
             usage_observer=usage.append,
             prompt_dir=spec.prompt_dir or None,
         )

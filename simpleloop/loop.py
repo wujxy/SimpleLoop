@@ -8,7 +8,7 @@ import shutil
 import socket
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -31,8 +31,18 @@ from .harness.store import Store, best_candidate as _best_candidate
 from .round import RoundResult
 from .stages.selector import select_candidate
 from .reporting.telemetry import RunTelemetry
-from .container.runtime import ApptainerRuntime, MountMap, world_mount_map
-from .harness.workspace import Workspace
+from .world import (
+    ApptainerSandbox,
+    ProcessRequest,
+    SandboxSpec,
+    SandboxPreflightError,
+    SourceWorkspace,
+    WorkspaceSpec,
+    WorldBuilder,
+    executor_environment,
+    executor_world_spec,
+)
+from .world.git import GitWorkspaceProvider
 from .processes import run_signal_handlers
 from .self_repo import SelfRepo
 
@@ -75,12 +85,12 @@ class RunContext:
     Mutable per-round search state (parent_sha, prior_metrics) stays in run()."""
     cfg: dict
     run_dir: Path | None = None
-    runtime: ApptainerRuntime | None = None
-    workspace: Workspace | None = None
+    sandbox: ApptainerSandbox | None = None
+    world_builder: WorldBuilder | None = None
+    workspace: GitWorkspaceProvider | None = None
     store: Store | None = None
     telemetry: RunTelemetry | None = None
-    executor_agent: Agent | None = None
-    self_executor_agent: Agent | None = None
+    self_executor_agent: object | None = None
     prompt_dir: Path | None = None
     gate_lines: str = ""
     baseline_metrics: dict = field(default_factory=dict)
@@ -236,7 +246,7 @@ def _run_locked(cfg: dict, run_dir_path: Path,
     )
 
     print(f"[{stamp()}] setting up working repo (clone --local from {cfg['repo_path']})", flush=True)
-    ctx.workspace.setup()
+    ctx.workspace.initialize()
 
     # S3a: snapshot the proposer source into run_dir/self/repo (S0) on a fresh run,
     # or resume the existing self life-history on --continue. The worker subprocess
@@ -255,16 +265,28 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             print(f"[{stamp()}] RSI self-review enabled: first review at round "
                   f"{_first + 1}", flush=True)
     preflight_id = "executor-preflight"
-    preflight_worktree = ctx.workspace.add_worktree(
+    preflight_worktree = ctx.workspace.create(WorkspaceSpec(
         preflight_id, ctx.workspace.baseline_sha(),
-    )
+    ))
     try:
-        ctx.runtime.executor_preflight(
-            worktree=preflight_worktree,
-            mounts=world_mount_map(cfg),
+        world = ctx.world_builder.build(
+            preflight_worktree,
+            _executor_sandbox_spec(cfg),
+            executor_world_spec(
+                cfg.get("editable_paths", ()),
+                cfg.get("read_only_binds", ()),
+            ),
         )
+        result = world.run(ProcessRequest(
+            ("bash", "-c", "test \"$PWD\" = /work && command -v git >/dev/null && command -v claude >/dev/null"),
+            PurePosixPath("/work"), 60, label="executor-preflight",
+        ))
+        if result.exit_code or result.timed_out:
+            raise SandboxPreflightError(
+                "executor preflight failed: " + (result.stderr or result.stdout)[:2000]
+            )
     finally:
-        ctx.workspace.remove_worktree(preflight_id)
+        ctx.workspace.remove(preflight_worktree)
     print("executor preflight: PASS", flush=True)
     print(f"[{stamp()}] baseline sha: {ctx.workspace.baseline_sha()}", flush=True)
 
@@ -496,43 +518,27 @@ def _build_context(
     store, and telemetry. The proposer runs as a subprocess
     (simpleloop.proposer_lane_worker), not as an in-context agent."""
     telemetry = RunTelemetry(run_dir_path, resume=resume)
-    runtime = ApptainerRuntime(
-        image=cfg["runtime_image"],
-        binds=cfg["runtime_binds"],
-        run_dir=run_dir_path,
-    )
-    for line in runtime.summary_lines():
-        print(line, flush=True)
-    runtime.preflight()
+    sandbox = ApptainerSandbox()
+    sandbox_spec = _executor_sandbox_spec(cfg)
+    sandbox.preflight(sandbox_spec)
+    print("sandbox: apptainer", flush=True)
+    print(f"image: {sandbox_spec.image}", flush=True)
     print("preflight: PASS", flush=True)
     _assert_executor_ready(cfg)
 
-    timeout = cfg.get("agent_timeout_seconds", 3600)
-    max_output_tokens = cfg.get("agent_max_output_tokens", 64000)
-    roles = cfg["roles"]
-    executor = roles["executor"]
-    executor_agent = Agent(runtime=runtime, command="claude",
-                           timeout_seconds=timeout,
-                           allowed_tools="Read,Edit,Write,Bash",
-                           max_output_tokens=max_output_tokens,
-                           model=executor["model"],
-                           base_url=executor["base_url"],
-                           usage_observer=telemetry.record_usage,
-                           mounts=world_mount_map(cfg))
-    workspace = Workspace(
+    workspace = GitWorkspaceProvider(
         run_dir=run_dir_path,
         repo_path=cfg["repo_path"],
         baseline_ref=cfg["baseline_ref"],
-        editable=cfg["editable_paths"],
     )
     store = Store(run_dir_path, metrics_schema=cfg["metrics"],
                   history_eval_cap=cfg.get("eval_history_cap_chars", 6000))
     # Same gate bullet lines go into both the proposer's and executor's prompt.
     gate_lines = views.gate_block(cfg.get("metrics"))
     ctx = RunContext(
-        cfg=cfg, run_dir=run_dir_path, runtime=runtime, workspace=workspace,
+        cfg=cfg, run_dir=run_dir_path, sandbox=sandbox,
+        world_builder=WorldBuilder(sandbox), workspace=workspace,
         store=store, telemetry=telemetry,
-        executor_agent=executor_agent,
         prompt_dir=prompt_dir, gate_lines=gate_lines,
     )
     ctx.execution_backend = build_backend(ctx)
@@ -673,24 +679,42 @@ def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
 _DEFAULT_SELF_REVIEW_DEFER = 8
 
 
-def _get_self_executor(ctx: RunContext) -> Agent:
+def _executor_sandbox_spec(cfg: dict) -> SandboxSpec:
+    executor = cfg["roles"]["executor"]
+    return SandboxSpec(
+        Path(cfg["runtime_image"]),
+        executor_environment(
+            base_url=executor.get("base_url"),
+            max_output_tokens=int(cfg.get("agent_max_output_tokens", 64000)),
+        ),
+        True,
+    )
+
+
+def _get_self_executor(ctx: RunContext):
     """The self-executor: the same claude-p Agent as the task executor, but under
     a contained mount that exposes only the self-worktree (the whole worktree
     read-only, ``proposer/`` writable) so it can edit the proposer source without
     seeing or corrupting the rest of the run. Built lazily — only when a CHANGE
     actually happens (RSI S3d)."""
     if ctx.self_executor_agent is None:
-        executor = ctx.cfg["roles"]["executor"]
-        ctx.self_executor_agent = Agent(
-            runtime=ctx.runtime, command="claude",
-            timeout_seconds=ctx.cfg.get("agent_timeout_seconds", 3600),
-            allowed_tools="Read,Edit,Write,Bash",
-            max_output_tokens=ctx.cfg.get("agent_max_output_tokens", 64000),
-            model=executor["model"],
-            base_url=executor["base_url"],
-            usage_observer=ctx.telemetry.record_usage,
-            mounts=MountMap(rw=("proposer",)),
-        )
+        def build(worktree: Path) -> Agent:
+            workspace = SourceWorkspace("self-change", worktree, "")
+            world = ctx.world_builder.build(
+                workspace,
+                _executor_sandbox_spec(ctx.cfg),
+                executor_world_spec(("proposer",)),
+            )
+            executor = ctx.cfg["roles"]["executor"]
+            return Agent(
+                world=world, command="claude",
+                timeout_seconds=ctx.cfg.get("agent_timeout_seconds", 3600),
+                allowed_tools="Read,Edit,Write,Bash",
+                max_output_tokens=ctx.cfg.get("agent_max_output_tokens", 64000),
+                model=executor["model"], base_url=executor["base_url"],
+                usage_observer=ctx.telemetry.record_usage,
+            )
+        ctx.self_executor_agent = build
     return ctx.self_executor_agent
 
 

@@ -25,6 +25,13 @@ from .builder import (
     evaluator_world_spec,
     executor_world_spec,
 )
+from .apptainer import (
+    ApptainerSandbox,
+    SandboxPreflightError,
+    evaluator_environment,
+    executor_environment,
+    forwarded_payload_env,
+)
 
 __all__ = (
     "ChangeSet",
@@ -48,4 +55,9 @@ __all__ = (
     "WorldSpec",
     "evaluator_world_spec",
     "executor_world_spec",
+    "ApptainerSandbox",
+    "SandboxPreflightError",
+    "evaluator_environment",
+    "executor_environment",
+    "forwarded_payload_env",
 )

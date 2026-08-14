@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from typing import Mapping, Protocol
 
 from .stages.proposer import Proposal
-from .world import CommitRequest, SourceWorkspace
+from .world.contracts import CommitRequest, SourceWorkspace
 
 
 class CandidateStatus(str, Enum):
