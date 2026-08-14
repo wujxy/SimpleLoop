@@ -180,7 +180,7 @@ git commit -m "refactor: add git workspace provider"
 - Consumes: Task 1 sandbox contracts.
 - Produces: `ApptainerSandbox.preflight/bind/summary_lines` and a bound `ExecutionSandbox.run(ProcessRequest) -> ProcessResult`.
 
-- [ ] **Step 1: Write failing argv, environment, and process tests**
+- [x] **Step 1: Write failing argv, environment, and process tests**
 
 ```python
 def test_bound_sandbox_builds_shell_free_contained_argv(tmp_path):
@@ -206,25 +206,25 @@ def test_run_returns_timeout_result_and_kills_process_group(monkeypatch, tmp_pat
 
 Also pin model credential inclusion for Executor specs, exclusion for Evaluator specs, proxy forwarding, network on/off flags, and secret-free summaries.
 
-- [ ] **Step 2: Run tests and observe missing adapter failure**
+- [x] **Step 2: Run tests and observe missing adapter failure**
 
 Run: `python -m pytest -q tests/test_apptainer_sandbox.py`
 
 Expected: fails because `simpleloop.world.apptainer` is absent.
 
-- [ ] **Step 3: Move current runtime mechanics into the concrete adapter**
+- [x] **Step 3: Move current runtime mechanics into the concrete adapter**
 
 Use the current `--cleanenv`, `--no-eval`, userns, containall, mount, preflight, timeout, and process-group behavior. Convert typed mounts to `source:target:mode` only inside this file. Launch with `shell=False`, `start_new_session=True`, and return `ProcessResult`; only executable/image/process launch failures raise `SandboxLaunchError`.
 
-During migration, `container/runtime.py` may re-export a compatibility class implemented in `world/apptainer.py`; it must not retain a second argv, environment, preflight, or subprocess implementation. Task 7 deletes both the facade and legacy methods after consumers migrate.
+Existing consumers remain on the frozen legacy class only until Tasks 5–6 migrate them; no new consumer may use it. Task 7 deletes that implementation immediately after the last consumer moves, avoiding a permanent dual API or a large transitional compatibility class.
 
-- [ ] **Step 4: Run sandbox and historical runtime characterization tests**
+- [x] **Step 4: Run sandbox and historical runtime characterization tests**
 
 Run: `python -m pytest -q tests/test_apptainer_sandbox.py tests/test_executor_mount.py tests/test_runtime.py -k 'exec_argv or preflight or subprocess_env or summary'`
 
 Expected: all selected tests pass after migrating assertions to the new adapter API.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/world/apptainer.py tests/test_apptainer_sandbox.py tests/test_executor_mount.py tests/test_runtime.py
