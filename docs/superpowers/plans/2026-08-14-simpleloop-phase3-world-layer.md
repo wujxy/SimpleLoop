@@ -109,7 +109,7 @@ git commit -m "refactor: define world layer contracts"
 - Consumes: Task 1 workspace contracts.
 - Produces: `GitWorkspaceProvider.initialize/create/remove/open/inspect/commit/diff`, plus temporary lane layout methods used only until backend migration.
 
-- [ ] **Step 1: Write failing provider lifecycle tests**
+- [x] **Step 1: Write failing provider lifecycle tests**
 
 ```python
 def test_open_creates_and_always_removes_workspace(tmp_path):
@@ -131,13 +131,13 @@ def test_commit_returns_typed_artifact_and_keeps_sha_reachable(tmp_path):
     assert artifact.parent_sha == base
 ```
 
-- [ ] **Step 2: Run provider tests and observe import failure**
+- [x] **Step 2: Run provider tests and observe import failure**
 
 Run: `python -m pytest -q tests/test_git_workspace_provider.py`
 
 Expected: fails because `GitWorkspaceProvider` is absent.
 
-- [ ] **Step 3: Move the real Git implementation without adding a wrapper layer**
+- [x] **Step 3: Move the real Git implementation without adding a wrapper layer**
 
 Implement the clone fallback, baseline resolution, stale cleanup, worktree creation, status parsing, commit, ref reachability, diff, and cleanup in `world/git.py`. `open()` must use `try/finally`:
 
@@ -153,13 +153,13 @@ def open(self, spec: WorkspaceSpec):
 
 Keep current lane filesystem behavior through provider-owned temporary `create_lane/remove_lane` methods. During migration, `harness/workspace.py` may expose the old method names only as a delegating compatibility class; it contains no Git command or lifecycle implementation.
 
-- [ ] **Step 4: Run Git/lane/candidate artifact tests**
+- [x] **Step 4: Run Git/lane/candidate artifact tests**
 
 Run: `python -m pytest -q tests/test_git_workspace_provider.py tests/test_lane_workspace.py tests/test_candidate_stages.py`
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/world/git.py tests/test_git_workspace_provider.py tests/test_lane_workspace.py
