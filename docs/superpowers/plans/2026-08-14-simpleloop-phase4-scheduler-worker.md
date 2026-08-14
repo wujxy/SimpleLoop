@@ -1,12 +1,20 @@
 # SimpleLoop Phase 4 Scheduler + Worker Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Status:** Implemented (2026-08-14)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace duplicated Local/HEPJob and candidate/proposer lifecycle code with one typed scheduler, supervisor, worker envelope, and inflight journal.
 
 **Architecture:** Domain-facing execution code prepares typed worker requests. A single `JobSupervisor` persists and supervises those requests through either `LocalScheduler` or `HEPJobScheduler`; one worker CLI lazily dispatches them to candidate or proposer Host handlers and atomically writes one result envelope. The temporary execution bridge preserves current loop calls until Phase 5 while all displaced lifecycle owners are deleted now.
 
 **Tech Stack:** Python 3.9+, frozen dataclasses, Protocol, JSON, subprocess/process groups, HTCondor CLI adapter, pytest.
+
+**Implementation record:** Local and HEPJob now share `JobSupervisor`, the
+`simpleloop.worker.v1` envelope, `simpleloop.inflight.v1`, and
+`python -m simpleloop.scheduling.worker`. The six displaced lifecycle owners
+and their private-owner tests were removed. Final verification: 499 passed,
+1 existing live-model test skipped; compileall and `git diff --check` passed.
 
 ## Global Constraints
 
@@ -33,7 +41,7 @@
 - Produces: `WorkerRequest`, `WorkerResult`, `WorkerStatus`, `ProtocolError`, `write_request`, `read_request`, `write_result`, `read_result`.
 - Produces: `JobJournal.begin(stage, round_id, context, jobs)`, `load()`, `save_jobs(jobs)`, and `clear()`.
 
-- [ ] **Step 1: Write failing envelope tests**
+- [x] **Step 1: Write failing envelope tests**
 
 ```python
 def test_worker_result_round_trip_is_atomic(tmp_path):
@@ -56,20 +64,20 @@ def test_worker_result_rejects_request_identity_mismatch(tmp_path):
         read_result(request.result_path, expected=request)
 ```
 
-- [ ] **Step 2: Run envelope tests and verify failure**
+- [x] **Step 2: Run envelope tests and verify failure**
 
 Run: `python -m pytest -q tests/test_worker_envelope.py`
 
 Expected: FAIL because `simpleloop.scheduling.envelope` does not exist.
 
-- [ ] **Step 3: Implement the minimal strict envelope codec**
+- [x] **Step 3: Implement the minimal strict envelope codec**
 
 Use frozen dataclasses, require protocol exactly `simpleloop.worker.v1`, require
 object payload/result/execution and list usage, reject bool-as-string coercions,
 and write JSON through one `_atomic_json(path, payload)` helper that flushes,
 fsyncs, replaces, and fsyncs the parent directory.
 
-- [ ] **Step 4: Write failing journal tests**
+- [x] **Step 4: Write failing journal tests**
 
 ```python
 def test_journal_preserves_stage_context_and_jobs(tmp_path):
@@ -91,13 +99,13 @@ def test_journal_refuses_to_replace_a_different_active_stage(tmp_path):
         journal.begin("candidates", 1, {}, [])
 ```
 
-- [ ] **Step 5: Implement the journal and run focused tests**
+- [x] **Step 5: Implement the journal and run focused tests**
 
 Run: `python -m pytest -q tests/test_worker_envelope.py tests/test_job_journal.py`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add simpleloop/scheduling simpleloop/persistence/journal.py \
@@ -118,7 +126,7 @@ git commit -m "refactor: define worker and journal protocols"
 - Produces: `JobState`, `RetryPolicy`, `ResourceSpec`, `JobSpec`, `JobHandle`, `JobObservation`, `Scheduler`, `JobBatchRequest`, `JobOutcome`, `JobBatchResult`, `InfrastructureError`.
 - Consumes: envelope read/write and `JobJournal` from Task 1.
 
-- [ ] **Step 1: Write failing state-machine tests**
+- [x] **Step 1: Write failing state-machine tests**
 
 Cover these exact cases with a deterministic fake Scheduler and fake clock:
 
@@ -135,33 +143,33 @@ Cover these exact cases with a deterministic fake Scheduler and fake clock:
 | `test_terminal_job_releases_workspace_once` | Fake WorkspaceProvider records one matching removal. |
 | `test_partial_success_is_returned_with_infra_failures` | Result contains one success and one exhausted failure. |
 
-- [ ] **Step 2: Run the focused tests and verify failure**
+- [x] **Step 2: Run the focused tests and verify failure**
 
 Run: `python -m pytest -q tests/test_job_supervisor.py`
 
 Expected: FAIL because scheduling contracts/supervisor do not exist.
 
-- [ ] **Step 3: Implement frozen contracts**
+- [x] **Step 3: Implement frozen contracts**
 
 `JobSpec` carries request/paths/argv/retry/resources and optional
 `SourceWorkspace`. Persisted runtime records carry attempt, state, scheduler
 handle, submitted/running/gone wall-clock timestamps, and note. Do not put raw
 config or business models into scheduling contracts.
 
-- [ ] **Step 4: Implement one reconciliation loop**
+- [x] **Step 4: Implement one reconciliation loop**
 
 The loop must check result files before scheduler observations, preserve
 `UNKNOWN`, retry only `FAILED`/`LOST`/timeout/missing-result states, persist
 after every transition, enforce `max_parallel`, and release the workspace on a
 final outcome. Inject `clock` and `sleep` callables for deterministic tests.
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 5: Run focused tests**
 
 Run: `python -m pytest -q tests/test_worker_envelope.py tests/test_job_journal.py tests/test_job_supervisor.py`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add simpleloop/scheduling/contracts.py simpleloop/scheduling/supervisor.py \
@@ -181,7 +189,7 @@ git commit -m "refactor: add unified job supervisor"
 - Produces: `LocalScheduler.submit/inspect/cancel` implementing `Scheduler`.
 - Consumes: scheduling contracts from Task 2.
 
-- [ ] **Step 1: Write failing LocalScheduler tests**
+- [x] **Step 1: Write failing LocalScheduler tests**
 
 Write five tests with these concrete assertions: an argv containing a literal
 semicolon is not shell-evaluated and reaches `SUCCEEDED`; a sleeping child is
@@ -189,26 +197,26 @@ semicolon is not shell-evaluated and reaches `SUCCEEDED`; a sleeping child is
 from the scheduler's live `Popen` map is `LOST`; and a child writing one line to
 each stream produces exactly those lines in `stdout_path` and `stderr_path`.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `python -m pytest -q tests/test_local_scheduler.py`
 
 Expected: FAIL because `LocalScheduler` does not exist.
 
-- [ ] **Step 3: Implement LocalScheduler**
+- [x] **Step 3: Implement LocalScheduler**
 
 Launch `JobSpec.argv` with `shell=False`, `start_new_session=True`, inherited
 explicit environment, and job log files. Keep live `Popen` objects in a private
 map keyed by handle value. An unknown restored pid is `LOST`; cancellation uses
 SIGTERM then SIGKILL on its process group without accepting broad targets.
 
-- [ ] **Step 4: Run scheduler and supervisor tests**
+- [x] **Step 4: Run scheduler and supervisor tests**
 
 Run: `python -m pytest -q tests/test_local_scheduler.py tests/test_job_supervisor.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/scheduling/local.py tests/test_local_scheduler.py
@@ -228,7 +236,7 @@ git commit -m "refactor: add local scheduler adapter"
 - Produces: `HEPJobConfig`, `HEPJobScheduler.submit/inspect/cancel`.
 - Consumes: generic `JobSpec`, `ResourceSpec`, `JobHandle`, and `JobObservation`.
 
-- [ ] **Step 1: Write failing adapter tests**
+- [x] **Step 1: Write failing adapter tests**
 
 Port behavior—not private methods—from `tests/test_hepjob_backend.py`:
 
@@ -240,26 +248,26 @@ PENDING/RUNNING/FAILED; a nonzero query maps every requested handle to UNKNOWN;
 an absent id maps to LOST; and cancellation invokes the configured remove
 command for exactly the requested scheduler id.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `python -m pytest -q tests/test_hepjob_scheduler.py`
 
 Expected: FAIL because the adapter does not exist.
 
-- [ ] **Step 3: Implement the thin Condor adapter**
+- [x] **Step 3: Implement the thin Condor adapter**
 
 Move `_requirements_expr`, target flags, submit-file rendering, cluster-id
 parsing, query parsing, hold-reason diagnostics, and remove invocation from the
 old backend. Do not copy polling, retry, result, workspace, proposer, candidate,
 or baseline logic.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run: `python -m pytest -q tests/test_hepjob_scheduler.py tests/test_config_execution.py tests/test_job_supervisor.py`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add simpleloop/scheduling/hepjob.py tests/test_hepjob_scheduler.py \
@@ -287,7 +295,7 @@ git commit -m "refactor: reduce hepjob to scheduler adapter"
 - Consumes: existing Candidate Pipeline, World layer, standalone proposer
   package, candidate codec, and SelfRepo viability classification.
 
-- [ ] **Step 1: Write failing worker-dispatch tests**
+- [x] **Step 1: Write failing worker-dispatch tests**
 
 Use monkeypatched import targets for each of the four kinds. Assert each target
 receives the original payload and its return mapping appears inside exactly one
@@ -297,37 +305,37 @@ from `sys.modules`; for viability assert the candidate-self path is first on
 same kind/request id. An unknown kind must also write a FAILED envelope whose
 error identifies the unsupported kind.
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `python -m pytest -q tests/test_scheduling_worker.py`
 
 Expected: FAIL because unified worker/handlers do not exist.
 
-- [ ] **Step 3: Move candidate composition into candidate handler**
+- [x] **Step 3: Move candidate composition into candidate handler**
 
 Port `CandidateSpec`, `build_ports`, baseline evaluation, fallback candidate
 failure, and shared `run_candidate_guarded` invocation. The handler returns the
 inner encoded candidate mapping and never writes files.
 
-- [ ] **Step 4: Move proposer composition into lazy proposer handler**
+- [x] **Step 4: Move proposer composition into lazy proposer handler**
 
 Port lane spec/deps, proposal conversion, self-review behavior, and viability
 behavior. Perform self-repo redirect from payload before importing any proposer
 module. Return plain mappings and collect usage through the supplied callback.
 
-- [ ] **Step 5: Implement the only worker CLI**
+- [x] **Step 5: Implement the only worker CLI**
 
 Read one request, import only the selected handler via `importlib`, run it,
 capture a framework error as `WorkerStatus.FAILED`, add host/attempt/provider
 execution facts, and call the sole envelope writer.
 
-- [ ] **Step 6: Run handler/worker tests**
+- [x] **Step 6: Run handler/worker tests**
 
 Run: `python -m pytest -q tests/test_scheduling_worker.py tests/test_candidate_worker.py tests/test_proposer_lane_worker.py tests/test_self_review.py`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add simpleloop/scheduling/handlers simpleloop/scheduling/worker.py \
@@ -359,7 +367,7 @@ git commit -m "refactor: unify worker dispatch and results"
 - Consumes: WorkspaceProvider, schedulers, supervisor, journal, worker
   envelopes, and current domain codecs.
 
-- [ ] **Step 1: Write failing production-composition tests**
+- [x] **Step 1: Write failing production-composition tests**
 
 Write production-composition tests with a recording Supervisor. Assert Local
 and HEP candidate batches submit the same candidate payload shape and preserve
@@ -370,40 +378,40 @@ calls; a workspace is still present while its result is decoded and absent
 after return; and viable/non-viable proposer smoke mappings retain the current
 `ViabilityResult` decisions.
 
-- [ ] **Step 2: Run focused production tests and verify failure**
+- [x] **Step 2: Run focused production tests and verify failure**
 
 Run: `python -m pytest -q tests/test_parallel_candidates.py tests/test_hepjob_backend.py tests/test_rsi_host.py tests/test_self_repo.py`
 
 Expected: FAIL until `build_backend` composes the common scheduling kernel.
 
-- [ ] **Step 3: Implement WorkerBackend as a transport bridge**
+- [x] **Step 3: Implement WorkerBackend as a transport bridge**
 
 Create typed payloads/result directories/workspaces, call one supervisor, decode
 candidate/proposer/self results, ingest envelope usage, and apply the enclosing
 operation's all-infrastructure-failure policy. It must contain no subprocess,
 Condor command, polling loop, retry loop, or result writer.
 
-- [ ] **Step 4: Move loop to `inflight.json` and common resume**
+- [x] **Step 4: Move loop to `inflight.json` and common resume**
 
 Replace `_InflightJournal` and `_load_inflight` with `JobJournal`; preserve
 parent/proposal context and clear candidates only after history append. Remove
 `resume_round` and `cleanup_proposer_orphans` branches: `run_candidates` and
 `run_proposer_lanes` resume matching persisted stages themselves.
 
-- [ ] **Step 5: Route viability through WorkerBackend**
+- [x] **Step 5: Route viability through WorkerBackend**
 
 Inject the backend viability callable into `SelfRepo.transition` without
 restructuring SelfRepo Git/adoption. Remove direct worker subprocess, old result
 reading, and timeout ownership from `check_viability`; retain the pure
 `_classify_smoke` verdict.
 
-- [ ] **Step 6: Run all migrated behavior tests**
+- [x] **Step 6: Run all migrated behavior tests**
 
 Run: `python -m pytest -q tests/test_parallel_candidates.py tests/test_hepjob_backend.py tests/test_rsi_host.py tests/test_self_repo.py tests/test_telemetry.py tests/test_phase0_characterization.py`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add simpleloop/execution simpleloop/loop.py simpleloop/self_repo.py \
@@ -433,7 +441,7 @@ git commit -m "refactor: run all jobs through scheduling kernel"
 - Produces: architecture guards preventing legacy scheduling ownership from
   returning.
 
-- [ ] **Step 1: Add failing architecture guards**
+- [x] **Step 1: Add failing architecture guards**
 
 ```python
 def test_phase4_has_one_worker_and_no_legacy_owners():
@@ -468,19 +476,19 @@ def test_proposer_package_does_not_import_simpleloop():
         assert "simpleloop" not in path.read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 2: Delete old owners and migrate remaining imports**
+- [x] **Step 2: Delete old owners and migrate remaining imports**
 
 Use `rg` to prove there are no production consumers before each deletion. Keep
 only tests of public behavior and the new provider/supervisor contracts; remove
 tests pinned to old private `_Job` or backend methods.
 
-- [ ] **Step 3: Update README trust and execution boundaries**
+- [x] **Step 3: Update README trust and execution boundaries**
 
 Document World as filesystem/process isolation, Scheduler as placement,
 Supervisor as lifecycle policy, unified worker envelopes, Local/HPC parity,
 network-enabled agents, and the independent proposer boundary.
 
-- [ ] **Step 4: Run architecture and full tests**
+- [x] **Step 4: Run architecture and full tests**
 
 Run:
 
@@ -502,7 +510,7 @@ Expected:
 - Condor search matches only config and `simpleloop/scheduling/hepjob.py`;
 - diff check exits zero.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -519,12 +527,12 @@ git commit -m "test: enforce phase four scheduling boundaries"
 **Interfaces:**
 - Produces: an implementation-status record and final verification evidence.
 
-- [ ] **Step 1: Mark every completed task and add implementation status**
+- [x] **Step 1: Mark every completed task and add implementation status**
 
 Set `**Status:** Implemented (2026-08-14)` below the title and check all steps
 only after their commits and tests exist.
 
-- [ ] **Step 2: Run final clean-tree verification**
+- [x] **Step 2: Run final clean-tree verification**
 
 Run:
 
@@ -538,7 +546,7 @@ git status --short
 Expected: tests and compileall pass; diff check has no output; status contains
 only this plan update before its commit.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-08-14-simpleloop-phase4-scheduler-worker.md
