@@ -17,6 +17,18 @@ class GateSpec:
     gate_keys: tuple[str, ...]
 
 
+def unavailable_gates(
+    spec: GateSpec,
+    reason: str = "not run",
+) -> GateDecision:
+    rows = {
+        PATHS: GateResult(None, ""),
+        EVAL_COMMANDS: GateResult(None, reason),
+    }
+    rows.update({key: GateResult(None, reason) for key in spec.gate_keys})
+    return GateDecision(rows, False, False)
+
+
 def apply_gates(
     evaluation: EvaluationResult | None,
     spec: GateSpec,

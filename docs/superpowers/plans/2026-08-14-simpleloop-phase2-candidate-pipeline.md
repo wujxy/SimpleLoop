@@ -439,7 +439,7 @@ git commit -m "refactor: extract candidate stage adapters"
 - Consumes: Task 1 ports and Task 2 adapters.
 - Produces: `run_candidate()` and `run_candidate_guarded()` as the sole candidate business implementation.
 
-- [ ] **Step 1: Write failing fake-port pipeline tests**
+- [x] **Step 1: Write failing fake-port pipeline tests**
 
 Create deterministic fakes that append `"execute"`, `"inspect"`, `"commit"`, `"evaluate"`, `"gate-trace"` to a shared call list. Cover these assertions in separate tests:
 
@@ -480,7 +480,7 @@ assert result.parent_sha == request.parent_sha
 
 Also assert executor failure, eval error retaining artifact, nonzero command rejection, and hard-gate rejection.
 
-- [ ] **Step 2: Run tests and confirm pipeline functions are missing**
+- [x] **Step 2: Run tests and confirm pipeline functions are missing**
 
 ```bash
 python -m pytest -q tests/test_candidate_pipeline.py
@@ -488,7 +488,7 @@ python -m pytest -q tests/test_candidate_pipeline.py
 
 Expected: import failure for `run_candidate`.
 
-- [ ] **Step 3: Implement the minimal pipeline state machine**
+- [x] **Step 3: Implement the minimal pipeline state machine**
 
 Implement the exact order from the spec. Construct results through one private helper so every branch fills the existing fields:
 
@@ -509,7 +509,7 @@ def _result(request, *, status, execution, gate, artifact=None, evaluation=None)
 
 `run_candidate_guarded()` catches `Exception`, creates the existing unknown gate rows through `apply_gates(None, gate_spec)`, and returns `WORKER_FAILED` with `ExecutionResult("WORKER_FAILED", reason=f"candidate worker failed: {exc}")`. Put that projection in `candidate_failure_from_request(request, reason)` so the worker catch-all and Local backend never rebuild failure rows themselves.
 
-- [ ] **Step 4: Verify pipeline and candidate codec tests**
+- [x] **Step 4: Verify pipeline and candidate codec tests**
 
 ```bash
 python -m pytest -q tests/test_candidate_pipeline.py tests/test_candidate_contracts.py tests/test_candidate_result_codec.py
@@ -517,7 +517,7 @@ python -m pytest -q tests/test_candidate_pipeline.py tests/test_candidate_contra
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit the shared pipeline**
+- [x] **Step 5: Commit the shared pipeline**
 
 ```bash
 git add simpleloop/candidate.py tests/test_candidate_pipeline.py
