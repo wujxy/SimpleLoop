@@ -23,20 +23,6 @@ _EXECUTOR = {
 }
 
 
-class _FakeModel:
-    @classmethod
-    def from_config(cls, _config):
-        return object()
-
-
-class _FakeProposer:
-    def __init__(self, **_kwargs):
-        pass
-
-
-def _patch_researcher(monkeypatch) -> None:
-    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", _FakeModel)
-
 # The six detail images are drawn by the offline script, not the package.
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "plot_details.py"
 _spec = importlib.util.spec_from_file_location("plot_details", _SCRIPT)
@@ -343,7 +329,6 @@ def test_noop_continue_refreshes_plots_without_report(monkeypatch, tmp_path):
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
-    _patch_researcher(monkeypatch)
 
     summary = loop_mod.run("config.yaml", run_dir, continue_run=True)
 
@@ -696,7 +681,6 @@ def test_noop_continue_refreshes_with_loaded_baseline_context(
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
-    _patch_researcher(monkeypatch)
     monkeypatch.setattr(
         loop_mod,
         "_refresh_progress_plot",

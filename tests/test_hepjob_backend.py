@@ -24,6 +24,7 @@ from simpleloop.execution import hepjob
 from simpleloop.execution.base import InfraRoundError
 from simpleloop.execution.hepjob import HEPJobBackend
 from simpleloop.loop import INFLIGHT_NAME, _InflightJournal
+from simpleloop.stages.proposer import ProposerRequest
 
 # condor JobStatus codes
 IDLE, RUNNING, HELD = 1, 2, 5
@@ -219,7 +220,9 @@ def test_proposer_backend_submits_one_lane_with_full_round_quota(
     monkeypatch.setattr(backend, "_supervise_lanes",
                         lambda jobs, _round_id: jobs)
 
-    jobs = backend.run_proposer_lanes(round_id=3, base_sha="parent")
+    jobs = backend.run_proposer_lanes(
+        ProposerRequest(3, "make it faster", "parent")
+    )
 
     assert len(prepared) == len(submitted) == len(jobs) == 1
     assert prepared[0] == (0, 3, "parent", 4)

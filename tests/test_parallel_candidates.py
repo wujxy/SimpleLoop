@@ -10,7 +10,6 @@ from simpleloop import candidate_worker as worker_mod
 from simpleloop import config as config_mod
 from simpleloop import loop as loop_mod
 from proposer.memory import MemoryService
-from proposer.memory.models import NewFindingTarget, ResearchProposal
 from simpleloop.roles.agent import Agent, AgentError, AgentResult
 from simpleloop.roles.executor import ExecResult
 from simpleloop.harness.evals import EvalResult
@@ -18,8 +17,8 @@ from simpleloop.loop import RunContext, _run_candidates, _select_winner
 from simpleloop.execution import proposer_lanes
 from simpleloop.execution.base import InfraRoundError
 from simpleloop.execution.local import LocalBackend
-from proposer.scientist import ProposerResult
 from simpleloop.harness.store import Store, best_candidate
+from simpleloop.stages.proposer import Proposal, ProposalBatch, ProposerRequest
 
 
 EXAMPLES = Path(__file__).parents[1] / "examples"
@@ -563,7 +562,7 @@ def test_next_proposals_creates_lane_workspaces_and_passes_them(tmp_path):
     )
 
     result = LocalBackend(ctx, lane_runner=fake_lane_runner).run_proposer_lanes(
-        round_id=1, base_sha="parent-sha")
+        ProposerRequest(1, "faster", "parent-sha"))
 
     assert result.proposals[0].instruction == "try cache"
     # candidates_per_round=1 -> proposal_slots=1; the workspace path + round
@@ -606,22 +605,20 @@ def test_next_proposals_removes_lane_workspaces_when_proposer_fails(tmp_path):
 
     with pytest.raises(InfraRoundError, match="without _FINISHED"):
         LocalBackend(ctx, lane_runner=failing_lane_runner).run_proposer_lanes(
-            round_id=2, base_sha="parent")
+            ProposerRequest(2, "faster", "parent"))
 
     # The finally still tears down the lane workspace on infra failure.
     assert removed == [0]
 
 
-def test_next_proposals_static_mode_wraps_instruction_as_new_target(tmp_path):
+def test_next_proposals_static_mode_returns_host_proposal(tmp_path):
     result = loop_mod._next_proposals(
         RunContext(cfg={}), ["fixed"], 0, "parent",
     )
 
     assert len(result.proposals) == 1
     assert result.proposals[0].instruction == "fixed"
-    assert isinstance(
-        result.proposals[0].research_target, NewFindingTarget,
-    )
+    assert not hasattr(result.proposals[0], "research_target")
 
 def _run_loop_integration(
     monkeypatch, tmp_path, *, prompt_dir=None, max_rounds=2,
@@ -692,27 +689,6 @@ def _run_loop_integration(
         def __init__(self, **_kwargs):
             self.runtime = object()
 
-    class FakeModel:
-        @classmethod
-        def from_config(cls, _config):
-            return object()
-
-    class FakeProposer:
-        def __init__(self, **_kwargs):
-            pass
-
-        def run(self, **kwargs):
-            assert kwargs["current_round"] == 1
-            assert kwargs["prompt_dir"] == prompt_dir
-            return ProposerResult(
-                [ResearchProposal(
-                    instruction="test another sparse gather",
-                    research_target=NewFindingTarget(
-                        question="Does sparse gather still dominate?",
-                    ),
-                )],
-            )
-
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
             self.run_dir = run_dir
@@ -747,18 +723,12 @@ def _run_loop_integration(
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "", {}
 
-        def run_proposer_lanes(self, *, round_id, base_sha):
+        def run_proposer_lanes(self, request):
             # S2a: LOCAL runs the proposer as a subprocess, so an in-process
-            # faked ProposerOrchestrator is invisible to it. Return a canned
-            # ProposerResult directly — this test exercises the loop's
-            # proposal -> executor -> record flow, not proposer internals.
-            return ProposerResult([
-                ResearchProposal(
-                    instruction="test another sparse gather",
-                    research_target=NewFindingTarget(
-                        question="Does sparse gather still dominate?"),
-                ),
-            ])
+            # proposer is invisible to it. Return the Host batch directly —
+            # this test exercises proposal -> executor -> record flow.
+            assert request.incumbent_sha == "seed-sha"
+            return ProposalBatch((Proposal("test another sparse gather"),))
 
         def cleanup_proposer_orphans(self):
             pass
@@ -774,8 +744,7 @@ def _run_loop_integration(
             assert "annotations" not in journal.meta
             assert journal.meta["proposals"] == [
                 {"instruction": "test another sparse gather",
-                 "evidence_refs": [],
-                 "material_difference": None},
+                 "evidence_refs": []},
             ]
             return fake_run_candidates()
 
@@ -805,10 +774,6 @@ def _run_loop_integration(
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
-    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
-    # In the branch-then-deepen architecture, the loop uses ProposerOrchestrator.
-    from proposer import orchestrator as orch_mod
-    monkeypatch.setattr(orch_mod, "ProposerOrchestrator", FakeProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
     monkeypatch.setattr(loop_mod, "_select_winner", lambda *_args, **_kwargs: None)
@@ -971,9 +936,10 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
         def eval_baseline(self, *, baseline_sha: str) -> tuple[str, dict]:
             return "", {}
 
-        def run_proposer_lanes(self, *, round_id, base_sha):
+        def run_proposer_lanes(self, request):
             # S2a: simulate a proposer contract failure directly (a subprocess
             # can't see an in-process faked ProposerOrchestrator).
+            assert request.incumbent_sha == "baseline-sha"
             raise ValueError("invalid proposer batch")
 
         def cleanup_proposer_orphans(self):
@@ -992,9 +958,6 @@ def test_run_aborts_before_executor_when_proposer_contract_fails(
     monkeypatch.setattr(config_mod, "load", lambda _path: cfg)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
-    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
-    from proposer import orchestrator as orch_mod
-    monkeypatch.setattr(orch_mod, "ProposerOrchestrator", FailingProposer)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "Store", FakeStore)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))

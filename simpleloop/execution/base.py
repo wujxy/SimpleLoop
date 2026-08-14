@@ -16,6 +16,8 @@ own round-level harness state:
 """
 from __future__ import annotations
 
+from ..stages.proposer import ProposalBatch, ProposerRequest
+
 
 class InfraRoundError(RuntimeError):
     """Every candidate of a round died of infrastructure causes; the round
@@ -64,12 +66,12 @@ class ExecutionBackend:
         inflight file implies a misconfigured resume."""
         raise NotImplementedError
 
-    def run_proposer_lanes(self, *, round_id: int, base_sha: str):
+    def run_proposer_lanes(self, request: ProposerRequest) -> ProposalBatch:
         """Run one round's proposer lanes — each lane researches in its own
-        writable workspace — and return a ProposerResult. The local backend
+        writable workspace — and return a Host ProposalBatch. The local backend
         runs lanes as frontend threads; HEPJobBackend submits one condor job
-        per lane (simpleloop.proposer_lane_worker). The returned
-        ProposerResult.proposals fan out to run_candidates as usual."""
+        per lane (simpleloop.proposer_lane_worker). The returned proposals fan
+        out to run_candidates as usual."""
         raise NotImplementedError
 
     def run_self_review(self, *, round_id: int) -> dict:

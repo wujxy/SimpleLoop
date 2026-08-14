@@ -14,18 +14,13 @@ from pathlib import Path
 import yaml
 
 from .roles.agent import Agent
-from proposer import model as model_mod
 from . import candidate_worker
 from . import config as config_mod
 from .execution import build_backend
 from .execution.base import InfraRoundError, RoundJournal
 from .harness import evals
-from proposer.memory import (
-    NewFindingTarget,
-    ResearchProposal,
-)
 from .reporting import plot as plot_mod
-from proposer import scientist as proposer_mod
+from .stages.proposer import Proposal, ProposalBatch, ProposerRequest
 from .harness import views
 from .harness.handoff import write_handoff
 from .harness.store import Store, best_candidate as _best_candidate, eligible as _eligible
@@ -352,18 +347,20 @@ def _run_locked(cfg: dict, run_dir_path: Path,
             _write_proposer_trace(ctx, round_id, proposal_result)
             _write_proposals_handoff(ctx, round_id, parent_sha,
                                      proposal_result)
-            deliberation_telemetry = proposal_result.deliberation_telemetry
+            deliberation_telemetry = dict(proposal_result.telemetry)
             if proposal_result.abstained:
                 # Zero-candidate round: the Scientist judged no experiment
                 # worth its execution cost. Skip the executor entirely and
                 # record the abstention so --continue counts the round as
                 # consumed and the next round can see why nothing ran.
                 abstention = {
-                    "reason": proposal_result.abstain_reason,
-                    "blocking_unknown": proposal_result.abstain_blocking_unknown,
+                    "reason": proposal_result.abstention.reason,
+                    "blocking_unknown": (
+                        proposal_result.abstention.blocking_unknown
+                    ),
                 }
                 print(f"[{stamp()}] proposer abstained round {round_id + 1}: "
-                      f"{proposal_result.abstain_reason}", flush=True)
+                      f"{proposal_result.abstention.reason}", flush=True)
                 candidates = []
                 journal = None
             else:
@@ -373,7 +370,6 @@ def _run_locked(cfg: dict, run_dir_path: Path,
                     {
                         "instruction": prop.instruction,
                         "evidence_refs": list(prop.evidence_refs),
-                        "material_difference": prop.material_difference,
                     }
                     for prop in proposal_result.proposals
                 ]
@@ -576,12 +572,12 @@ def _starting_state(ctx: RunContext, continue_run: bool,
 
 
 def _write_proposer_trace(ctx: RunContext, round_id: int,
-                          proposal_result: proposer_mod.ProposerResult) -> None:
+                          proposal_result: ProposalBatch) -> None:
     """Persist the round's non-authoritative proposer trajectory. This is
     behavioral telemetry for offline analysis only — it is NEVER injected into
     a future round's startup pack and carries no fact authority over the
     immutable Experiment Ledger."""
-    trace = getattr(proposal_result, "trace", None)
+    trace = proposal_result.trace
     if not trace:
         return  # static-proposal mode produces no deliberation trace
     trace_dir = ctx.run_dir / "proposer_traces"
@@ -597,58 +593,54 @@ def _write_proposer_trace(ctx: RunContext, round_id: int,
 
 def _write_proposals_handoff(
     ctx: RunContext, round_id: int, parent_sha: str,
-    proposal_result: proposer_mod.ProposerResult,
+    proposal_result: ProposalBatch,
 ) -> None:
     """Persist the proposer's output the moment it finishes — before any
-    executor starts. Captures the full proposal texts, finding IDs, and
-    abstention reason so the round can be traced/reproduced even if the
-    process dies mid-execution."""
+    executor starts. Captures Host-visible proposal facts and the abstention
+    reason so the round can be traced if the process dies mid-execution."""
     proposals = []
     for i, prop in enumerate(proposal_result.proposals):
         proposals.append({
             "index": i,
             "instruction": prop.instruction,
             "evidence_refs": list(prop.evidence_refs),
-            "material_difference": prop.material_difference,
         })
     write_handoff(ctx.run_dir, round_id, "proposals.json", {
         "round_id": round_id,
         "parent_sha": parent_sha,
         "abstained": proposal_result.abstained,
-        "abstain_reason": proposal_result.abstain_reason,
+        "abstain_reason": (
+            proposal_result.abstention.reason
+            if proposal_result.abstention else None
+        ),
         "proposals": proposals,
-        "trace": getattr(proposal_result, "trace", None),
+        "trace": proposal_result.trace,
     })
 
 
 def _next_proposals(ctx: RunContext, static_proposals: list[str] | None,
                     round_id: int, parent_sha: str,
-                    ) -> proposer_mod.ProposerResult:
+                    ) -> ProposalBatch:
     """Return one round's structured research proposals.
 
     Normal mode creates one writable lane workspace per lane (each a fresh git
     worktree at ``parent_sha``) and runs the Proposer Orchestrator, which fans
     the lanes out — every lane researches in its own isolated workspace.
-    Static mode wraps each supplied instruction in a proposal with no target."""
+    Static mode wraps each supplied instruction in a Host proposal."""
     if static_proposals is not None:
         proposal_text = static_proposals[round_id]
         print(f"[{stamp()}] proposal (static): {proposal_text[:150]}", flush=True)
-        return proposer_mod.ProposerResult(
-            proposals=[
-                ResearchProposal(
-                    instruction=proposal_text,
-                    research_target=NewFindingTarget(
-                        question=proposal_text[:200],
-                    ),
-                ),
-            ],
-        )
+        return ProposalBatch((Proposal(instruction=proposal_text),))
 
     try:
         proposal_obj = ctx.execution_backend.run_proposer_lanes(
-            round_id=round_id, base_sha=parent_sha,
+            ProposerRequest(
+                round_id=round_id,
+                goal=str(ctx.cfg["goal"]),
+                incumbent_sha=parent_sha,
+            )
         )
-    except (model_mod.ModelError, proposer_mod.ProposerError, ValueError) as exc:
+    except ValueError as exc:
         # A proposer contract failure cannot produce a candidate generation.
         print(f"[{stamp()}] proposer failed; aborting run: {exc}", flush=True)
         raise

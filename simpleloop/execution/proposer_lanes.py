@@ -1,5 +1,5 @@
 """Backend-agnostic proposer-lane helpers: the file-I/O tail shared by every
-execution backend — manifest write, atomic result read, collect -> ProposerResult,
+execution backend — manifest write, atomic result read, collect -> ProposalBatch,
 and the inflight marker.
 
 Extracted from HEPJobBackend's private methods so the LOCAL backend can spawn
@@ -7,7 +7,7 @@ the proposer (``simpleloop.proposer_lane_worker``) as a subprocess without
 duplicating them. HEPJob still carries its own copies for now; migrating it
 onto this module is a follow-up. Nothing here knows about condor or Popen —
 the backend owns *how the worker runs*; this owns *how its result is written,
-read, and turned into a ProposerResult*.
+read, and turned into a Host-owned ProposalBatch*.
 
 The lane workspace lifecycle is intentionally NOT owned here: the caller
 (``run_proposer_lanes``) creates the workspace before spawn and removes it in a
@@ -21,8 +21,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..proposer_lane_worker import proposal_from_dict
-from proposer import scientist as proposer_mod
+from ..stages.proposer import (
+    Abstention,
+    ProposalBatch,
+    decode_lane_proposals,
+)
 from .base import InfraRoundError
 
 _WORKER_META_NAME = "usage.json"
@@ -122,12 +125,12 @@ def _lane_id(job) -> int:
 
 
 def collect_lane_results(lane_jobs, *, round_id: int, telemetry=None):
-    """Turn finished lane jobs into a ``ProposerResult``.
+    """Turn finished lane jobs into a Host-owned ``ProposalBatch``.
 
     For each COMPLETED lane: ingest its ``usage.json`` into ``telemetry`` (the
     host never sees proposer model usage otherwise — this is the only path by
-    which it is recorded), and rebuild ``ResearchProposal`` objects from the
-    result dicts. Raises ``InfraRoundError`` when no lane reached COMPLETED.
+    which it is recorded), and decode only Host-relevant proposal facts from
+    the result dicts. Raises ``InfraRoundError`` when no lane reached COMPLETED.
     Does NOT remove lane workspaces — the caller owns that lifecycle.
     """
     proposals = []
@@ -143,9 +146,7 @@ def collect_lane_results(lane_jobs, *, round_id: int, telemetry=None):
             if telemetry is not None:
                 for record in (meta.get("usage") or []):
                     telemetry.record_usage(record)
-            lane_proposals = [
-                proposal_from_dict(pd) for pd in (res.get("proposals") or [])
-            ]
+            lane_proposals = decode_lane_proposals(res.get("proposals") or [])
             proposals.extend(lane_proposals)
             lane_traces.append({
                 "lane_id": lane_id,
@@ -161,12 +162,13 @@ def collect_lane_results(lane_jobs, *, round_id: int, telemetry=None):
         raise InfraRoundError(
             f"round {round_id}: all {len(lane_jobs)} proposer lane job(s) "
             "failed on infrastructure; the round was not recorded.")
-    return proposer_mod.ProposerResult(
-        proposals=proposals,
-        abstained=(len(proposals) == 0),
-        abstain_reason=("all lanes abstained/blocked/errored"
-                        if not proposals else None),
-        deliberation_telemetry={"lanes": lane_telemetries},
+    return ProposalBatch(
+        proposals=tuple(proposals),
+        abstention=(
+            Abstention("all lanes abstained/blocked/errored")
+            if not proposals else None
+        ),
+        telemetry={"lanes": lane_telemetries},
         trace={"lanes": lane_traces},
     )
 

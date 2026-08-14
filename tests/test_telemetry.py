@@ -216,11 +216,6 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
         def __init__(self, **kwargs):
             observers.append(kwargs.get("usage_observer"))
 
-    class FakeModel:
-        @classmethod
-        def from_config(cls, _config):
-            return object()
-
     class FakeWorkspace:
         def __init__(self, *, run_dir, **_kwargs):
             self.repo = run_dir / "repo"
@@ -268,7 +263,6 @@ def test_fresh_run_wires_agents_and_persists_fixed_baseline(
     monkeypatch.setattr(loop_mod.config_mod, "load", lambda _path: config)
     monkeypatch.setattr(loop_mod, "ApptainerRuntime", FakeRuntime)
     monkeypatch.setattr(loop_mod, "Agent", FakeAgent)
-    monkeypatch.setattr(loop_mod.model_mod, "HepAIChatModel", FakeModel)
     monkeypatch.setattr(loop_mod, "Workspace", FakeWorkspace)
     monkeypatch.setattr(loop_mod, "build_backend", lambda ctx: FakeBackend(ctx))
 

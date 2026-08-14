@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import proposer_lanes as pl
 from .base import ExecutionBackend, InfraRoundError
+from ..stages.proposer import ProposalBatch, ProposerRequest
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -54,7 +55,7 @@ class LocalBackend(ExecutionBackend):
             self.ctx, proposals, round_id, parent_sha,
         )
 
-    def run_proposer_lanes(self, *, round_id: int, base_sha: str):
+    def run_proposer_lanes(self, request: ProposerRequest) -> ProposalBatch:
         """Run the single proposer lane as a subprocess — the same
         ``simpleloop.proposer_lane_worker`` HEPJob submits via condor — then
         collect its ``result.json``. The Host never imports or runs proposer
@@ -63,6 +64,8 @@ class LocalBackend(ExecutionBackend):
         from ..proposer_lane_worker import ProposerLaneSpec
 
         ctx, cfg = self.ctx, self.ctx.cfg
+        round_id = request.round_id
+        base_sha = request.incumbent_sha
         run_dir = Path(ctx.run_dir)
         lane_id = 0
         result_dir = pl.lane_result_dir(run_dir, round_id, lane_id)

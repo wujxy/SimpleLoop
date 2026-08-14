@@ -43,6 +43,7 @@ from . import proposer_lanes as pl
 from .base import ExecutionBackend, InfraRoundError, RoundJournal
 from ..config import _CPU_MODEL_REQUIREMENTS
 from ..loop import BaselineAcceptanceError
+from ..stages.proposer import ProposalBatch, ProposerRequest
 
 
 def _requirements_expr(cfg: dict) -> str | None:
@@ -724,16 +725,18 @@ class HEPJobBackend(ExecutionBackend):
     # module is proposer_lane_worker; (c) PARTIAL lane failure is NOT a round
     # failure — successful lanes' proposals are collected and only an
     # all-infra-failure raises InfraRoundError; completed-but-empty (all lanes
-    # abstained/blocked) returns an abstain ProposerResult. Crash recovery is
+    # abstained/blocked) returns an abstain ProposalBatch. Crash recovery is
     # lightweight: inflight_proposer.json records lane job ids so a crashed
     # frontend can kill orphans and re-propose on --continue (no mid-flight
     # resume — the proposer is cheap relative to candidates).
     # ==================================================================
 
-    def run_proposer_lanes(self, *, round_id: int, base_sha: str):
+    def run_proposer_lanes(self, request: ProposerRequest) -> ProposalBatch:
         """Submit the single proposer-lane job, collect proposals, return a
-        ProposerResult. Reuses _Job + the condor wrappers; lane-specific
+        ProposalBatch. Reuses _Job + the condor wrappers; lane-specific
         prepare/submit/read/collect own the workspace + manifest shape."""
+        round_id = request.round_id
+        base_sha = request.incumbent_sha
         self._round_id = round_id
         self._parent_sha = base_sha
         self._journal = None
@@ -926,7 +929,7 @@ class HEPJobBackend(ExecutionBackend):
 
     def _collect_lanes(self, jobs: list[_Job], round_id: int):
         """Remove each lane's workspace, then delegate result collection
-        (usage ingest, proposal rebuild, ProposerResult assembly) to the shared
+        (usage ingest, proposal rebuild, ProposalBatch assembly) to the shared
         helper. The shared helper duck-types the lane id so HEPJob's ``_Job``
         (``.candidate_id``) and ``pl.LaneJob`` (``.lane_id``) both work."""
         for job in jobs:

@@ -12,6 +12,7 @@ import pytest
 
 from simpleloop.execution import proposer_lanes as pl
 from simpleloop.execution.base import InfraRoundError
+from simpleloop.stages.proposer import ProposalBatch
 
 
 def _write(result_dir: Path, name: str, payload: dict | str) -> None:
@@ -91,6 +92,7 @@ def test_collect_lane_results_builds_proposals_and_ingests_usage(tmp_path):
 
     out = pl.collect_lane_results([job], round_id=1, telemetry=telemetry)
 
+    assert isinstance(out, ProposalBatch)
     assert len(out.proposals) == 1
     assert out.proposals[0].instruction == "try cache"
     assert out.abstained is False
@@ -98,10 +100,10 @@ def test_collect_lane_results_builds_proposals_and_ingests_usage(tmp_path):
     # usage reaches the host).
     assert telemetry.records == [{"model": "glm", "input": 1},
                                  {"model": "glm", "input": 2}]
-    # per-lane trace/telemetry survive into the ProposerResult.
+    # Per-lane trace/telemetry survive into the Host ProposalBatch.
     assert out.trace == {"lanes": [{"lane_id": 0, "outcome": "submit",
                                     "n_proposals": 1, "reason_kind": None}]}
-    assert out.deliberation_telemetry == {
+    assert out.telemetry == {
         "lanes": [{"lane_id": 0, "telemetry": {"tool_calls": 3}}]}
 
 
@@ -114,9 +116,9 @@ def test_collect_lane_results_empty_proposals_is_an_abstention(tmp_path):
         "reason_kind": None, "telemetry": {},
     })
     out = pl.collect_lane_results([job], round_id=1)
-    assert out.proposals == []
+    assert out.proposals == ()
     assert out.abstained is True
-    assert out.abstain_reason == "all lanes abstained/blocked/errored"
+    assert out.abstention.reason == "all lanes abstained/blocked/errored"
 
 
 def test_collect_lane_results_raises_when_no_lane_completed(tmp_path):
