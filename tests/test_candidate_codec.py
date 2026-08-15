@@ -106,3 +106,35 @@ def test_worker_failure_reason_round_trips_through_eval_block():
     assert result.artifact is None
     assert result.evaluation is None
     assert encode_candidate_result(result) == raw
+
+
+def test_implementation_incomplete_round_trips_with_post_mortem():
+    """The incomplete-implementation candidate: post-mortem text in
+    eval_block, committed sha retained, excluded from evaluation and
+    selection."""
+    from simpleloop.candidate import CandidateStatus
+
+    raw = load_candidate()
+    raw.update({
+        "status": "IMPLEMENTATION_INCOMPLETE",
+        "sha": "child",
+        "eval_block": (
+            "[harness post-mortem] the experimenter session ended "
+            "without completing the intervention; "
+            "stop_cause=session_ended_without_report; changed: src/a.cc; "
+            "last words: 'Now I'll insert…'"),
+        "metrics": {},
+        "changed_paths": ["src/a.cc"],
+        "gates": {"PATHS": {"passed": None, "detail": ""}},
+        "gate_passed": False,
+        "eligible": False,
+    })
+
+    result = decode_candidate_result(raw)
+
+    assert result.status is CandidateStatus.IMPLEMENTATION_INCOMPLETE
+    assert "[harness post-mortem]" in result.execution.reason
+    assert result.artifact is not None and result.artifact.sha == "child"
+    assert result.evaluation is None  # never evaluated
+    assert result.eligible is False
+    assert encode_candidate_result(result) == raw

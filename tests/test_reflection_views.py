@@ -217,3 +217,62 @@ def test_prompt_templates_available():
     self_review = load_semantic("self_review")
     assert "Deliberation order (mandatory)" in self_review
     assert "Prosecution first" in self_review
+
+
+def test_expectation_ledger_marks_not_performed_untested():
+    from proposer.memory.reflection_views import expectation_ledger
+
+    class _Exp:
+        def __init__(self, status, selected=False, gate_passed=False):
+            self.experiment_id = "r1c0"
+            self.round = 1
+            self.candidate = 0
+            self.status = status
+            self.selected = selected
+            self.gate_passed = gate_passed
+            self.metrics = {}
+
+    rows = expectation_ledger(
+        [_Exp("IMPLEMENTATION_INCOMPLETE"), _Exp("GATE_REJECTED"),
+         _Exp("COMPLETED", gate_passed=True)],
+        {1: {"expectations": [
+            {"slot": 0, "expectation": "e", "would_weaken": "w"}]}},
+        current_round=2,
+    )
+    outcomes = [row["outcome"] for row in rows]
+    assert "INTERVENTION_NOT_PERFORMED" in outcomes
+    assert "FAILED_GATES" in outcomes
+    assert "PASSED_GATES_NOT_IMPROVED" in outcomes
+
+
+def test_execution_outcomes_counts_by_cause():
+    from proposer.memory.reflection_views import execution_outcomes
+
+    history = [
+        {"round": 0, "candidates": [
+            {"status": "IMPLEMENTATION_INCOMPLETE",
+             "eval_block": "[harness post-mortem] ...; stop_cause=timed_out;"},
+            {"status": "COMPLETED", "eligible": True},
+        ]},
+        {"round": 1, "candidates": [
+            {"status": "IMPLEMENTATION_INCOMPLETE",
+             "eval_block": "...; stop_cause=session_ended_without_report;"},
+            {"status": "WORKER_FAILED", "eval_block": "[loop failure] x"},
+        ]},
+    ]
+    out = execution_outcomes(history)
+    assert out["performed"] == 1
+    assert out["not_performed_by_cause"] == {
+        "IMPLEMENTATION_INCOMPLETE/timed_out": 1,
+        "IMPLEMENTATION_INCOMPLETE/session_ended_without_report": 1,
+        "WORKER_FAILED": 1,
+    }
+    # and the pack renders the section
+    from proposer.memory.reflection_views import render_reflection_pack
+    pack = render_reflection_pack(
+        current_round=2, experiments=[], findings={}, history_rows=history,
+        expectation_rows={}, previous_handoffs=[], metrics_schema={},
+    )
+    assert "## Experimenter session outcomes" in pack
+    assert "reached evaluation: 1" in pack
+    assert "session_ended_without_report" in pack

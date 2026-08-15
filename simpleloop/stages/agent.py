@@ -10,11 +10,17 @@ from ..world import ExecutionSandbox, ProcessRequest
 
 
 class AgentError(RuntimeError):
-    """Raised when the agent call fails or returns unparseable output."""
+    """Raised when the agent call fails or returns unparseable output.
 
-    def __init__(self, message: str, raw_output: str = ""):
+    ``cause`` classifies the session's death for the failure-path state
+    machine: ``timed_out`` (wall-clock budget), ``crashed`` (non-zero exit),
+    or ``""`` for parse-level failures of an otherwise-live process."""
+
+    def __init__(self, message: str, raw_output: str = "",
+                 cause: str = ""):
         super().__init__(message)
         self.raw_output = raw_output
+        self.cause = cause
 
 
 @dataclass
@@ -99,13 +105,15 @@ class Agent:
         if completed.timed_out:
             raise AgentError(
                 f"[{label}] timed out after {self.timeout_seconds}s\n"
-                f"stderr: {completed.stderr.strip()[:2000]}"
+                f"stderr: {completed.stderr.strip()[:2000]}",
+                cause="timed_out",
             )
         if completed.exit_code != 0:
             raise AgentError(
                 f"[{label}] claude exited {completed.exit_code}\n"
                 f"stdout: {completed.stdout.strip()[:2000]}\n"
-                f"stderr: {completed.stderr.strip()[:2000]}"
+                f"stderr: {completed.stderr.strip()[:2000]}",
+                cause="crashed",
             )
         print(
             f"[{label}] claude call finished "

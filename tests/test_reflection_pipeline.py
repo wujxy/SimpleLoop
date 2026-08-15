@@ -381,3 +381,124 @@ def test_loop_reflection_failure_interrupts_without_consuming_round():
     assert task_rounds == []
     assert result.state.next_round == 0
     assert clears == [1]
+
+
+def test_loop_stops_after_two_consecutive_all_dead_rounds():
+    """A round whose candidates all died before evaluation consumes its
+    round id (execution cost is real) — but two in a row stop the run."""
+    from simpleloop.candidate import (
+        CandidateArtifact, CandidateResult, CandidateStatus, EvaluationResult,
+        ExecutionResult, GateDecision,
+    )
+    from simpleloop.stages.proposer import Proposal, ProposalBatch
+    from simpleloop.stages.selector import Selection
+
+    def _dead_round(round_id):
+        dead = CandidateResult(
+            0, f"r{round_id}c0", Proposal("p"), "base",
+            CandidateStatus.IMPLEMENTATION_INCOMPLETE,
+            ExecutionResult("IMPLEMENTATION_INCOMPLETE", reason="pm"),
+            CandidateArtifact("base", f"child{round_id}"),
+            None, GateDecision({}, False, False),
+        )
+        return RoundResult(
+            round_id, "base", ProposalBatch((Proposal("p"),)), (dead,),
+            Selection(0, "", "no_eligible_candidate"),
+        )
+
+    class Rounds:
+        def run(self, request):
+            return _dead_round(request.round_id)
+
+    class NeverRsi:
+        def due(self, round_id):
+            return False
+
+        def run(self, round_id):
+            raise AssertionError("RSI must not run")
+
+    class History:
+        def append_round(self, result):
+            pass
+
+    class Checkpoint:
+        def clear(self):
+            pass
+
+    class Observer:
+        def round_committed(self, result):
+            pass
+
+    result = run_loop(
+        LoopRequest("goal", 20, LoopState(0, "base", {"OBJ": 100.0}), POLICY),
+        rounds=Rounds(), rsi=NeverRsi(),
+        history=History(), checkpoint=Checkpoint(), observer=Observer(),
+    )
+    assert result.interrupted
+    assert "no performed experiments" in result.interruption
+    # both rounds committed (ids consumed), stopped right after the second
+    assert result.task_rounds == 2
+    assert result.state.next_round == 2
+
+
+def test_loop_partial_death_resets_all_dead_streak():
+    from simpleloop.candidate import (
+        CandidateArtifact, CandidateResult, CandidateStatus, EvaluationResult,
+        ExecutionResult, GateDecision,
+    )
+    from simpleloop.stages.proposer import Proposal, ProposalBatch
+    from simpleloop.stages.selector import Selection
+
+    def _mixed_round(round_id):
+        dead = CandidateResult(
+            0, f"r{round_id}c0", Proposal("p"), "base",
+            CandidateStatus.IMPLEMENTATION_INCOMPLETE,
+            ExecutionResult("IMPLEMENTATION_INCOMPLETE", reason="pm"),
+            CandidateArtifact("base", f"dead{round_id}"),
+            None, GateDecision({}, False, False),
+        )
+        alive = CandidateResult(
+            1, f"r{round_id}c1", Proposal("q"), "base",
+            CandidateStatus.GATE_REJECTED,
+            ExecutionResult("COMMITTED"),
+            CandidateArtifact("base", f"child{round_id}"),
+            EvaluationResult("", {"OBJ": 90.0}),
+            GateDecision({}, False, True),
+        )
+        return RoundResult(
+            round_id, "base", ProposalBatch((Proposal("p"), Proposal("q"))),
+            (dead, alive),
+            Selection(0, "", "no_eligible_candidate"),
+        )
+
+    class Rounds:
+        def run(self, request):
+            return _mixed_round(request.round_id)
+
+    class NeverRsi:
+        def due(self, round_id):
+            return False
+
+        def run(self, round_id):
+            raise AssertionError("RSI must not run")
+
+    class History:
+        def append_round(self, result):
+            pass
+
+    class Checkpoint:
+        def clear(self):
+            pass
+
+    class Observer:
+        def round_committed(self, result):
+            pass
+
+    result = run_loop(
+        LoopRequest("goal", 5, LoopState(0, "base", {"OBJ": 100.0}), POLICY),
+        rounds=Rounds(), rsi=NeverRsi(),
+        history=History(), checkpoint=Checkpoint(), observer=Observer(),
+    )
+    # any performed candidate keeps the run alive
+    assert not result.interrupted
+    assert result.task_rounds == 5

@@ -124,7 +124,11 @@ structured response.
                 label=f"executor r{request.round_id}-c{request.candidate_id}",
             )
         except (AgentError, ValueError) as exc:
-            return ExecutionResult("EXECUTOR_FAILED", reason=str(exc))
+            cause = getattr(exc, "cause", "") or "crashed"
+            return ExecutionResult(
+                "EXECUTOR_FAILED",
+                reason=f"stop_cause={cause}; {exc}",
+            )
         return ExecutionResult(
             "EXECUTED",
             output=output,

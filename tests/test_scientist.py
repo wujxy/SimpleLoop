@@ -935,3 +935,90 @@ def test_world_event_renders_experimenter_report():
     assert "step 3 simplified" in we
     # absent and explicitly-unreported both surface as not on record
     assert we.count("NOT ON RECORD") == 2
+
+
+def test_world_event_honest_categories_and_time_sense(tmp_path):
+    """Not-performed candidates are never lies about gates; the header says
+    where the Scientist is in round-id time."""
+    class _StatedExp(_FakeExp):
+        def __init__(self, rnd, cand, sel, gp, status="completed",
+                     metrics=None, eval_block=""):
+            super().__init__(rnd, cand, sel, gp, metrics=metrics)
+            self.status = status
+            self.eval_block = eval_block
+
+    exps = [
+        _StatedExp(2, 0, False, False,
+                   status="IMPLEMENTATION_INCOMPLETE",
+                   eval_block=(
+                       "[harness post-mortem] the experimenter session ended "
+                       "without completing the intervention; "
+                       "stop_cause=session_ended_without_report")),
+        _StatedExp(2, 1, False, False, status="NO_CHANGE"),
+        _StatedExp(2, 2, False, True, status="COMPLETED",
+                   metrics={"SPEED_MS": 1.0}),
+    ]
+
+    class _Mem:
+        run_dir = tmp_path
+        def load_experiments(self):
+            return exps
+
+    expectations = _exp_row(2, [{
+        "slot": 0,
+        "expectation": "material improvement if lookup dominates",
+        "would_weaken": "a neutral result weakens the lookup hypothesis",
+    }])
+    we = _build_world_event(_Mem(), 5, "beefdead", expectations=expectations)
+    # honest categories
+    assert "INTERVENTION_NOT_PERFORMED" in we
+    assert "gate: NOT RUN" in we
+    assert "[harness post-mortem]" in we
+    assert "stop_cause=session_ended_without_report" in we
+    assert "NO_CHANGE" in we
+    # expectation for the never-performed intervention is UNTESTED
+    assert "UNTESTED" in we
+    assert "material improvement if lookup dominates" in we
+    # time sense: resuming round + gap labeling
+    assert "resuming at round 5" in we
+    assert "latest round with experiments is 2" in we
+    # gap rounds 3,4 labeled (no reflection/self logs in tmp_path)
+    assert "3=no recorded experiments" in we
+    assert "4=no recorded experiments" in we
+    # a performed pass is still reported as gates-run
+    assert "PASSED_GATES_NOT_IMPROVED" in we
+
+
+def test_protocol_death_carries_last_reply_and_trace(tmp_path, monkeypatch):
+    """Regression (omilrec r26): a lane that dies of protocol failure must
+    leave the model's last raw reply both in the error message AND in the
+    trace riding on the exception — the lane result records it durably."""
+    monkeypatch.setattr(
+        proposer_mod, "ResearchTools", _FakeResearchTools)
+    bad = [
+        "this is not json at all",
+        '{"action": {"action": "no_such_action"}}',
+        '{"action": {"action": "also_bogus"}}',
+    ]
+    agent = _make_agent(bad, max_steps=5)
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v4")
+    raised = None
+    try:
+        agent.research(
+            goal="optimize the FCN", editable=["src"], world_mount=None,
+            memory_service=_FakeMem([]), base_sha="abc123",
+            source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+            current_round=0, gate_block="g", prompt_dir=None,
+            proposal_slots=1, session=session, max_steps=5,
+        )
+    except Exception as exc:
+        raised = exc
+    assert raised is not None
+    message = str(raised)
+    assert "action protocol failed" in message
+    assert "last reply" in message
+    trace = getattr(raised, "proposer_trace", None)
+    assert isinstance(trace, dict)
+    assert "also_bogus" in trace["last_raw_reply"]
+    assert trace["outcome"] == "error"

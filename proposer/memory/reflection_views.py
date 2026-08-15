@@ -60,8 +60,17 @@ def expectation_ledger(
     for exp in sorted(experiments, key=lambda e: (e.round, e.candidate)):
         if exp.round <= window_start or exp.round >= current_round:
             continue
+        status = str(getattr(exp, "status", "") or "")
         if exp.selected:
             outcome = "SELECTED_AS_NEW_INCUMBENT"
+        elif status in {
+                "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED",
+                "WORKER_FAILED"}:
+            # the intervention was never performed: the pre-registered
+            # expectation is UNTESTED, not weakened or supported
+            outcome = "INTERVENTION_NOT_PERFORMED"
+        elif status == "EVAL_FAILED":
+            outcome = "EVALUATION_FAILED"
         elif exp.gate_passed:
             outcome = "PASSED_GATES_NOT_IMPROVED"
         else:
@@ -85,6 +94,42 @@ def expectation_ledger(
             "metrics": dict(exp.metrics or {}),
         })
     return rows
+
+
+_NOT_PERFORMED_STATUSES = frozenset({
+    "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED", "WORKER_FAILED",
+})
+
+
+def execution_outcomes(history_rows: list, *, last_k_rounds: int = 12) -> dict:
+    """Execution-cost aggregate: how many commissioned candidates actually
+    reached evaluation, and what stopped the ones that did not (by status /
+    post-mortem cause). Information only — what it means for direction is
+    the reflecting Scientist's judgment."""
+    performed = 0
+    by_cause: dict[str, int] = {}
+    for record in history_rows:
+        if not isinstance(record, dict):
+            continue
+        rnd = record.get("round")
+        if not isinstance(rnd, int):
+            continue
+        for cand in record.get("candidates") or []:
+            if not isinstance(cand, dict):
+                continue
+            status = str(cand.get("status") or "")
+            if status in _NOT_PERFORMED_STATUSES:
+                cause = status
+                block = str(cand.get("eval_block") or "")
+                if "stop_cause=" in block:
+                    cause = (
+                        f"{status}/"
+                        f"{block.split('stop_cause=', 1)[1].split(';', 1)[0]}"
+                    )
+                by_cause[cause] = by_cause.get(cause, 0) + 1
+            else:
+                performed += 1
+    return {"performed": performed, "not_performed_by_cause": by_cause}
 
 
 def improvement_trajectory(
@@ -200,6 +245,7 @@ def render_reflection_pack(
         lower_is_better=lower_is_better)
     streak_prefix, streak = path_prefix_streak(
         experiments, current_round=current_round)
+    exec_outcomes = execution_outcomes(history_rows)
 
     lines = [
         f"REFLECTION EVIDENCE PACK (as of round {current_round})",
@@ -243,6 +289,23 @@ def render_reflection_pack(
             f"{missed}/{total}")
     else:
         lines.append("  (no experiments in the recent window)")
+    lines += [
+        "",
+        "## Experimenter session outcomes",
+        f"  commissioned candidates that reached evaluation: "
+        f"{exec_outcomes['performed']}",
+    ]
+    if exec_outcomes["not_performed_by_cause"]:
+        lines.append(
+            "  experimenter sessions that ended without completing the "
+            "intervention, by cause:")
+        for cause, count in sorted(
+                exec_outcomes["not_performed_by_cause"].items()):
+            lines.append(f"    {count:>3}x  {cause}")
+    else:
+        lines.append(
+            "  experimenter sessions that ended without completing the "
+            "intervention: none")
     lines += [
         "",
         "## Incumbent-improvement trajectory "

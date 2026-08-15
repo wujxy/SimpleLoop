@@ -47,8 +47,8 @@
       "selected": true,
       "telemetry": {},
       "self_report": {
-        "outcome": "no_report",
-        "summary": "",
+        "outcome": "completed",
+        "summary": "cached",
         "fidelity": ""
       }
     }

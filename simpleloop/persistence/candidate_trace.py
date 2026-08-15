@@ -29,7 +29,9 @@ class HandoffCandidateTrace:
         artifact: CandidateArtifact | None,
     ) -> None:
         status = (
-            "COMMITTED"
+            "IMPLEMENTATION_INCOMPLETE"
+            if execution.status == "IMPLEMENTATION_INCOMPLETE"
+            else "COMMITTED"
             if artifact is not None
             else "EXECUTOR_FAILED"
             if execution.status == "EXECUTOR_FAILED"
@@ -52,7 +54,7 @@ class HandoffCandidateTrace:
                 if execution.self_report is not None else None
             ),
         }
-        if status == "EXECUTOR_FAILED":
+        if status in {"EXECUTOR_FAILED", "IMPLEMENTATION_INCOMPLETE"}:
             row["error"] = execution.reason
         write_handoff(
             self.run_dir,

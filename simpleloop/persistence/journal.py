@@ -6,7 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from ..scheduling.envelope import ProtocolError, _atomic_json, _load
+from ..scheduling.envelope import ProtocolError, _atomic_json
+
+import json
+
+
+def _loads(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProtocolError(f"could not parse journal: {exc}") from exc
 
 
 SCHEMA = "simpleloop.inflight.v1"
@@ -85,7 +94,21 @@ class JobJournal:
     def load(self) -> JournalRecord | None:
         if not self.path.exists():
             return None
-        raw = _load(self.path)
+        # A blank/zero-byte journal (external truncation — writes are atomic,
+        # so a torn write cannot produce this) must not wedge the run at the
+        # next round boundary: treat it as no record, loudly. (omilrec-v100
+        # -001 died exactly here on a truncated inflight.json.)
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        if not text.strip():
+            print(
+                "[journal] WARNING: inflight journal is blank — "
+                "treating it as absent", flush=True,
+            )
+            return None
+        raw = _loads(text)
         if raw.get("schema") != SCHEMA:
             raise ProtocolError(f"unsupported inflight schema: {raw.get('schema')!r}")
         round_id = raw.get("round_id")

@@ -81,6 +81,7 @@ def test_resolve_parallel_episode_returns_complete_bounded_facts():
         "metrics": {"SPEED_MS": 90.0},
         "changed_paths": ["src/b.cc"],
         "eval_block": "objective=90\nphysics_gate=1",
+        "self_report": None,
     }
 
 

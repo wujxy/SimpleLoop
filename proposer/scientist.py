@@ -651,11 +651,23 @@ def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
     recent = rows[-n:]
     obj_label = objective_key or "(objective)"
     lines = [f"Recent task progress (last {len(recent)} of {len(rows)} task round(s)):"]
+    _not_performed = {
+        "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED", "WORKER_FAILED",
+    }
     for row in recent:
         rnd = row.get("round")
         cands = row.get("candidates") or []
         n_gate = sum(1 for c in cands
                      if isinstance(c, dict) and c.get("gate_passed"))
+        dead = [c for c in cands
+                if isinstance(c, dict)
+                and str(c.get("status") or "") in _not_performed]
+        dead_note = ""
+        if dead:
+            causes = "; ".join(
+                str(c.get("eval_block") or "")[:100] for c in dead)
+            dead_note = (
+                f" ({len(dead)}/{len(cands)} not performed: {causes})")
         selected = next((c for c in cands
                          if isinstance(c, dict) and c.get("selected")), None)
         if selected is not None:
@@ -664,11 +676,37 @@ def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
             obj_s = f"{obj}" if isinstance(obj, (int, float)) else "?"
             lines.append(
                 f"  - round {rnd}: {len(cands)} candidate(s), {n_gate} passed "
-                f"gates; selected {obj_label} = {obj_s}.")
+                f"gates; selected {obj_label} = {obj_s}.{dead_note}")
         else:
             lines.append(
                 f"  - round {rnd}: {len(cands)} candidate(s), {n_gate} passed "
-                f"gates; none selected.")
+                f"gates; none selected.{dead_note}")
+    # Lane failures (proposer sessions that died before producing directions)
+    # never reach history — surface them here so a self-review sees the layer
+    # a failure actually lived in. Best-effort; absent lanes read as none.
+    try:
+        lane_notes: list[str] = []
+        for row in recent:
+            rnd = row.get("round")
+            lane_path = (
+                Path(run_dir) / "rounds" / f"r{rnd}" / "lanes" / "l0"
+                / "result.json"
+            )
+            if not lane_path.exists():
+                continue
+            payload = json.loads(lane_path.read_text(encoding="utf-8"))
+            result = payload.get("result") or {}
+            if str(result.get("outcome") or "") == "error":
+                lane_notes.append(
+                    f"  - round {rnd} proposer lane failure: "
+                    f"{str(result.get('abstain_reason') or '')[:200]}")
+        if lane_notes:
+            lines.append(
+                "Proposer-lane failures in the same window (infrastructure "
+                "facts, not research outcomes):")
+            lines.extend(lane_notes)
+    except Exception:
+        pass
     # Advisory RSI bridge: a recent reflection that suspected a stable
     # self-limitation is evidence a self-review should weigh — one judgment,
     # not a diagnosis. Best-effort (a missing reflection log reads as none).
@@ -814,6 +852,52 @@ def _fmt_metrics(metrics: dict) -> str:
     return "metrics=" + ", ".join(parts)
 
 
+def _gap_note(current_round: int, replay_round: int, run_dir=None) -> str:
+    """Time-sense for the resume header: label what the round ids between
+    the latest experiment round and now were, so the Scientist's sense of
+    "where am I" does not drift during mechanism-round gaps (omilrec
+    postmortem: the notebook wrote 'resuming after round 22' at round 29)."""
+    gap_rounds = list(range(replay_round + 1, current_round))
+    if not gap_rounds:
+        return ""
+    reflection_rounds: set[int] = set()
+    self_rounds: set[int] = set()
+    try:
+        reflection_rounds = {
+            int(record.get("round_id"))
+            for record in read_reflection_records(Path(run_dir))
+        }
+    except Exception:
+        pass
+    try:
+        path = Path(run_dir) / "self" / "history.jsonl"
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                value = event.get("round")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    self_rounds.add(value)
+    except Exception:
+        pass
+    labels = []
+    for round_id in gap_rounds:
+        if round_id in reflection_rounds:
+            labels.append(f"{round_id}=reflection")
+        elif round_id in self_rounds:
+            labels.append(f"{round_id}=self-review")
+        else:
+            labels.append(f"{round_id}=no recorded experiments")
+    return (
+        " Rounds in between: " + ", ".join(labels) + "."
+    )
+
+
 def _build_world_event(
     memory_service, current_round: int, base_sha: str,
     expectations: dict[int, dict] | None = None,
@@ -869,6 +953,13 @@ def _build_world_event(
         "OUTCOMES — what you asked is in your own notebook; if you need the "
         "detail of one experiment, inspect it deliberately.",
         "",
+        f"You are resuming at round {current_round}. The latest round with "
+        f"experiments is {replay_round}."
+        + _gap_note(
+            current_round, replay_round,
+            getattr(memory_service, "run_dir", None),
+        ),
+        "",
         f"Previous accepted revision: {prev_sha[:10]}",
         "",
         f"Outcomes from your experiments in round {replay_round}:",
@@ -880,14 +971,34 @@ def _build_world_event(
         row.get("slot"): row for row in exp_rows if isinstance(row, dict)
     }
     for e in last:
+        status = str(getattr(e, "status", "") or "")
         if e.selected:
             outcome = "SELECTED_AS_NEW_INCUMBENT"
+        elif status == "IMPLEMENTATION_INCOMPLETE":
+            outcome = (
+                "INTERVENTION_NOT_PERFORMED — the experimenter session ended "
+                "before the intervention was completed; this experiment "
+                "produced no evidence about its mechanism"
+            )
+        elif status in {"EXECUTOR_FAILED", "WORKER_FAILED"}:
+            outcome = (
+                "EXPERIMENT_NOT_PERFORMED — the execution infrastructure "
+                "failed before the intervention ran"
+            )
+        elif status == "NO_CHANGE":
+            outcome = "NO_CHANGE — the experimenter made no change to the world"
+        elif status == "EVAL_FAILED":
+            outcome = "EVALUATION_FAILED — the evaluation itself failed"
         elif e.gate_passed:
             outcome = "PASSED_GATES_NOT_IMPROVED"
         else:
             outcome = "FAILED_GATES"
         candidate = e.candidate_sha[:10] if e.candidate_sha else "—"
         paths = ", ".join(e.changed_paths) if e.changed_paths else "—"
+        not_performed = status in {
+            "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED", "WORKER_FAILED",
+            "NO_CHANGE", "EVAL_FAILED",
+        }
         lines.append(f"  {e.experiment_id}")
         lines.append(
             f"    parent revision: {e.parent_sha[:10]}   "
@@ -895,9 +1006,17 @@ def _build_world_event(
         )
         lines.append(f"    changed paths: {paths}")
         lines.append(
+            "    gate: NOT RUN"
+            if not_performed else
             f"    gate: {'PASSED' if e.gate_passed else 'FAILED'}   "
             f"{_fmt_metrics(e.metrics)}"
         )
+        if status in {"IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED",
+                      "WORKER_FAILED"} and e.eval_block:
+            lines.append(
+                "    harness record of what happened: "
+                f"{e.eval_block[:300]}"
+            )
         lines.append(f"    outcome: {outcome}")
         report = e.self_report if hasattr(e, "self_report") else None
         if isinstance(report, dict) and str(
@@ -921,16 +1040,30 @@ def _build_world_event(
             )
         row = exp_by_slot.get(e.candidate)
         if row is not None:
-            lines.append(
-                "    pre-registered expectation (your own words at "
-                "suspension, before this result existed): "
-                f"{row.get('expectation')}"
-            )
-            if row.get("would_weaken"):
+            if not_performed and status in {
+                    "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED",
+                    "WORKER_FAILED"}:
                 lines.append(
-                    f"    you said this would weaken the belief if: "
-                    f"{row.get('would_weaken')}"
+                    "    pre-registered expectation (your own words at "
+                    "suspension, before this result existed): "
+                    f"{row.get('expectation')}"
                 )
+                lines.append(
+                    "    this expectation is UNTESTED — the intervention was "
+                    "never performed, so no outcome exists to weaken or "
+                    "support the belief."
+                )
+            else:
+                lines.append(
+                    "    pre-registered expectation (your own words at "
+                    "suspension, before this result existed): "
+                    f"{row.get('expectation')}"
+                )
+                if row.get("would_weaken"):
+                    lines.append(
+                        f"    you said this would weaken the belief if: "
+                        f"{row.get('would_weaken')}"
+                    )
         elif round_expectations:
             lines.append(
                 "    pre-registered expectation: NOT RECORDED for this slot "
@@ -1860,6 +1993,36 @@ class ScientistAgent(ResearchAgent):
         budget_reminder_step = int(0.8 * steps_budget)
         reminded = False
 
+        try:
+            return self._deliberate_loop(
+                system_prompt=system_prompt, messages=messages,
+                session=session, current_round=current_round,
+                steps_budget=steps_budget, deadline=deadline,
+                usages=usages, state=state, source_root=source_root,
+                tools_factory=tools_factory, terminal_name=terminal_name,
+                budget_nudge=budget_nudge, make_result=make_result,
+                capture_expectations=capture_expectations,
+                budget_reminder_step=budget_reminder_step,
+            )
+        except Exception as exc:
+            # A protocol/infra death must still leave its witness: the trace
+            # (with the model's last raw reply) rides on the exception so the
+            # lane result records it instead of an empty trace (omilrec:
+            # r26's cause was invisible for exactly this reason).
+            exc.proposer_trace = _build_trace(  # type: ignore[attr-defined]
+                state, round_id=current_round, outcome="error",
+            )
+            raise
+
+    def _deliberate_loop(
+        self, *,
+        system_prompt, messages, session, current_round, steps_budget,
+        deadline, usages, state, source_root, tools_factory,
+        terminal_name, budget_nudge, make_result, capture_expectations,
+        budget_reminder_step,
+    ):
+        reminded = False
+        started = time.monotonic()
         with TemporaryDirectory(prefix="simpleloop-scratch-") as scratch, \
                 TemporaryDirectory(prefix="simpleloop-session-") as session_root:
             home = Path(session_root) / "home"

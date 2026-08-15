@@ -58,3 +58,22 @@ def test_journal_transition_rejects_wrong_active_stage(tmp_path):
 
     with pytest.raises(ProtocolError, match="expected active stage"):
         journal.transition("proposer", "candidates", 2, {}, [])
+
+
+def test_blank_journal_reads_as_absent(tmp_path):
+    """A truncated/blank inflight.json must not wedge the run at the next
+    round boundary (omilrec-v100-001 died exactly here)."""
+    path = tmp_path / "inflight.json"
+    path.write_text("", encoding="utf-8")
+    assert JobJournal(path).load() is None
+    path.write_text("   \n", encoding="utf-8")
+    assert JobJournal(path).load() is None
+    # torn non-blank JSON stays strict — writes are atomic, so this is
+    # corruption worth failing loudly on
+    path.write_text('{"schema": "simpleloop.infl', encoding="utf-8")
+    try:
+        JobJournal(path).load()
+    except Exception as exc:
+        assert "journal" in str(exc) or "parse" in str(exc)
+    else:
+        raise AssertionError("torn journal must not read as absent")

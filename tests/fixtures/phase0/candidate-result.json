@@ -30,5 +30,11 @@
   "gate_passed": true,
   "eligible": true,
   "selected": false,
-  "self_report": null
+  "self_report": {
+    "outcome": "completed",
+    "blocked_reason_kind": null,
+    "summary": "cached",
+    "fidelity": "",
+    "local_runs": []
+  }
 }

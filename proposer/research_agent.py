@@ -38,6 +38,12 @@ class WorkingState:
     new_evidence: set[str] = field(default_factory=set)
     action_log: list[dict] = field(default_factory=list)
     protocol_repairs: int = 0
+    # The raw model reply of the most recent protocol-violating turn. When a
+    # lane dies of protocol failure this is the only durable witness of what
+    # the model actually emitted — carried in the trace so the failure is
+    # diagnosable from the lane artifacts (omilrec: r26's death message came
+    # back without it and the cause stayed invisible).
+    last_raw_reply: str = ""
     candidate_directions: str = ""
     located: bool = False
     last_tool_fingerprint: str | None = None
@@ -166,6 +172,7 @@ def _build_trace(
         "outcome": outcome,
         "reason_kind": reason_kind,
         "evidence_refs": list(evidence_refs),
+        "last_raw_reply": state.last_raw_reply[:400],
     }
 
 
@@ -274,6 +281,7 @@ class ResearchAgent:
             try:
                 action = self._parse_action(reply.text)
             except AgentError as exc:
+                state.last_raw_reply = reply.text
                 if repair == _MAX_PROTOCOL_REPAIRS:
                     raise err(
                         "action protocol failed after "
@@ -302,6 +310,7 @@ class ResearchAgent:
                 state, action, source_root or Path("."),
             )
             if guard is not None:
+                state.last_raw_reply = reply.text
                 if repair == _MAX_PROTOCOL_REPAIRS:
                     raise err(
                         "action protocol failed after "

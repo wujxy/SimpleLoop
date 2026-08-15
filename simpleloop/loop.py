@@ -7,6 +7,12 @@ from typing import Mapping, Protocol
 from .round import RoundRequest, RoundResult, SelectionPolicy
 from .scheduling.contracts import InfrastructureError
 
+# Candidate statuses that never reached evaluation: the intervention was not
+# performed (experimenter session death, worker failure).
+_NOT_PERFORMED = frozenset({
+    "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED", "WORKER_FAILED",
+})
+
 
 @dataclass(frozen=True)
 class LoopState:
@@ -104,6 +110,7 @@ def run_loop(
     rsi_rounds = 0
     reflection_rounds = 0
     rsi_tally: dict[str, int] = {}
+    all_dead_streak = 0
     while state.next_round < request.stop_round:
         round_id = state.next_round
         try:
@@ -168,6 +175,29 @@ def run_loop(
             dict(winner.metrics) if winner is not None else state.incumbent_metrics,
         )
         task_rounds += 1
+        # All-dead-round alarm (failure-path design §3.3): a round whose
+        # candidates ALL failed to reach evaluation is recorded (the round id
+        # is consumed — execution cost is real information) but two in a row
+        # is a systemic executor/provider failure, not research noise.
+        performed = [
+            c for c in result.candidates
+            if str(getattr(c.status, "value", c.status)) not in _NOT_PERFORMED
+        ]
+        if result.candidates and not performed:
+            all_dead_streak += 1
+            if all_dead_streak >= 2:
+                return LoopResult(
+                    state, task_rounds, rsi_rounds, rsi_tally,
+                    reflection_rounds=reflection_rounds,
+                    interrupted=True,
+                    interruption=(
+                        "2 consecutive rounds produced no performed "
+                        "experiments — executor/provider failure suspected; "
+                        "stopping instead of burning rounds"
+                    ),
+                )
+        else:
+            all_dead_streak = 0
     return LoopResult(
         state, task_rounds, rsi_rounds, rsi_tally, reflection_rounds,
     )

@@ -86,6 +86,9 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
         "metrics": candidate.get("metrics") or {},
         "changed_paths": candidate.get("changed_paths") or [],
         "eval_block": candidate.get("eval_block") or "",
+        # Parity with the proposer-side reader (proposer/memory/history.py):
+        # the experimenter's account is part of the episode record.
+        "self_report": candidate.get("self_report"),
     }
 
 

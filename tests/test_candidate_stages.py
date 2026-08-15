@@ -94,7 +94,20 @@ def test_agent_executor_normalizes_agent_error(tmp_path: Path):
     )
 
     assert result.status == "EXECUTOR_FAILED"
-    assert result.reason == "model unavailable"
+    # the death cause is a first-class prefix for the state machine
+    assert result.reason == "stop_cause=crashed; model unavailable"
+
+
+def test_agent_executor_carries_timeout_cause(tmp_path: Path):
+    class TimingOutAgent(FakeAgent):
+        def run_text(self, prompt: str, *, cwd: Path, label: str) -> str:
+            raise AgentError("[x] timed out", cause="timed_out")
+
+    result = AgentExecutor(TimingOutAgent(), ExecutorConfig("goal")).execute(
+        ExecutionRequest(2, 3, Proposal("cache it"), source(tmp_path))
+    )
+
+    assert result.reason.startswith("stop_cause=timed_out;")
 
 
 def test_parse_self_report_remains_best_effort():

@@ -246,9 +246,13 @@ class ProposerOrchestrator:
                 flush=True,
             )
             _safe_save_meta(session, current_round, base_sha)
+            # The deliberation loop attaches its trace (incl. the model's
+            # last raw reply) to the exception on protocol death — keep it
+            # as the lane's trace so the cause is durable in the artifacts.
             return LaneResult(
                 lane_id=lane_id, outcome="error", abstain_reason=str(exc),
                 deliberation_telemetry={"tool_calls": 0},
+                trace=getattr(exc, "proposer_trace", None) or {},
             )
         _commit_proposals_safe(memory_service, current_round, result)
         _safe_save_meta(session, current_round, base_sha)

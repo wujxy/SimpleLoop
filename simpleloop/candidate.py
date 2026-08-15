@@ -18,6 +18,11 @@ class CandidateStatus(str, Enum):
     EVAL_FAILED = "EVAL_FAILED"
     WORKER_FAILED = "WORKER_FAILED"
     BASELINE = "BASELINE"
+    # The experimenter session ended without completing the intervention
+    # (died, timed out, or ended with no SELF_REPORT). The intervention was
+    # never performed: no evaluation runs, the partial diff is committed for
+    # traceability, and a harness-signed post-mortem states what happened.
+    IMPLEMENTATION_INCOMPLETE = "IMPLEMENTATION_INCOMPLETE"
 
 
 @dataclass(frozen=True)
@@ -148,6 +153,19 @@ class CandidateTrace(Protocol):
         ...
 
 
+def _agent_stop_cause(reason: str | None) -> str:
+    """Classify an executor session death from its recorded reason.
+
+    The executor prefixes AgentError reasons with ``stop_cause=``; anything
+    else on that path is a crash by elimination."""
+    text = str(reason or "")
+    if "stop_cause=" in text:
+        cause = text.split("stop_cause=", 1)[1].split(";", 1)[0].strip()
+        if cause:
+            return cause
+    return "crashed"
+
+
 def _candidate_result(
     request: CandidateRequest,
     *,
@@ -210,13 +228,58 @@ def run_candidate(
         request.proposal,
         request.workspace,
     ))
-    if execution.status == CandidateStatus.EXECUTOR_FAILED.value:
-        trace.record_execution(request, execution, None)
+    # Death detection (failure-path design §3.1): a session that timed out,
+    # crashed, or ended without a parseable SELF_REPORT did not complete the
+    # intervention. It is NOT an experiment — no evaluation runs. The partial
+    # diff (if any) is committed for traceability and a harness-signed
+    # post-mortem states what happened; the Researcher sees the outcome as
+    # INTERVENTION_NOT_PERFORMED, never as a tested-and-failed experiment.
+    report_outcome = (
+        (execution.self_report or {}).get("outcome")
+        if isinstance(execution.self_report, dict) else None
+    )
+    died_silent = (
+        execution.status == "EXECUTED"
+        and report_outcome not in {"completed", "partial", "blocked"}
+    )
+    if execution.status == "EXECUTOR_FAILED" or died_silent:
+        stop_cause = (
+            "session_ended_without_report" if died_silent
+            else _agent_stop_cause(execution.reason)
+        )
+        changed = artifacts.inspect(request.workspace)
+        artifact = None
+        if changed:
+            artifact = artifacts.commit(request.workspace, CommitRequest(
+                request.round_id,
+                request.candidate_id,
+                request.parent_sha,
+                changed,
+            ))
+        execution = replace(
+            execution,
+            status=CandidateStatus.IMPLEMENTATION_INCOMPLETE.value,
+            reason=(
+                "[harness post-mortem] the experimenter session ended "
+                f"without completing the intervention; stop_cause="
+                f"{stop_cause}; changed: "
+                f"{', '.join(str(p) for p in changed) if changed else 'none'}"
+                f"; last words: {execution.output[-300:]!r}"
+            ),
+        )
+        trace.record_execution(request, execution, artifact)
         return _candidate_result(
             request,
-            status=CandidateStatus.EXECUTOR_FAILED,
+            status=CandidateStatus.IMPLEMENTATION_INCOMPLETE,
             execution=execution,
-            gate=unavailable_gates(gate_spec),
+            artifact=artifact,
+            gate=unavailable_gates(
+                gate_spec,
+                reason=(
+                    "not run because the intervention was never completed "
+                    f"({stop_cause})"
+                ),
+            ),
         )
 
     changed_paths = artifacts.inspect(request.workspace)

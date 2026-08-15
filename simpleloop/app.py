@@ -122,6 +122,26 @@ class _RoundObserver:
             result.round_id, result.candidates,
             self.metrics_schema, self.prior_metrics,
         )
+        # Failure-path visibility: any candidate that never reached
+        # evaluation is surfaced with its cause (harness post-mortem or
+        # worker failure) instead of silently reading as a failed experiment.
+        not_performed = [
+            candidate for candidate in result.candidates
+            if str(getattr(candidate.status, "value", candidate.status))
+            in {"IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED",
+                "WORKER_FAILED"}
+        ]
+        if not_performed:
+            causes = "; ".join(
+                f"c{candidate.candidate_id}: "
+                f"{(candidate.execution.reason or '')[:120]}"
+                for candidate in not_performed
+            )
+            print(
+                f"[{stamp()}] WARNING: round {result.round_id + 1}: "
+                f"{len(not_performed)} candidate(s) not performed "
+                f"({causes})", flush=True,
+            )
         winner = next((
             candidate for candidate in result.candidates
             if candidate.candidate_id == result.selection.candidate_id

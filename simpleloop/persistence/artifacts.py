@@ -132,6 +132,7 @@ def decode_candidate_result(raw: Mapping[str, object]) -> CandidateResult:
     failed = status in {
         CandidateStatus.EXECUTOR_FAILED,
         CandidateStatus.WORKER_FAILED,
+        CandidateStatus.IMPLEMENTATION_INCOMPLETE,
     }
     reason = (
         eval_block if failed
@@ -170,6 +171,7 @@ def encode_candidate_result(
         and result.status in {
             CandidateStatus.EXECUTOR_FAILED,
             CandidateStatus.WORKER_FAILED,
+            CandidateStatus.IMPLEMENTATION_INCOMPLETE,
         }
     ):
         reason = result.execution.reason or ""

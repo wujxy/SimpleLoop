@@ -38,7 +38,14 @@ def load(name: str) -> dict:
 def test_candidate_result_shape(tmp_path: Path):
     class Executor:
         def execute(self, request):
-            return ExecutionResult("EXECUTED")
+            # a performed session: ended WITH a SELF_REPORT
+            return ExecutionResult(
+                "EXECUTED",
+                self_report={
+                    "outcome": "completed", "blocked_reason_kind": None,
+                    "summary": "cached", "fidelity": "", "local_runs": [],
+                },
+            )
 
     class Artifacts:
         def inspect(self, worktree):

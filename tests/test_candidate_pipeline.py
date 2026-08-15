@@ -85,6 +85,20 @@ def request(tmp_path: Path) -> CandidateRequest:
     )
 
 
+def _executed_with_report() -> ExecutionResult:
+    """An executor session that ended with a valid SELF_REPORT — the only
+    shape that proceeds to commit + evaluation under the failure-path
+    semantics (no report means the intervention was not completed)."""
+    return ExecutionResult(
+        "EXECUTED",
+        output="did the work",
+        self_report={
+            "outcome": "completed", "blocked_reason_kind": None,
+            "summary": "done", "fidelity": "", "local_runs": [],
+        },
+    )
+
+
 def completed_evaluation() -> EvaluationResult:
     return EvaluationResult(
         "eval",
@@ -98,7 +112,7 @@ def test_run_candidate_completed_in_explicit_stage_order(tmp_path: Path):
 
     result = run_candidate(
         request(tmp_path),
-        executor=FakeExecutor(calls, ExecutionResult("EXECUTED")),
+        executor=FakeExecutor(calls, _executed_with_report()),
         artifacts=FakeArtifacts(calls),
         evaluator=FakeEvaluator(calls, completed_evaluation()),
         gate_spec=SPEC,
@@ -118,14 +132,21 @@ def test_run_candidate_completed_in_explicit_stage_order(tmp_path: Path):
     ]
 
 
-def test_executor_failure_stops_before_git(tmp_path: Path):
+def test_executor_death_is_incomplete_implementation_not_a_failed_experiment(
+        tmp_path: Path):
+    """An executor session death (timeout/crash) is not an experiment: no
+    evaluation, harness-signed post-mortem, partial diff committed for
+    traceability."""
     calls: list[str] = []
 
     result = run_candidate(
         request(tmp_path),
         executor=FakeExecutor(
             calls,
-            ExecutionResult("EXECUTOR_FAILED", reason="model unavailable"),
+            ExecutionResult(
+                "EXECUTOR_FAILED",
+                reason="stop_cause=timed_out; [x] timed out after 60s",
+            ),
         ),
         artifacts=FakeArtifacts(calls),
         evaluator=FakeEvaluator(calls, completed_evaluation()),
@@ -133,11 +154,39 @@ def test_executor_failure_stops_before_git(tmp_path: Path):
         trace=FakeTrace(calls),
     )
 
-    assert result.status is CandidateStatus.EXECUTOR_FAILED
-    assert result.execution.reason == "model unavailable"
-    assert result.sha is None
+    assert result.status is CandidateStatus.IMPLEMENTATION_INCOMPLETE
+    assert "[harness post-mortem]" in (result.execution.reason or "")
+    assert "stop_cause=timed_out" in (result.execution.reason or "")
+    # the corpse is committed (traceable sha) but never evaluated or selected
+    assert result.sha == "child"
+    assert result.eligible is False
     assert result.gate.results["PATHS"].passed is None
-    assert calls == ["execute", "execution-trace"]
+    assert "evaluate" not in calls
+    assert calls == ["execute", "inspect", "commit", "execution-trace"]
+
+
+def test_executor_ended_silent_without_report_is_incomplete(tmp_path: Path):
+    """The omilrec failure class: exit 0, no SELF_REPORT, partial work.
+    No report means no narrator means not a performed experiment."""
+    calls: list[str] = []
+
+    result = run_candidate(
+        request(tmp_path),
+        executor=FakeExecutor(calls, ExecutionResult(
+            "EXECUTED", output="Now I'll insert the cache builder…",
+        )),
+        artifacts=FakeArtifacts(calls),
+        evaluator=FakeEvaluator(calls, completed_evaluation()),
+        gate_spec=SPEC,
+        trace=FakeTrace(calls),
+    )
+
+    assert result.status is CandidateStatus.IMPLEMENTATION_INCOMPLETE
+    assert "session_ended_without_report" in (result.execution.reason or "")
+    assert "Now I'll insert the cache builder" in (
+        result.execution.reason or "")
+    assert "evaluate" not in calls
+    assert result.sha == "child"
 
 
 def test_no_change_skips_commit_and_evaluation(tmp_path: Path):
@@ -145,7 +194,7 @@ def test_no_change_skips_commit_and_evaluation(tmp_path: Path):
 
     result = run_candidate(
         request(tmp_path),
-        executor=FakeExecutor(calls, ExecutionResult("EXECUTED")),
+        executor=FakeExecutor(calls, _executed_with_report()),
         artifacts=FakeArtifacts(calls, paths=()),
         evaluator=FakeEvaluator(calls, completed_evaluation()),
         gate_spec=SPEC,
@@ -164,7 +213,7 @@ def test_eval_error_retains_committed_artifact(tmp_path: Path):
 
     result = run_candidate(
         request(tmp_path),
-        executor=FakeExecutor(calls, ExecutionResult("EXECUTED")),
+        executor=FakeExecutor(calls, _executed_with_report()),
         artifacts=FakeArtifacts(calls),
         evaluator=FakeEvaluator(
             calls,
@@ -187,7 +236,7 @@ def test_nonzero_command_is_gate_rejection(tmp_path: Path):
 
     result = run_candidate(
         request(tmp_path),
-        executor=FakeExecutor(calls, ExecutionResult("EXECUTED")),
+        executor=FakeExecutor(calls, _executed_with_report()),
         artifacts=FakeArtifacts(calls),
         evaluator=FakeEvaluator(
             calls,
@@ -211,7 +260,7 @@ def test_hard_gate_failure_is_gate_rejection(tmp_path: Path):
 
     result = run_candidate(
         request(tmp_path),
-        executor=FakeExecutor(calls, ExecutionResult("EXECUTED")),
+        executor=FakeExecutor(calls, _executed_with_report()),
         artifacts=FakeArtifacts(calls),
         evaluator=FakeEvaluator(
             calls,
