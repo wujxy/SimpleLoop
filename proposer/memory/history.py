@@ -96,4 +96,7 @@ def resolve_episode(history: list[dict], ref: str) -> dict:
         "metrics": candidate.get("metrics") or {},
         "changed_paths": candidate.get("changed_paths") or [],
         "eval_block": candidate.get("eval_block") or "",
+        # The experimenter's objective account (absent for rounds run before
+        # reports were retained).
+        "self_report": candidate.get("self_report"),
     }
