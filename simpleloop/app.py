@@ -107,14 +107,6 @@ class _RoundObserver:
             flush=True,
         )
 
-    def reflection_failed(self, round_id: int, detail: str) -> None:
-        print(
-            f"[{stamp()}] WARNING: reflection round {round_id + 1} failed "
-            f"({detail}); run continues, next reflection deferred to the "
-            "next interval",
-            flush=True,
-        )
-
     def rsi_finished(self, result) -> None:
         self.rsi_tally[result.decision] = (
             self.rsi_tally.get(result.decision, 0) + 1

@@ -21,11 +21,6 @@ class LoopRequest:
     stop_round: int
     state: LoopState
     selection: SelectionPolicy
-    # A task round that commits no candidates (proposer abstain OR protocol
-    # failure) is a wasted round id. A few in a row is a systemic proposer/
-    # provider problem, not research noise — stop the run with a diagnosis
-    # instead of burning the remaining budget on empty rounds.
-    max_empty_task_rounds: int = 3
 
 
 @dataclass(frozen=True)
@@ -57,13 +52,11 @@ class RsiRunner(Protocol):
 class ReflectionRunner(Protocol):
     """A periodic reflection checkpoint (continuity design §16): consumes a
     round id, leaves the incumbent unchanged, and returns the number of the
-    round it occupied."""
+    round it occupied. A failed reflection is infrastructure and fails the
+    run WITHOUT consuming the round id."""
 
     def due(self, round_id: int) -> bool: ...
     def run(self, round_id: int) -> int: ...
-    # ``defer`` is an OPTIONAL hook (called via getattr): a runner that knows
-    # its interval can push a FAILED reflection to the next interval so the
-    # loop does not retry it every round.
 
 
 class RoundHistory(Protocol):
@@ -80,8 +73,7 @@ class LoopObserver(Protocol):
     ``round_started`` and ``rsi_finished`` are optional hooks: ``run_loop``
     calls them only when the observer provides them, so a minimal observer
     (and test fakes) may implement ``round_committed`` alone.
-    ``reflection_started`` / ``reflection_finished`` /
-    ``reflection_failed`` follow the same rule.
+    ``reflection_started`` / ``reflection_finished`` follow the same rule.
     """
 
     def round_started(self, round_id: int, *, rsi: bool) -> None: ...
@@ -89,7 +81,6 @@ class LoopObserver(Protocol):
     def rsi_finished(self, result: RsiResult) -> None: ...
     def reflection_started(self, round_id: int) -> None: ...
     def reflection_finished(self, round_id: int) -> None: ...
-    def reflection_failed(self, round_id: int, detail: str) -> None: ...
 
 
 def _notify(observer: LoopObserver, hook: str, *args, **kwargs) -> None:
@@ -113,7 +104,6 @@ def run_loop(
     rsi_rounds = 0
     reflection_rounds = 0
     rsi_tally: dict[str, int] = {}
-    empty_task_streak = 0
     while state.next_round < request.stop_round:
         round_id = state.next_round
         try:
@@ -137,22 +127,14 @@ def run_loop(
                     reflection.run(round_id)
                     reflection_rounds += 1
                     _notify(observer, "reflection_finished", round_id)
-                except InfrastructureError as exc:
-                    # A failed reflection (worker/protocol/provider error)
-                    # must not kill the run: it leaves no record, so the
-                    # derived schedule would retry it every round — hand the
-                    # runner a chance to defer to its next interval instead.
-                    defer = getattr(reflection, "defer", None)
-                    if callable(defer):
-                        defer(round_id)
-                    # The failed reflection's stage is still journaled;
-                    # leaving it would make the next round's first batch
-                    # refuse to start (persisted stage/round mismatch). The
-                    # round id is consumed either way — drop the journal.
+                except InfrastructureError:
+                    # A failed reflection is infrastructure, not research:
+                    # fail the run (the round id is NOT consumed — a resume
+                    # retries the same round). The failed stage is still
+                    # journaled, and leaving it would make the next batch
+                    # refuse to start — drop the journal, then re-raise.
                     checkpoint.clear()
-                    _notify(
-                        observer, "reflection_failed", round_id, str(exc),
-                    )
+                    raise
                 state = LoopState(
                     round_id + 1,
                     state.incumbent_sha,
@@ -176,34 +158,6 @@ def run_loop(
         history.append_round(result)
         checkpoint.clear()
         observer.round_committed(result)
-        if result.candidates:
-            empty_task_streak = 0
-        else:
-            empty_task_streak += 1
-            if empty_task_streak >= request.max_empty_task_rounds:
-                reason = getattr(
-                    getattr(result.proposals, "abstention", None),
-                    "reason", None,
-                )
-                # The round DID commit to history — a --continue must resume
-                # after it, and the count must include it.
-                return LoopResult(
-                    LoopState(
-                        round_id + 1,
-                        state.incumbent_sha,
-                        state.incumbent_metrics,
-                    ),
-                    task_rounds + 1, rsi_rounds, rsi_tally,
-                    reflection_rounds=reflection_rounds,
-                    interrupted=True,
-                    interruption=(
-                        f"{empty_task_streak} consecutive task rounds "
-                        "produced no candidates"
-                        + (f" (last abstain: {reason})" if reason else "")
-                        + " — proposer/provider failure suspected; stopping "
-                        "instead of burning rounds"
-                    ),
-                )
         winner = next((
             candidate for candidate in result.candidates
             if candidate.candidate_id == result.selection.candidate_id

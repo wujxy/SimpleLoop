@@ -205,6 +205,15 @@ class ScheduledProposer:
         if envelope.status is WorkerStatus.FAILED:
             raise InfrastructureError(envelope.error or "proposer worker failed")
         raw = envelope.result
+        if str(raw.get("outcome") or "") == "error":
+            # Protocol/worker failure is INFRASTRUCTURE, not research: it
+            # must fail the round loudly (no history row, round id not
+            # consumed, resumed run retries the same round) instead of being
+            # absorbed as an empty research round.
+            raise InfrastructureError(
+                f"round {request.round_id}: proposer protocol failure: "
+                + str(raw.get("abstain_reason") or "unknown error")
+            )
         proposals = decode_lane_proposals(raw.get("proposals") or ())
         return ProposalBatch(
             proposals,

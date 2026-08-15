@@ -67,19 +67,15 @@ def _is_transient(exc: BaseException) -> bool:
     ))
 
 
-class OpenAICompatChatModel:
-    """Chat Completions adapter for any OpenAI-compatible endpoint.
+class _RetryChatModel:
+    """Shared deadline-aware retry loop for one-shot model calls.
 
-    Provider details (auth, base_url, SDK choice) stop at ``from_config``;
-    the request/response logic is identical across providers. Transient
-    upstream failures (504/503/502, connection drops, timeouts) are retried
-    with deadline-aware exponential backoff — a flaky gateway must not consume
-    a round."""
+    Transient upstream failures (504/503/502, connection drops, timeouts)
+    are retried with exponential backoff — a flaky gateway must not consume
+    a round. Subclasses implement ``_create`` (the provider call) and
+    ``_to_reply`` (response -> ModelReply)."""
 
-    def __init__(self, *, client, model: str,
-                 max_retries: int = 4, retry_base_delay: float = 2.0):
-        self.client = client
-        self.model = model
+    def __init__(self, *, max_retries: int = 4, retry_base_delay: float = 2.0):
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
 
@@ -87,6 +83,13 @@ class OpenAICompatChatModel:
         """Exponential backoff with ±25% jitter, capped at 30s."""
         delay = min(self._retry_base_delay * (2 ** attempt), 30.0)
         return delay * random.uniform(0.75, 1.25)
+
+    def _create(self, *, system: str, messages: list[dict],
+                remaining: float):
+        raise NotImplementedError
+
+    def _to_reply(self, response) -> ModelReply:
+        raise NotImplementedError
 
     def complete(
         self,
@@ -106,12 +109,8 @@ class OpenAICompatChatModel:
                     + (f" (last error: {last_exc})" if last_exc else "")
                 )
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "system", "content": system}, *messages],
-                    stream=False,
-                    response_format={"type": "json_object"},
-                    timeout=remaining,
+                response = self._create(
+                    system=system, messages=messages, remaining=remaining,
                 )
                 break  # success — fall through to response processing
             except Exception as exc:
@@ -133,8 +132,34 @@ class OpenAICompatChatModel:
                     f"retrying in {delay:.1f}s",
                     flush=True,
                 )
-                time.sleep(delay)
+        return self._to_reply(response)
 
+
+class OpenAICompatChatModel(_RetryChatModel):
+    """Chat Completions adapter for any OpenAI-compatible endpoint.
+
+    Provider details (auth, base_url, SDK choice) stop at ``from_config``;
+    the request/response logic is identical across providers."""
+
+    def __init__(self, *, client, model: str,
+                 max_retries: int = 4, retry_base_delay: float = 2.0):
+        super().__init__(
+            max_retries=max_retries, retry_base_delay=retry_base_delay,
+        )
+        self.client = client
+        self.model = model
+
+    def _create(self, *, system: str, messages: list[dict],
+                remaining: float):
+        return self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": system}, *messages],
+            stream=False,
+            response_format={"type": "json_object"},
+            timeout=remaining,
+        )
+
+    def _to_reply(self, response) -> ModelReply:
         text = response.choices[0].message.content
         if not isinstance(text, str) or not text.strip():
             raise ModelError("chat model returned an empty assistant message")
@@ -197,6 +222,69 @@ class ZhipuChatModel(OpenAICompatChatModel):
         )
 
 
+class AnthropicChatModel(_RetryChatModel):
+    """Anthropic Messages adapter — for providers that ONLY expose the
+    Messages API (e.g. bigmodel's ``/api/anthropic`` channel, whose key is
+    not provisioned for the ``/api/paas/v4`` Chat Completions channel).
+
+    Replies concatenate the ``text`` content blocks; ``thinking`` blocks
+    (GLM emits them) are skipped — the Scientist protocol expects the JSON
+    action in the text channel."""
+
+    def __init__(self, *, client, model: str,
+                 max_retries: int = 4, retry_base_delay: float = 2.0):
+        super().__init__(
+            max_retries=max_retries, retry_base_delay=retry_base_delay,
+        )
+        self.client = client
+        self.model = model
+
+    @classmethod
+    def from_config(cls, config: dict) -> "AnthropicChatModel":
+        key = (
+            os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        if not key:
+            raise ModelError(
+                "ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) is required "
+                "for the anthropic proposer"
+            )
+        try:
+            from anthropic import Anthropic
+        except ImportError as exc:
+            raise ModelError(
+                "install the project dependency 'anthropic'"
+            ) from exc
+        return cls(
+            client=Anthropic(api_key=key, base_url=config["base_url"]),
+            model=config["model"],
+        )
+
+    def _create(self, *, system: str, messages: list[dict],
+                remaining: float):
+        return self.client.messages.create(
+            model=self.model,
+            system=system,
+            messages=messages,
+            max_tokens=8192,
+            timeout=remaining,
+        )
+
+    def _to_reply(self, response) -> ModelReply:
+        text = "".join(
+            block.text
+            for block in (response.content or [])
+            if getattr(block, "type", None) == "text"
+        )
+        if not text.strip():
+            raise ModelError("chat model returned an empty assistant message")
+        usage = getattr(response, "usage", None)
+        if hasattr(usage, "model_dump"):
+            usage = usage.model_dump()
+        return ModelReply(text=text, usage=usage)
+
+
 def build_chat_model(config: dict) -> ChatModel:
     """Construct the proposer chat model for the configured ``api`` provider.
 
@@ -209,7 +297,9 @@ def build_chat_model(config: dict) -> ChatModel:
         return HepAIChatModel.from_config(config)
     if api == "zhipu":
         return ZhipuChatModel.from_config(config)
+    if api == "anthropic":
+        return AnthropicChatModel.from_config(config)
     raise ModelError(
         f"researcher.api: unsupported provider {api!r} "
-        "(supported: 'hepai', 'zhipu')"
+        "(supported: 'hepai', 'zhipu', 'anthropic')"
     )

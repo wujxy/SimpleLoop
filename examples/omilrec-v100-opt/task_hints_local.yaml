@@ -77,16 +77,16 @@ providers:
   scheduler:
     kind: local
 proposer:
-  api: hepai
-  model: gpt-5.5
-  base_url: https://aiapi.ihep.ac.cn/apiv2
+  api: anthropic
+  model: glm-5.3
+  base_url: https://open.bigmodel.cn/api/anthropic
   command_timeout_seconds: 120
   command_output_cap_chars: 12000
   max_steps: 200
 executor:
   api: anthropic
-  model: glm-5.2
-  base_url: https://aiapi.ihep.ac.cn/apiv2/anthropic
+  model: glm-5.3
+  base_url: https://open.bigmodel.cn/api/anthropic
 reflection:
   enabled: true
   interval_rounds: 4

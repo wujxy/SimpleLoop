@@ -309,8 +309,9 @@ def _resolve_proposer(raw: object) -> dict | None:
     if unknown:
         raise ConfigError(f"proposer: unknown key(s): {sorted(unknown)}")
     result = {**_PROPOSER_DEFAULTS, **raw}
-    if result["api"] not in ("hepai", "zhipu"):
-        raise ConfigError("proposer.api: supported values are hepai and zhipu")
+    if result["api"] not in ("hepai", "zhipu", "anthropic"):
+        raise ConfigError(
+            "proposer.api: supported values are hepai, zhipu and anthropic")
     for key in ("model", "base_url"):
         if not isinstance(result[key], str) or not result[key].strip():
             raise ConfigError(f"proposer.{key}: must be a non-empty string")

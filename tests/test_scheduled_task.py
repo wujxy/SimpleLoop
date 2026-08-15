@@ -172,3 +172,54 @@ def test_scheduled_proposer_decodes_worker_result_and_keeps_journal(tmp_path):
     assert jobs.calls[0]["jobs"][0].payload["self_repo"] == str(
         tmp_path / "self" / "repo"
     )
+
+
+def test_scheduled_proposer_error_outcome_is_infrastructure_not_research(
+        tmp_path):
+    """A protocol-failed proposer lane is infrastructure: the adapter must
+    raise (no history row, round id not consumed) instead of returning an
+    empty research round."""
+    import pytest
+
+    from simpleloop.scheduling.contracts import InfrastructureError
+
+    journal = JobJournal(tmp_path / "inflight.json")
+    raw = {
+        "status": "COMPLETED", "outcome": "error", "proposals": [],
+        "abstain_reason": (
+            "action protocol failed after 2 repairs; last reply: 'nope'"),
+    }
+    jobs = Jobs(journal, [WorkerResult(
+        "proposer", "r4-l0", WorkerStatus.COMPLETED, raw, (),
+    )])
+    proposer = ScheduledProposer(
+        run_dir=tmp_path, workspace=Workspaces(tmp_path / "ws"), jobs=jobs,
+        telemetry=Telemetry(), proposal_slots=1, scientist_steps=10,
+        prompt_dir=None,
+    )
+
+    with pytest.raises(InfrastructureError, match="last reply"):
+        proposer.propose(ProposerRequest(4, "goal", "parent"))
+
+
+def test_scheduled_proposer_honest_abstain_still_commits(tmp_path):
+    """A real abstain decision IS research: it decodes to an empty batch
+    (round consumed, history row written by the caller)."""
+    journal = JobJournal(tmp_path / "inflight.json")
+    raw = {
+        "status": "COMPLETED", "outcome": "abstain", "proposals": [],
+        "abstain_reason": "no defensible direction this round",
+    }
+    jobs = Jobs(journal, [WorkerResult(
+        "proposer", "r4-l0", WorkerStatus.COMPLETED, raw, (),
+    )])
+    proposer = ScheduledProposer(
+        run_dir=tmp_path, workspace=Workspaces(tmp_path / "ws"), jobs=jobs,
+        telemetry=Telemetry(), proposal_slots=1, scientist_steps=10,
+        prompt_dir=None,
+    )
+
+    result = proposer.propose(ProposerRequest(4, "goal", "parent"))
+
+    assert result.proposals == ()
+    assert result.abstained
