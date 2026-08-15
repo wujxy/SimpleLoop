@@ -57,6 +57,10 @@ executor.json` 的 `executor_response` 完整保留了最后的输出原文。�
    即违反本条）。
 6. **词汇域中立。** executor 死亡统一表述为 "experimenter session ended
    without completing the intervention"；不引入任何具体工程任务的词汇。
+7. **信息与机制优先，不规训行为。** harness 的职责边界是准备好工具、准备好
+   环境、把信息递到；不通过给 agent 加章程/纪律来教它们干活。本设计的一切
+   修复手段限于：状态分类（harness 侧）、信息持久化、信息路由。任何角色判
+   断质量的提升应该是"看到了以前看不到的信息"的自然结果。
 
 ---
 
@@ -170,9 +174,9 @@ last reply。**补充义务（新增）**：last reply 原文必须持久化到 
 ### 4.5 RSI / self-review
 
 - 消费：lane 层故障原因（协议失败原文、停机原因分布）——修"知道该改哪"。
-- 新约束（章程级、域中立措辞）：**基础设施故障不是自我局限的证据**。协议/
-  工具/平台层的故障出现在 evidence 中时，self_review 不得据此对自己动刀，
-  只能标记为环境问题交给人类；对自我动刀的证据必须来自研究行为层。
+- **不加任何章程约束。** 如何解读故障层信息是它自己的判断；harness 的义务
+  止于把信息递到（治理原则见 §2.7）。r25 式误诊的修复手段是信息补全，
+  不是行为规训。
 
 ---
 
@@ -214,7 +218,6 @@ post-mortem。
   渲染，未执行行不进削弱统计。
 - **reflection_views**：`mechanism_family_distribution` 等聚合视图对
   IMPLEMENTATION_INCOMPLETE 行的计数口径 = 执行成本维度，与科学维度分开统计。
-- **history 行不可变原则**：新 status 是新增枚举，不改写旧行；旧行的
-  GATE_REJECTED 中哪些实为死亡案例，一次性事后标注（迁移脚本）或接受历史
-  模糊，倾向前者（r11c0/r15c1/r21c0 三案可按 executor_response 中断特征精
-  确识别）。
+- **history 行不可变原则**：新 status 是新增枚举，不改写旧行。omilrec-
+  v100-001 的历史三案（r11c0/r15c1/r21c0）**保持原样**——该 run 作为反例
+  归档存在，不做事后标注，不篡改。
