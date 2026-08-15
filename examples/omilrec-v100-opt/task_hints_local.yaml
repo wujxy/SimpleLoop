@@ -87,5 +87,9 @@ executor:
   api: anthropic
   model: glm-5.2
   base_url: https://aiapi.ihep.ac.cn/apiv2/anthropic
+reflection:
+  enabled: true
+  interval_rounds: 4
 rsi:
-  enabled: false
+  enabled: true
+  first_review_round: 10

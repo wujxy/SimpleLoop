@@ -168,7 +168,7 @@ _TAIL_TURNS = 8
 
 # Prompt-version stamp recorded in meta.json so a prompt change is observable
 # per Scientist across rounds.
-SCIENTIST_PROMPT_VERSION = "scientist-v4"
+SCIENTIST_PROMPT_VERSION = "scientist-v5"
 
 
 # --- Live-context compaction (Option A: deterministic shedding) -----------
@@ -576,9 +576,12 @@ Control action (the only non-tool action):
    "self_limitation_suspected": true|false,   # advisory RSI evidence only
    "note":"...optional context..."}
   handoff is required and must be a non-empty string. self_limitation_suspected
-  defaults to false; set it true only when you can name the SPECIFIC repeated
-  pattern that suggests a stable limitation of yours (it becomes advisory
-  evidence for a later self-review — reflection itself never modifies you).
+  defaults to false and true is a strong claim you must earn: set it true only
+  when you can cite the SAME named limitation evidenced in the ledger on at
+  least TWO distinct past rounds (a single episode is not a pattern, and a hard
+  problem is not a self-limitation). The handoff carries the warning either
+  way; the flag only marks recurrence (it becomes advisory evidence for a
+  later self-review — reflection itself never modifies you).
   Do NOT submit proposals, do NOT submit a self_decision, do NOT choose the
   next research direction. Reveal the inertia; the next self re-decides.
 """

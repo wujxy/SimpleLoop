@@ -119,6 +119,19 @@ class ReflectionPipeline:
         self.checkpoint = checkpoint
         self.interval_rounds = interval_rounds
         self.first_reflection_round = first_reflection_round
+        self._defer_until = 0
+
+    def defer(self, round_id: int) -> None:
+        """Push a FAILED reflection to the next interval.
+
+        The loop catches a reflection InfrastructureError instead of dying,
+        but the log has no record for the failed round, so the derived
+        schedule would consider the very next round due again and the run
+        would spend a reflection attempt (and a round id) every round until
+        the failure clears. Deferring skips to ``round_id + interval``.
+        In-memory only: a restarted run may retry sooner, which is fine —
+        the failure may have been transient."""
+        self._defer_until = round_id + self.interval_rounds
 
     def prepare(self) -> None:
         """Clear a stale inflight reflection record whose round is already in
@@ -138,10 +151,13 @@ class ReflectionPipeline:
         # derivable from a history fold — consecutive rounds without a new
         # incumbent, expectation-miss streaks — if a future version wants
         # it; deliberately not built now.)
-        return round_id >= next_reflection_round(
-            log=self.log,
-            interval_rounds=self.interval_rounds,
-            first_reflection_round=self.first_reflection_round,
+        return round_id >= max(
+            self._defer_until,
+            next_reflection_round(
+                log=self.log,
+                interval_rounds=self.interval_rounds,
+                first_reflection_round=self.first_reflection_round,
+            ),
         )
 
     def incumbent_sha(self) -> str:

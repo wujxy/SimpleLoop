@@ -318,3 +318,200 @@ def test_loop_notifies_reflection_observer_hooks():
         reflection=EveryReflection(),
     )
     assert seen == [("started", 0), ("finished", 0)]
+
+
+# ---------------- resilience: a FAILED reflection must not kill the run ------
+
+def test_loop_reflection_failure_survives_and_defers():
+    from simpleloop.scheduling.contracts import InfrastructureError
+
+    seen: list = []
+    task_rounds: list = []
+
+    class Rounds:
+        def run(self, request):
+            task_rounds.append(request.round_id)
+            return _task_round(request.round_id)
+
+    class NeverRsi:
+        def due(self, round_id):
+            return False
+
+        def run(self, round_id):
+            raise AssertionError("RSI must not run")
+
+    class FlakyReflection:
+        """Mirrors the real pipeline's derived schedule: due until it runs,
+        defer() pushes the retry to round_id + interval, and a SUCCESSFUL
+        run (which appends to the log) makes the next due one interval
+        later — so the rounds in between stay task rounds."""
+
+        interval = 4
+
+        def __init__(self):
+            self.calls = 0
+            self.next_due = 0
+
+        def due(self, round_id):
+            return round_id >= self.next_due
+
+        def run(self, round_id):
+            self.calls += 1
+            if self.calls == 1:
+                raise InfrastructureError("action protocol failed")
+            self.next_due = round_id + self.interval
+            return round_id
+
+        def defer(self, round_id):
+            self.next_due = round_id + self.interval
+
+    class History:
+        def append_round(self, result):
+            pass
+
+    class Checkpoint:
+        def clear(self):
+            pass
+
+    class Observer:
+        def round_committed(self, result):
+            pass
+
+        def reflection_started(self, round_id):
+            seen.append(("started", round_id))
+
+        def reflection_finished(self, round_id):
+            seen.append(("finished", round_id))
+
+        def reflection_failed(self, round_id, detail):
+            seen.append(("failed", round_id, detail))
+
+    reflection = FlakyReflection()
+    result = run_loop(
+        LoopRequest("goal", 9, LoopState(0, "base", {"OBJ": 100.0}), POLICY),
+        rounds=Rounds(), rsi=NeverRsi(),
+        history=History(), checkpoint=Checkpoint(), observer=Observer(),
+        reflection=reflection,
+    )
+    # the failure was reported, not fatal; the run went the distance
+    assert ("failed", 0, "action protocol failed") in seen
+    assert not result.interrupted
+    # round 0 failed and deferred to 4; rounds 1-3 were task rounds; the
+    # round-4 retry succeeded (next due 8, so 5-7 are task rounds again)
+    assert task_rounds == [1, 2, 3, 5, 6, 7]
+    assert ("finished", 4) in seen
+    assert ("finished", 8) in seen
+    assert result.reflection_rounds == 2
+
+
+def test_pipeline_defer_shifts_due(tmp_path):
+    log = JsonlReflectionLog(tmp_path / "reflection")
+
+    class _Workspace:
+        def baseline_sha(self):
+            return "base"
+
+    pipeline = ReflectionPipeline(
+        run_dir=tmp_path, workspace=_Workspace(), reflector=None, log=log,
+        checkpoint=None, interval_rounds=4, first_reflection_round=4,
+    )
+    assert pipeline.due(4)
+    pipeline.defer(4)
+    assert not pipeline.due(5)
+    assert not pipeline.due(7)
+    assert pipeline.due(8)
+
+
+def test_loop_stops_after_consecutive_empty_task_rounds():
+    from simpleloop.stages.proposer import Proposal, ProposalBatch
+    from simpleloop.stages.selector import Selection
+
+    def _empty_round(round_id):
+        return RoundResult(
+            round_id, "base", ProposalBatch((), abstention=None), (),
+            Selection(0, "", ""),
+        )
+
+    class Rounds:
+        def run(self, request):
+            return _empty_round(request.round_id)
+
+    class NeverRsi:
+        def due(self, round_id):
+            return False
+
+        def run(self, round_id):
+            raise AssertionError("RSI must not run")
+
+    class History:
+        def append_round(self, result):
+            pass
+
+    class Checkpoint:
+        def clear(self):
+            pass
+
+    class Observer:
+        def round_committed(self, result):
+            pass
+
+    result = run_loop(
+        LoopRequest(
+            "goal", 20, LoopState(0, "base", {"OBJ": 100.0}), POLICY,
+            max_empty_task_rounds=3,
+        ),
+        rounds=Rounds(), rsi=NeverRsi(),
+        history=History(), checkpoint=Checkpoint(), observer=Observer(),
+    )
+    assert result.interrupted
+    assert "3 consecutive task rounds" in result.interruption
+    # stopped right at the cap instead of burning all 20 rounds
+    assert result.state.next_round == 3
+
+
+def test_loop_empty_task_rounds_reset_by_a_productive_round():
+    from simpleloop.stages.proposer import Proposal, ProposalBatch
+    from simpleloop.stages.selector import Selection
+
+    def _empty_round(round_id):
+        return RoundResult(
+            round_id, "base", ProposalBatch(()), (),
+            Selection(0, "", ""),
+        )
+
+    class Rounds:
+        def run(self, request):
+            if request.round_id % 2 == 0:
+                return _empty_round(request.round_id)
+            return _task_round(request.round_id)
+
+    class NeverRsi:
+        def due(self, round_id):
+            return False
+
+        def run(self, round_id):
+            raise AssertionError("RSI must not run")
+
+    class History:
+        def append_round(self, result):
+            pass
+
+    class Checkpoint:
+        def clear(self):
+            pass
+
+    class Observer:
+        def round_committed(self, result):
+            pass
+
+    result = run_loop(
+        LoopRequest(
+            "goal", 7, LoopState(0, "base", {"OBJ": 100.0}), POLICY,
+            max_empty_task_rounds=3,
+        ),
+        rounds=Rounds(), rsi=NeverRsi(),
+        history=History(), checkpoint=Checkpoint(), observer=Observer(),
+    )
+    # alternating empty/productive never hits the streak cap
+    assert not result.interrupted
+    assert result.task_rounds == 7
