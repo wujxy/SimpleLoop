@@ -905,3 +905,33 @@ def test_self_progress_pack_notes_suspected_self_limitation(tmp_path):
         "self_limitation_suspected": True}) + "\n")
     pack = proposer_mod._build_self_progress_pack(tmp_path, "SPEED_MS", 2)
     assert "suspected self-limitation" in pack
+
+
+def test_world_event_renders_experimenter_report():
+    """The executor's objective claims reach the Scientist beside the
+    outcome; a round without an account says so explicitly instead of
+    silently."""
+    class _ReportedExp(_FakeExp):
+        def __init__(self, *a, report=None, **kw):
+            super().__init__(*a, **kw)
+            self.self_report = report
+
+    exps = [
+        _ReportedExp(
+            0, 0, False, True,
+            report={"outcome": "partial", "summary": "build ok, run crashed",
+                    "fidelity": "step 3 simplified"},
+        ),
+        _ReportedExp(0, 1, False, False, report=None),
+        _ReportedExp(
+            0, 2, False, False,
+            report={"outcome": "no_report", "summary": "", "fidelity": ""},
+        ),
+    ]
+    we = _build_world_event(_FakeMem(exps), 1, "beefdead")
+    assert "experimenter's report" in we
+    assert "outcome=partial" in we
+    assert "build ok, run crashed" in we
+    assert "step 3 simplified" in we
+    # absent and explicitly-unreported both surface as not on record
+    assert we.count("NOT ON RECORD") == 2

@@ -26,6 +26,7 @@ class Experiment:
     changed_paths: tuple[str, ...]
     finding_id: str | None
     eval_block: str
+    self_report: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +44,7 @@ class Experiment:
             "changed_paths": list(self.changed_paths),
             "finding_id": self.finding_id,
             "eval_block": self.eval_block,
+            "self_report": dict(self.self_report) if self.self_report else None,
         }
 
 
@@ -77,6 +79,11 @@ def build_experiments(history: list[dict]) -> list[Experiment]:
                 changed_paths=tuple(cand.get("changed_paths") or ()),
                 finding_id=cand.get("finding_id"),
                 eval_block=str(cand.get("eval_block") or ""),
+                self_report=(
+                    dict(cand["self_report"])
+                    if isinstance(cand.get("self_report"), dict)
+                    else None
+                ),
             ))
     return out
 

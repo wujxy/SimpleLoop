@@ -103,6 +103,7 @@ class TestParseSelfReport:
         assert parse_self_report(text) == {
             "outcome": "completed", "blocked_reason_kind": None,
             "summary": "cached the constants",
+            "fidelity": "", "local_runs": [],
         }
 
     def test_blocked_objective_kind(self):

@@ -165,7 +165,21 @@ class Store:
                 ),
             )
             row["eval_block"] = str(row["eval_block"])[:self.history_eval_cap]
-            row.pop("self_report")
+            # The experimenter's report is part of the experiment record —
+            # the Researcher reads it (objective claims, capped). The full
+            # report lives in the candidate artifacts; history carries the
+            # capped account, not silence.
+            report = row.get("self_report")
+            if isinstance(report, dict):
+                row["self_report"] = {
+                    "outcome": str(report.get("outcome"))[:40],
+                    "summary": str(report.get("summary") or "")[:600],
+                    "fidelity": str(report.get("fidelity") or "")[:600],
+                }
+            else:
+                row["self_report"] = {
+                    "outcome": "no_report", "summary": "", "fidelity": "",
+                }
             row["telemetry"] = dict(candidate.telemetry)
             normalized.append(row)
         selected = next((c for c in normalized if c["selected"]), None)

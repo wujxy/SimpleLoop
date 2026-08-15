@@ -45,7 +45,12 @@
       "gate_passed": true,
       "eligible": true,
       "selected": true,
-      "telemetry": {}
+      "telemetry": {},
+      "self_report": {
+        "outcome": "no_report",
+        "summary": "",
+        "fidelity": ""
+      }
     }
   ],
   "telemetry": {}

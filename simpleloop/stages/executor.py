@@ -37,6 +37,9 @@ class Executor(Protocol):
 _SELF_REPORT_OUTCOMES = frozenset({"completed", "partial", "blocked"})
 _SELF_REPORT_KINDS = frozenset({"objective", "effort"})
 _SUMMARY_MAX_CHARS = 600
+_FIDELITY_MAX_CHARS = 1200
+_LOCAL_RUNS_MAX = 8
+_LOCAL_RUN_MAX_CHARS = 300
 _JSON_FENCE_RE = re.compile(
     r"```(?:json)?\s*\n(\{.*?\})\s*\n```", re.DOTALL,
 )
@@ -63,10 +66,23 @@ def parse_self_report(text: str) -> dict | None:
     summary = report.get("summary")
     if not isinstance(summary, str):
         summary = ""
+    fidelity = report.get("fidelity")
+    if not isinstance(fidelity, str):
+        fidelity = ""
+    local_runs = report.get("local_runs")
+    runs = []
+    if isinstance(local_runs, list):
+        runs = [
+            str(item).strip()[:_LOCAL_RUN_MAX_CHARS]
+            for item in local_runs[:_LOCAL_RUNS_MAX]
+            if str(item).strip()
+        ]
     return {
         "outcome": report["outcome"],
         "blocked_reason_kind": kind,
         "summary": summary.strip()[:_SUMMARY_MAX_CHARS],
+        "fidelity": fidelity.strip()[:_FIDELITY_MAX_CHARS],
+        "local_runs": runs,
     }
 
 
@@ -112,5 +128,17 @@ structured response.
         return ExecutionResult(
             "EXECUTED",
             output=output,
-            self_report=parse_self_report(output),
+            self_report=(
+                parse_self_report(output)
+                # A missing report must not be silent: the Researcher reads
+                # these, and "the experimenter accounted for nothing" is a
+                # fact the loop needs to see (charter promises this).
+                or {
+                    "outcome": "no_report",
+                    "blocked_reason_kind": None,
+                    "summary": "",
+                    "fidelity": "",
+                    "local_runs": [],
+                }
+            ),
         )

@@ -105,8 +105,18 @@ def test_parse_self_report_remains_best_effort():
         "outcome": "blocked",
         "blocked_reason_kind": "objective",
         "summary": "target absent",
+        "fidelity": "",
+        "local_runs": [],
     }
     assert parse_self_report("prose only") is None
+    # the experimenter's new objective-claim fields pass through, capped
+    rich = parse_self_report(
+        '```json\n{"outcome":"partial","summary":"build passed, no run",'
+        '"fidelity":"as asked except step 3 simplified",'
+        '"local_runs":["make -j8: ok", "pytest: FAIL rel err 3e-2"]}\n```'
+    )
+    assert rich["fidelity"] == "as asked except step 3 simplified"
+    assert rich["local_runs"] == ["make -j8: ok", "pytest: FAIL rel err 3e-2"]
 
 
 def test_git_artifact_workspace_maps_commit_request(tmp_path: Path):
