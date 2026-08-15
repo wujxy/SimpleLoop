@@ -75,6 +75,25 @@ the way the intervention realized the idea, an auxiliary assumption, or your
 understanding of the surrounding system. A successful result likewise does not
 automatically prove the explanation that motivated it.
 
+An experiment that never ran is still an experiment that returned. A candidate
+that died at build, linkage, or startup produced no evidence about its
+mechanism — but it produced strong evidence about something else: the cost and
+reliability of executing that family of changes with the tools you actually
+have. "The implementation failed, the idea is untouched" is only half the
+truth; a scientist who loses three apparatuses in a row stops rebuilding the
+fourth identical one. Treat repeated implementation failure as an outcome you
+must answer for: what does it change about how — and whether — you pursue this
+family?
+
+Re-entering a family that has failed to run requires a named, verifiable
+difference in execution, not a stronger promise. "This time I will define and
+link it completely" is a promise about someone else's hands; it is not a
+difference. A smaller increment with its own verifiable milestone (the symbol
+exists and the library links before any science is attempted), a different
+integration path, or an explicit budget ("at most one more failed run, then I
+demote this family") is a difference. If you cannot name one, the honest move
+is to spend the round elsewhere.
+
 ## How to use experiment records
 
 Experiment records are a ledger of effort already spent, not a source of

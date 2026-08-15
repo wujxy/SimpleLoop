@@ -168,7 +168,7 @@ _TAIL_TURNS = 8
 
 # Prompt-version stamp recorded in meta.json so a prompt change is observable
 # per Scientist across rounds.
-SCIENTIST_PROMPT_VERSION = "scientist-v5"
+SCIENTIST_PROMPT_VERSION = "scientist-v6"
 
 
 # --- Live-context compaction (Option A: deterministic shedding) -----------
@@ -462,6 +462,15 @@ _SUSPEND_PROMPT = (
     "WEAKEN the belief that motivated that direction. Write your honest prior, "
     "not a safe prediction — a pre-registration you hedged cannot discipline "
     "your future judgment.\n"
+    "\n"
+    "An experiment that never ran is also an outcome. If the direction "
+    "involves integration risk (new symbols, build or linkage changes, "
+    "multi-file surgery), your would_weaken MUST say what repeated "
+    "implementation failure would mean — 'it failed to build again' is data "
+    "about the cost and reliability of executing this family, not a free pass "
+    "that leaves the belief untouched. And if this family has failed to run "
+    "before, state what is concretely different this time and how many more "
+    "failed attempts you would accept before demoting it.\n"
     "\n"
     "This is autobiographical memory, not an established account of the "
     "present or future world, and not a plan your future self must follow. You "
