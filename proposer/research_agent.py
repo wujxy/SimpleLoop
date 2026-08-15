@@ -277,7 +277,8 @@ class ResearchAgent:
                 if repair == _MAX_PROTOCOL_REPAIRS:
                     raise err(
                         "action protocol failed after "
-                        f"{_MAX_PROTOCOL_REPAIRS} repairs"
+                        f"{_MAX_PROTOCOL_REPAIRS} repairs; last reply: "
+                        f"{reply.text[:400]!r}"
                     ) from None
                 reason = self._protocol_reason(exc)
                 state.protocol_repairs += 1
@@ -304,7 +305,8 @@ class ResearchAgent:
                 if repair == _MAX_PROTOCOL_REPAIRS:
                     raise err(
                         "action protocol failed after "
-                        f"{_MAX_PROTOCOL_REPAIRS} repairs"
+                        f"{_MAX_PROTOCOL_REPAIRS} repairs; last reply: "
+                        f"{reply.text[:400]!r}"
                     ) from None
                 state.protocol_repairs += 1
                 print(

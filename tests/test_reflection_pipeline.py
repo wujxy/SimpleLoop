@@ -370,8 +370,14 @@ def test_loop_reflection_failure_survives_and_defers():
             pass
 
     class Checkpoint:
+        def __init__(self):
+            self.clears = 0
+
         def clear(self):
-            pass
+            # The failed reflection's journaled stage must be dropped, or
+            # the next round's first batch refuses to start
+            # ("persisted batch does not match requested stage/round").
+            self.clears += 1
 
     class Observer:
         def round_committed(self, result):
@@ -387,15 +393,18 @@ def test_loop_reflection_failure_survives_and_defers():
             seen.append(("failed", round_id, detail))
 
     reflection = FlakyReflection()
+    checkpoint = Checkpoint()
     result = run_loop(
         LoopRequest("goal", 9, LoopState(0, "base", {"OBJ": 100.0}), POLICY),
         rounds=Rounds(), rsi=NeverRsi(),
-        history=History(), checkpoint=Checkpoint(), observer=Observer(),
+        history=History(), checkpoint=checkpoint, observer=Observer(),
         reflection=reflection,
     )
     # the failure was reported, not fatal; the run went the distance
     assert ("failed", 0, "action protocol failed") in seen
     assert not result.interrupted
+    # the failed reflection's journal entry was cleared
+    assert checkpoint.clears >= 1
     # round 0 failed and deferred to 4; rounds 1-3 were task rounds; the
     # round-4 retry succeeded (next due 8, so 5-7 are task rounds again)
     assert task_rounds == [1, 2, 3, 5, 6, 7]

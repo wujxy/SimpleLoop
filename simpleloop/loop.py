@@ -145,6 +145,11 @@ def run_loop(
                     defer = getattr(reflection, "defer", None)
                     if callable(defer):
                         defer(round_id)
+                    # The failed reflection's stage is still journaled;
+                    # leaving it would make the next round's first batch
+                    # refuse to start (persisted stage/round mismatch). The
+                    # round id is consumed either way — drop the journal.
+                    checkpoint.clear()
                     _notify(
                         observer, "reflection_failed", round_id, str(exc),
                     )
