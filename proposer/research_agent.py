@@ -13,6 +13,7 @@ both agents use. Each subclass plugs its own ``_parse_action`` and
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -51,13 +52,41 @@ class WorkingState:
 
 # --- Shared tunables -------------------------------------------------------
 
-_MAX_PROTOCOL_REPAIRS = 2
+_MAX_PROTOCOL_REPAIRS = 5
+
+# The one reminder both repair paths send, kept identical so the model sees
+# a stable protocol description no matter what tripped the repair.
+_PROTOCOL_REMINDER = (
+    "Return exactly one JSON object, with no prose or additional JSON. "
+    "Either a single action object — its \"action\" field names the action "
+    "and the action's fields sit alongside it, e.g. "
+    '{"action":"read_file","path":"/work/..."} — or a batch envelope '
+    '{"actions":[<action>, ...]} of up to 8 tool actions executed in '
+    "order. A submit action (submit_proposals / submit_self_decision / "
+    "submit_reflection_handoff) is always sent ALONE as a single object, "
+    'never inside "actions".'
+)
 
 
 def _stamp() -> str:
     """Wall-clock tag for step logs, so per-step latency (model call vs probe
     vs repair churn) is visible end-to-end."""
     return time.strftime("%H:%M:%S")
+
+
+def _usage_bits(usage) -> str:
+    """Render the per-call token facts that explain WHERE time went:
+    reasoning tokens (the model thinking) vs output tokens. '' when the
+    provider reports no usage."""
+    if not isinstance(usage, dict):
+        return ""
+    bits = []
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+        bits.append(f" reasoning_tokens={details['reasoning_tokens']}")
+    if usage.get("completion_tokens") is not None:
+        bits.append(f" out_tokens={usage['completion_tokens']}")
+    return "".join(bits)
 
 
 # --- Shared helpers --------------------------------------------------------
@@ -70,7 +99,25 @@ def _fingerprint(action: dict) -> str:
     """Canonical fingerprint of a tool action for exact-repeat detection."""
     name = action["action"]
     if name == "run_research_command":
-        return f"{name}:{action['cwd']}:{action['command']}"
+        return (
+            f"{name}:{action.get('cwd')}:{action.get('workdir')}:"
+            f"{action['command']}"
+        )
+    if name == "read_file":
+        return (
+            f"{name}:{action['path']}:{action.get('offset', 1)}:"
+            f"{action.get('limit', 400)}"
+        )
+    if name == "grep_files":
+        return (
+            f"{name}:{action['pattern']}:{action.get('path', '/work')}:"
+            f"{action.get('glob')}"
+        )
+    if name == "glob_files":
+        return f"{name}:{action['pattern']}:{action.get('path', '/work')}"
+    if name == "write_scratch_file":
+        digest = hashlib.sha1(action["content"].encode()).hexdigest()[:12]
+        return f"{name}:{action['path']}:{digest}"
     if name == "inspect_episode":
         return f"{name}:{action['ref']}"
     if name == "inspect_finding":
@@ -98,7 +145,9 @@ def _register_evidence(state: WorkingState, action: dict, observation: dict) -> 
     if not observation.get("ok"):
         return
     name = action["action"]
-    if name == "run_research_command":
+    if name in (
+        "run_research_command", "read_file", "grep_files", "glob_files",
+    ):
         state.session_evidence.add("__source_examined__")
         state.new_evidence.add("__source_examined__")
         return
@@ -180,8 +229,24 @@ def _action_summary(action: dict) -> str:
     name = action["action"]
     if name == "run_research_command":
         return (
-            f"action={name} cwd={action['cwd']} "
+            f"action={name} cwd={action.get('cwd')} "
+            f"workdir={action.get('workdir')} "
             f"command_chars={len(action['command'])}"
+        )
+    if name == "read_file":
+        return (
+            f"action={name} path_chars={len(action['path'])} "
+            f"offset={action.get('offset', 1)} "
+            f"limit={action.get('limit', 400)}"
+        )
+    if name == "grep_files":
+        return f"action={name} pattern_chars={len(action['pattern'])}"
+    if name == "glob_files":
+        return f"action={name} pattern_chars={len(action['pattern'])}"
+    if name == "write_scratch_file":
+        return (
+            f"action={name} path_chars={len(action['path'])} "
+            f"content_chars={len(action['content'])}"
         )
     if name == "inspect_episode":
         return f"action={name} ref_chars={len(action['ref'])}"
@@ -245,13 +310,13 @@ class ResearchAgent:
 
     _error_class = AgentError
 
-    def _parse_action(self, text: str) -> dict:
+    def _parse_action(self, text: str) -> list[dict]:
         raise NotImplementedError
 
     def _validate_guard(
-        self, state: WorkingState, action: dict, source_root: Path,
+        self, state: WorkingState, actions: list[dict], source_root: Path,
     ) -> str | None:
-        """Return a repair reason, or None when the action is valid."""
+        """Return a repair reason, or None when the actions are valid."""
         return None
 
     # ---- shared tool loop ----
@@ -260,26 +325,35 @@ class ResearchAgent:
         self, state: WorkingState, messages: list, system_prompt: str,
         deadline: float, usages: list, step_label: int, *,
         source_root: Path | None = None, steps_budget: int | None = None,
-    ) -> tuple[dict, str]:
+    ) -> tuple[list[dict], str]:
         """One model turn with up to _MAX_PROTOCOL_REPAIRS retries. Returns
-        (action, reply_text)."""
+        (actions, reply_text) — always a list; a batch reply yields its
+        items, a flat reply a one-element list."""
         budget = steps_budget or self.max_steps
         err = self._error_class
         for repair in range(_MAX_PROTOCOL_REPAIRS + 1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise err("agent deadline exceeded")
+            call_started = time.monotonic()
             reply = self.model.complete(
                 system=system_prompt,
                 messages=messages,
                 timeout_seconds=remaining,
+            )
+            call_seconds = time.monotonic() - call_started
+            print(
+                f"[{_stamp()}] [agent step {step_label}/{budget}] "
+                f"model={call_seconds:.0f}s"
+                f"{_usage_bits(reply.usage)}",
+                flush=True,
             )
             usages.append(reply.usage)
             if (self.usage_observer is not None
                     and reply.usage is not None):
                 self.usage_observer(reply.usage)
             try:
-                action = self._parse_action(reply.text)
+                actions = self._parse_action(reply.text)
             except AgentError as exc:
                 state.last_raw_reply = reply.text
                 if repair == _MAX_PROTOCOL_REPAIRS:
@@ -300,14 +374,12 @@ class ResearchAgent:
                     {"role": "assistant", "content": reply.text},
                     {"role": "user", "content": (
                         "Protocol correction required "
-                        f"({reason}). Return exactly one JSON action object "
-                        "matching the Runtime contract, with no prose or "
-                        "additional JSON."
+                        f"({reason}). {_PROTOCOL_REMINDER}"
                     )},
                 ])
                 continue
             guard = self._validate_guard(
-                state, action, source_root or Path("."),
+                state, actions, source_root or Path("."),
             )
             if guard is not None:
                 state.last_raw_reply = reply.text
@@ -328,17 +400,17 @@ class ResearchAgent:
                     {"role": "assistant", "content": reply.text},
                     {"role": "user", "content": (
                         f"Protocol correction required ({guard}). "
-                        "Return exactly one JSON action object matching the "
-                        "Runtime contract, with no prose or additional JSON."
+                        f"{_PROTOCOL_REMINDER}"
                     )},
                 ])
                 continue
-            print(
-                f"[{_stamp()}] [agent step {step_label}/{budget}] "
-                f"{_action_summary(action)}",
-                flush=True,
-            )
-            return action, reply.text
+            for action in actions:
+                print(
+                    f"[{_stamp()}] [agent step {step_label}/{budget}] "
+                    f"{_action_summary(action)}",
+                    flush=True,
+                )
+            return actions, reply.text
 
     @staticmethod
     def _protocol_reason(exc: AgentError) -> str:

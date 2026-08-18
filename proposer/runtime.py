@@ -232,9 +232,12 @@ class ApptainerRuntime:
             home_dir = Path(home).expanduser().resolve()
             argv += ["--containall", "--no-mount", "cwd,home,hostfs"]
             if not network:
-                # Fully offline (matches the historical proposer research
-                # boundary). --containall already implies --net; --network none
-                # removes all interfaces.
+                # Fully offline. NOTE (verified on apptainer 1.3.3):
+                # --containall does NOT isolate the network by itself — only
+                # this explicit --network none does. The research path runs
+                # online since 2026-08-16 (the offline boundary blocked
+                # sanctioned measurement work, e.g. the calib DB over
+                # frontier); this switch remains for callers that want it.
                 argv += ["--net", "--network", "none"]
             argv.extend(["--bind", f"{home_dir}:{self.executor_home}:rw"])
             # The whole worktree is the agent's /work, read-only: everything is

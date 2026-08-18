@@ -502,3 +502,51 @@ def test_loop_partial_death_resets_all_dead_streak():
     # any performed candidate keeps the run alive
     assert not result.interrupted
     assert result.task_rounds == 5
+
+
+# ---------------- structured byproducts & agent-owned cadence -------------
+
+def test_log_roundtrips_structured_fields(tmp_path):
+    log = JsonlReflectionLog(tmp_path / "reflection")
+    log.append(ReflectionRecord(
+        4, "audit", False, False, "",
+        prescriptions=("test the eval-count family", "watch RemoveDN"),
+        next_reflection_after_rounds=3))
+    record = log.records()[0]
+    assert record.prescriptions == (
+        "test the eval-count family", "watch RemoveDN")
+    assert record.next_reflection_after_rounds == 3
+
+
+def test_log_omits_absent_structured_keys(tmp_path):
+    root = tmp_path / "reflection"
+    log = JsonlReflectionLog(root)
+    log.append(ReflectionRecord(4, "plain old row"))
+    row = json.loads(
+        (root / "history.jsonl").read_text().splitlines()[0])
+    assert set(row) == {
+        "round_id", "handoff", "self_limitation_suspected", "abstained",
+        "note"}
+
+
+def test_next_reflection_round_agent_defer_and_calendar_cap(tmp_path):
+    log = JsonlReflectionLog(tmp_path / "reflection")
+    log.append(ReflectionRecord(8, "first"))
+    # no defer -> the calendar interval rules
+    assert next_reflection_round(
+        log=log, interval_rounds=8, first_reflection_round=8) == 16
+    # an earlier request is honored
+    log.append(ReflectionRecord(
+        16, "second", next_reflection_after_rounds=2))
+    assert next_reflection_round(
+        log=log, interval_rounds=8, first_reflection_round=8) == 18
+    # a later request is capped by the calendar interval
+    log.append(ReflectionRecord(
+        18, "third", next_reflection_after_rounds=99))
+    assert next_reflection_round(
+        log=log, interval_rounds=8, first_reflection_round=8) == 26
+    # a non-positive defer is ignored
+    log.append(ReflectionRecord(
+        26, "fourth", next_reflection_after_rounds=0))
+    assert next_reflection_round(
+        log=log, interval_rounds=8, first_reflection_round=8) == 34

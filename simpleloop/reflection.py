@@ -32,6 +32,11 @@ class ReflectionRecord:
     self_limitation_suspected: bool = False
     abstained: bool = False
     note: str = ""
+    # Structured byproducts the reflector MAY leave alongside the free-text
+    # handoff (all optional; the harness stores and replays them but never
+    # interprets them):
+    prescriptions: tuple = ()      # watch items, replayed with follow-up data
+    next_reflection_after_rounds: int | None = None  # agent-set cadence
 
 
 class JsonlReflectionLog:
@@ -63,12 +68,17 @@ class JsonlReflectionLog:
             round_id = obj.get("round_id")
             if not isinstance(round_id, int) or isinstance(round_id, bool):
                 continue
+            defer = obj.get("next_reflection_after_rounds")
             out.append(ReflectionRecord(
                 round_id,
                 str(obj.get("handoff") or ""),
                 bool(obj.get("self_limitation_suspected")),
                 bool(obj.get("abstained")),
                 str(obj.get("note") or ""),
+                tuple(obj.get("prescriptions") or ()),
+                int(defer)
+                if isinstance(defer, int) and not isinstance(defer, bool)
+                else None,
             ))
         return tuple(out)
 
@@ -82,13 +92,20 @@ class JsonlReflectionLog:
     def append(self, record: ReflectionRecord) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({
+            row = {
                 "round_id": record.round_id,
                 "handoff": record.handoff,
                 "self_limitation_suspected": record.self_limitation_suspected,
                 "abstained": record.abstained,
                 "note": record.note,
-            }, ensure_ascii=False, sort_keys=True) + "\n")
+            }
+            if record.prescriptions:
+                row["prescriptions"] = list(record.prescriptions)
+            if record.next_reflection_after_rounds is not None:
+                row["next_reflection_after_rounds"] = (
+                    record.next_reflection_after_rounds)
+            handle.write(
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
 
@@ -98,11 +115,21 @@ def next_reflection_round(
     interval_rounds: int, first_reflection_round: int,
 ) -> int:
     """The next round id reflection is due at. Derived from the log — no
-    state file (see module docstring)."""
+    state file (see module docstring).
+
+    Cadence is agent-owned within a calendar cap: the last reflection may
+    ask for an earlier next one (``next_reflection_after_rounds``, mirroring
+    the RSI self-review's ``next_review_after_rounds`` precedent), but the
+    configured interval remains the upper bound so reflection cannot be
+    deferred forever by the very inertia it exists to catch."""
     last = log.last_round()
     if last is None:
         return first_reflection_round
-    return last + interval_rounds
+    defer = log.records()[-1].next_reflection_after_rounds
+    interval = interval_rounds
+    if defer is not None and defer > 0:
+        interval = min(defer, interval_rounds)
+    return last + interval
 
 
 class ReflectionPipeline:
@@ -134,10 +161,10 @@ class ReflectionPipeline:
             self.checkpoint.clear()
 
     def due(self, round_id: int) -> bool:
-        # Fixed-N anti-inertia backstop only. (An earlier trigger is
-        # derivable from a history fold — consecutive rounds without a new
-        # incumbent, expectation-miss streaks — if a future version wants
-        # it; deliberately not built now.)
+        # The interval is the anti-inertia backstop; an earlier due date is
+        # agent-owned via the last record's next_reflection_after_rounds
+        # (see next_reflection_round). Signal-derived triggers (incumbent
+        # drought, unadjudicated commitments) remain deliberately unbuilt.
         return round_id >= next_reflection_round(
             log=self.log,
             interval_rounds=self.interval_rounds,

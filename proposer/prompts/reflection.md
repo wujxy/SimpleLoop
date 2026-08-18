@@ -48,6 +48,24 @@ Look for these specifically, and only where the evidence supports the charge:
   move? A benchmark-specific trick that does not generalize is proxy drift with a
   good score.
 
+## The outward look
+
+Your audit looks backward; also look outward. Part of your duty this round is to
+leave your next self a map of the territory you have never touched: regions of the
+problem space with zero experiments, assumptions never tested, measurements never
+taken. Concentration is visible in the aggregates you were given — use them to say
+where the work went, and then say plainly where it never went.
+
+The map is a hint drawn from the understanding you already have — "our work
+concentrated on X; regions Y and Z remain untouched and may hold potential." It
+names territory and why it might matter, nothing more is asked of it: pointing at
+neglected ground needs no fresh measurement to be worth leaving behind, and this
+round is better spent weighing what you already know than producing new data. What
+the map deliberately leaves open is the going itself — whether to explore a region,
+and how, belongs to the next self, who will judge it against evidence they gather
+with their own eyes. A hint keeps that judgment alive; a finished plan would
+arrive having already spent it.
+
 ## The bounds of your authority
 
 Your authority to demand that the next self abandon a direction is **bounded by

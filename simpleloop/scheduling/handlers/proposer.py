@@ -221,6 +221,9 @@ def _reflection_result(spec: ProposerLaneSpec, result) -> dict[str, object]:
             "self_limitation_suspected": result.self_limitation_suspected,
             "abstained": result.abstained,
             "note": result.note,
+            "prescriptions": list(result.prescriptions or ()),
+            "next_reflection_after_rounds": (
+                result.next_reflection_after_rounds),
         },
         "trace": result.trace or {},
         "telemetry": result.deliberation_telemetry or {},

@@ -12,21 +12,32 @@ from proposer.model import (
 )
 
 
+def _stream(text: str, usage=None):
+    """A fake SSE chunk stream: one content delta per char, usage last."""
+    chunks = [
+        SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=c))],
+            usage=None,
+        )
+        for c in text
+    ]
+    if usage is not None:
+        chunks.append(SimpleNamespace(choices=[], usage=usage))
+    return iter(chunks)
+
+
 class _Completions:
     def __init__(self):
         self.kwargs = None
 
     def create(self, **kwargs):
         self.kwargs = kwargs
-        message = SimpleNamespace(
-            content='{"action":"submit_proposals","proposals":["p"]}'
-        )
-        choice = SimpleNamespace(message=message)
         usage = SimpleNamespace(model_dump=lambda: {"total_tokens": 17})
-        return SimpleNamespace(choices=[choice], usage=usage)
+        return _stream(
+            '{"action":"submit_proposals","proposals":["p"]}', usage)
 
 
-def test_hepai_uses_nonstreaming_chat_completion_and_timeout():
+def test_hepai_uses_streaming_chat_completion_and_timeout():
     completions = _Completions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     model = HepAIChatModel(client=client, model="gpt-5.5")
@@ -48,8 +59,9 @@ def test_hepai_uses_nonstreaming_chat_completion_and_timeout():
             {"role": "system", "content": "scientist"},
             {"role": "user", "content": "investigate"},
         ],
-        "stream": False,
+        "stream": True,
         "response_format": {"type": "json_object"},
+        "stream_options": {"include_usage": True},
     }
     assert timeout == pytest.approx(12.5, abs=0.5)
     assert reply.text == (
@@ -69,10 +81,7 @@ def test_hepai_requires_key_when_constructing_real_client(monkeypatch):
 
 def test_hepai_rejects_empty_response():
     completions = _Completions()
-    completions.create = lambda **_kwargs: SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="  "))],
-        usage=None,
-    )
+    completions.create = lambda **_kwargs: _stream("  ")
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     model = HepAIChatModel(client=client, model="gpt-5.5")
 
@@ -82,7 +91,7 @@ def test_hepai_rejects_empty_response():
         )
 
 
-def test_zhipu_uses_nonstreaming_chat_completion_and_timeout():
+def test_zhipu_uses_streaming_chat_completion_and_timeout():
     completions = _Completions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     model = ZhipuChatModel(client=client, model="glm-5.2")
@@ -101,8 +110,9 @@ def test_zhipu_uses_nonstreaming_chat_completion_and_timeout():
             {"role": "system", "content": "scientist"},
             {"role": "user", "content": "investigate"},
         ],
-        "stream": False,
+        "stream": True,
         "response_format": {"type": "json_object"},
+        "stream_options": {"include_usage": True},
     }
     assert timeout == pytest.approx(12.5, abs=0.5)
     assert reply.text == (
@@ -160,3 +170,49 @@ def test_build_chat_model_routes_hepai_through_monkeypatchable_global():
 def test_build_chat_model_rejects_unknown_api():
     with pytest.raises(ModelError, match="unsupported provider"):
         build_chat_model({"api": "nope", "model": "x", "base_url": "u"})
+
+
+# --- thinking-depth valve (config: roles.researcher.reasoning_effort) -----
+
+def test_effort_default_absent_from_request():
+    completions = _Completions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    model = HepAIChatModel(client=client, model="gpt-5.5")
+    model.complete(system="s", messages=[], timeout_seconds=5)
+    assert "reasoning_effort" not in completions.kwargs
+
+
+def test_effort_passed_through_on_hepai():
+    completions = _Completions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    model = HepAIChatModel(
+        client=client, model="gpt-5.5", reasoning_effort="medium")
+    model.complete(system="s", messages=[], timeout_seconds=5)
+    assert completions.kwargs["reasoning_effort"] == "medium"
+
+
+def test_effort_invalid_fails_fast():
+    from proposer.model import _validated_effort
+    with pytest.raises(ModelError, match="reasoning_effort"):
+        _validated_effort({"reasoning_effort": "turbo"})
+    assert _validated_effort({}) is None
+    assert _validated_effort({"reasoning_effort": " Low "}) == "low"
+
+
+def test_effort_translated_to_zhipu_thinking_switch(monkeypatch):
+    # GLM has no graded knob: from_config translates low -> disabled,
+    # medium/high -> enabled, carried via the SDK's extra_body; absent
+    # config leaves no knob at all.
+    monkeypatch.setenv("ZHIPU_API_KEY", "k")
+    low = ZhipuChatModel.from_config({
+        "model": "glm-5.3", "base_url": "https://x",
+        "reasoning_effort": "low"})
+    high = ZhipuChatModel.from_config({
+        "model": "glm-5.3", "base_url": "https://x",
+        "reasoning_effort": "high"})
+    off = ZhipuChatModel.from_config({
+        "model": "glm-5.3", "base_url": "https://x"})
+    assert low.extra_body == {"thinking": {"type": "disabled"}}
+    assert high.extra_body == {"thinking": {"type": "enabled"}}
+    assert not getattr(off, "extra_body", None)
+    assert low.reasoning_effort is None  # never sent as a raw param to GLM

@@ -101,6 +101,10 @@ def test_research_tool_prompt_is_composed_from_tool_specs():
 
     assert {spec.action for spec in RESEARCH_TOOL_SPECS} == {
         "run_research_command",
+        "read_file",
+        "grep_files",
+        "glob_files",
+        "write_scratch_file",
         "inspect_episode",
         "list_findings",
         "search_findings",
@@ -402,4 +406,123 @@ def test_research_tools_command_uses_remaining_deadline(tmp_path, monkeypatch):
     }, deadline=100)
 
     assert result["ok"] is True
-    assert calls == [("rg cache", {"cwd": "work", "timeout_seconds": 10})]
+    assert calls == [(
+        "rg cache",
+        {"cwd": "work", "workdir": None, "timeout_seconds": 10},
+    )]
+
+
+# --- file-tool dispatch ---------------------------------------------------
+
+def test_research_tools_read_file_dispatch(tmp_path):
+    tools = _tools(tmp_path)
+    (tools.files.boundary.roots["/work"] / "a.py").write_text(
+        "alpha\nbeta\n", encoding="utf-8",
+    )
+
+    result = tools.execute(
+        {"action": "read_file", "path": "/work/a.py"}, deadline=1000,
+    )
+
+    assert result["ok"] is True
+    assert "     1\talpha" in result["content"]
+
+
+def test_research_tools_grep_and_glob_dispatch(tmp_path):
+    tools = _tools(tmp_path)
+    work = tools.files.boundary.roots["/work"]
+    (work / "a.cc").write_text("needle here\n", encoding="utf-8")
+
+    grep = tools.execute(
+        {"action": "grep_files", "pattern": "needle", "path": "/work"},
+        deadline=1000,
+    )
+    glob = tools.execute(
+        {"action": "glob_files", "pattern": "*.cc", "path": "/work"},
+        deadline=1000,
+    )
+
+    assert "/work/a.cc:1:needle here" in grep["content"]
+    assert glob["matches"] == ["/work/a.cc"]
+
+
+def test_research_tools_write_scratch_file_dispatch(tmp_path):
+    tools = _tools(tmp_path)
+
+    result = tools.execute(
+        {"action": "write_scratch_file",
+         "path": "/scratch/toy.py", "content": "print(1)\n"},
+        deadline=1000,
+    )
+
+    assert result["ok"] is True
+    host = tools.files.boundary.roots["/scratch"] / "toy.py"
+    assert host.read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_research_tools_file_tool_boundary_failure_is_observation(tmp_path):
+    tools = _tools(tmp_path)
+
+    result = tools.execute(
+        {"action": "read_file", "path": "/work/../repo/x"}, deadline=1000,
+    )
+
+    assert result["ok"] is False
+    assert "escapes" in result["error"]
+
+
+def test_research_tools_unknown_action_is_observation_not_raise(tmp_path):
+    tools = _tools(tmp_path)
+
+    result = tools.execute({"action": "nonsense"}, deadline=1000)
+
+    assert result == {
+        "ok": False, "error": "unsupported research action: nonsense",
+    }
+
+
+# --- cwd memory ------------------------------------------------------------
+
+def test_runner_workdir_is_used_and_remembered(tmp_path, monkeypatch):
+    runner, runtime = _runner(tmp_path)
+    (runner.workspace / "build").mkdir()
+    monkeypatch.setattr(
+        "proposer.research_tools.subprocess.Popen",
+        lambda *_args, **_kwargs: _Process(),
+    )
+    monkeypatch.setattr(
+        "proposer.research_tools.os.killpg", lambda *_args: None,
+    )
+
+    runner.run("make", workdir="/work/build")
+    assert runtime.argv_call[1]["work_cwd"] == "/work/build"
+
+    runner.run("./bench")  # neither cwd nor workdir → memory
+    assert runtime.argv_call[1]["work_cwd"] == "/work/build"
+
+
+def test_runner_cwd_spelling_maps_and_remembers(tmp_path, monkeypatch):
+    runner, runtime = _runner(tmp_path)
+    monkeypatch.setattr(
+        "proposer.research_tools.subprocess.Popen",
+        lambda *_args, **_kwargs: _Process(),
+    )
+    monkeypatch.setattr(
+        "proposer.research_tools.os.killpg", lambda *_args: None,
+    )
+
+    runner.run("ls", cwd="scratch")
+    assert runtime.argv_call[1]["work_cwd"] == "/scratch"
+
+    runner.run("ls")
+    assert runtime.argv_call[1]["work_cwd"] == "/scratch"
+
+    runner.run("ls", cwd="work", workdir="/work")  # workdir wins
+    assert runtime.argv_call[1]["work_cwd"] == "/work"
+
+
+def test_runner_rejects_invalid_workdir(tmp_path):
+    runner, _runtime = _runner(tmp_path)
+    for bad in ("/repo/x", "/etc", "/work/missing", "/work/../outside"):
+        with pytest.raises(ValueError):
+            runner.run("true", workdir=bad)

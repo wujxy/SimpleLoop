@@ -22,7 +22,7 @@ from simpleloop.scheduling.envelope import (
     read_request,
     write_result,
 )
-from simpleloop.scheduling.supervisor import JobSupervisor
+from simpleloop.scheduling.supervisor import JobSupervisor, purge_failure_result
 from simpleloop.world import SourceWorkspace
 
 
@@ -379,3 +379,65 @@ def test_partial_success_is_returned_with_exhausted_failure(tmp_path):
     assert result.completed[0].job.request.request_id == "r1-c0"
     assert len(result.failed) == 1
     assert result.failed[0].infrastructure_error == "held"
+
+
+def test_fresh_batch_purges_protocol_failure_fossil_and_retries(tmp_path):
+    # The exact --continue poison shape: the worker exited normally after
+    # an internal failure (LLM 429/quota), so the envelope is COMPLETED but
+    # the payload carries outcome="error". A fresh batch must delete it and
+    # re-run the job, never replay it as a final result.
+    job = _job(tmp_path)
+    write_result(job.result_path, WorkerResult(
+        "candidate", "r1-c0", WorkerStatus.COMPLETED,
+        {"outcome": "error", "abstain_reason": "429 quota exhausted"},
+    ))
+    scheduler = FakeScheduler(complete_on_attempt=1)
+
+    result = _run(tmp_path, scheduler, [job])
+
+    assert len(scheduler.submitted) == 1
+    assert result.completed[0].result.result == {"attempt": 1}
+
+
+def test_fresh_batch_purges_failed_envelope_fossil_and_retries(tmp_path):
+    job = _job(tmp_path)
+    write_result(job.result_path, WorkerResult(
+        "candidate", "r1-c0", WorkerStatus.FAILED, {}, error="worker crash",
+    ))
+    scheduler = FakeScheduler(complete_on_attempt=1)
+
+    result = _run(tmp_path, scheduler, [job])
+
+    assert len(scheduler.submitted) == 1
+    assert result.completed[0].result.result == {"attempt": 1}
+
+
+def test_fresh_batch_reuses_persisted_success_without_submit(tmp_path):
+    job = _job(tmp_path)
+    write_result(job.result_path, WorkerResult(
+        "candidate", "r1-c0", WorkerStatus.COMPLETED, {"kept": True},
+    ))
+    scheduler = FakeScheduler()
+
+    result = _run(tmp_path, scheduler, [job])
+
+    assert scheduler.submitted == []
+    assert result.completed[0].result.result == {"kept": True}
+
+
+def test_purge_failure_result_removes_unreadable_file(tmp_path):
+    path = tmp_path / "result.json"
+    path.write_text("{broken")
+
+    assert purge_failure_result(path) is True
+    assert not path.exists()
+
+
+def test_purge_failure_result_keeps_success(tmp_path):
+    path = tmp_path / "result.json"
+    write_result(path, WorkerResult(
+        "candidate", "r1-c0", WorkerStatus.COMPLETED, {"ok": True},
+    ))
+
+    assert purge_failure_result(path) is False
+    assert path.exists()

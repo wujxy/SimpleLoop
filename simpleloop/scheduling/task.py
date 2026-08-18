@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Mapping
 
 from ..candidate import (
-    CandidateBatchRequest, CandidateBatchResult, CandidateResult,
+    NOT_PERFORMED_STATUSES, CandidateBatchRequest, CandidateBatchResult,
+    CandidateResult, parse_stop_cause,
 )
 from ..persistence.artifacts import decode_candidate_result
 from ..stages.evaluator import BaselineAcceptanceError, validate_baseline
@@ -16,7 +17,7 @@ from ..stages.proposer import (
 )
 from ..world import WorkspaceSpec
 from .contracts import InfrastructureError
-from .envelope import WorkerStatus
+from .envelope import ProtocolError, WorkerStatus, read_result
 from .jobs import WorkerJob, WorkerJobs
 
 
@@ -52,8 +53,32 @@ class ScheduledCandidates:
                     f"not {request.round_id}"
                 )
             payloads = _payloads(record.context)
+            payloads, healed = self._heal_dead_sessions(
+                request.round_id, payloads,
+            )
+            if healed:
+                # Dead-session outcomes were purged (and their released
+                # worktrees resurrected): restart the journal so the batch
+                # genuinely re-runs instead of replaying collected results.
+                context = {
+                    "parent_sha": record.context.get("parent_sha") or (
+                        payloads[0]["parent_sha"] if payloads else ""
+                    ),
+                    "proposals": list(record.context.get("proposals") or ()),
+                    "payloads": payloads,
+                }
+                self.jobs.restart(
+                    stage="candidates",
+                    round_id=request.round_id,
+                    context=context,
+                    request_ids=tuple(
+                        f"r{payload['round_id']}-c{payload['candidate_id']}"
+                        for payload in payloads
+                    ),
+                )
+            else:
+                context = record.context
             transition = None
-            context = record.context
         else:
             payloads = []
             created = []
@@ -127,10 +152,62 @@ class ScheduledCandidates:
                 f"round {request.round_id}: all candidate workers failed: "
                 + _failure_text(batch.outcomes)
             )
+        if results and all(
+            result.status in NOT_PERFORMED_STATUSES for result in results
+        ):
+            # Fairness for infrastructure deaths (run-004 r2): a batch in
+            # which EVERY experimenter session died (crash/quota/timeout,
+            # no SELF_REPORT) performed no experiments — committing it would
+            # spend the round and its proposals on an outage. Fail loudly
+            # instead: the round is not consumed, and the resume re-runs the
+            # executors with the same proposals (_heal_dead_sessions purges
+            # the dead results and resurrects the released worktrees). A
+            # batch with ANY performed outcome (even NO_CHANGE) is a real
+            # research round and commits as before.
+            causes = "; ".join(
+                f"c{result.candidate_id}:"
+                f"{parse_stop_cause(result.execution.reason)}"
+                for result in results
+            )
+            raise InfrastructureError(
+                f"round {request.round_id}: every experimenter session died "
+                f"without performing the intervention ({causes}); "
+                "round not consumed — resume retries the executors with "
+                "the same proposals"
+            )
         return CandidateBatchResult(
             tuple(sorted(results, key=lambda item: item.candidate_id)),
             self.telemetry.snapshot(persist=True),
         )
+
+    def _heal_dead_sessions(
+        self, round_id: int, payloads: list[dict],
+    ) -> tuple[list[dict], bool]:
+        """Invalidate persisted outcomes of experimenter sessions that died.
+
+        A dead session's result (status in NOT_PERFORMED_STATUSES) is not a
+        reusable outcome, and its worktree was released after collection.
+        Purge those result files, resurrect missing worktrees (deterministic
+        ids, same construction as the fresh path), and report whether any
+        healing happened so the caller can restart the journal.
+        """
+        healed = False
+        for payload in payloads:
+            result_path = Path(str(payload["result_dir"])) / "result.json"
+            if not result_path.exists():
+                continue
+            if not _is_dead_session_result(result_path):
+                continue  # a performed outcome is a usable result: keep it
+            result_path.unlink()
+            healed = True
+            if not Path(str(payload.get("worktree_path") or "")).is_dir():
+                workspace = self.workspace.create(WorkspaceSpec(
+                    f"{round_id}-c{payload['candidate_id']}",
+                    str(payload["parent_sha"]),
+                ))
+                payload["worktree_id"] = workspace.workspace_id
+                payload["worktree_path"] = str(workspace.path)
+        return payloads, healed
 
 
 class ScheduledProposer:
@@ -306,6 +383,18 @@ def _payloads(context: Mapping[str, object]) -> list[dict[str, object]]:
     ):
         raise InfrastructureError("candidate checkpoint has no valid payloads")
     return [dict(payload) for payload in payloads]
+
+
+def _is_dead_session_result(result_path: Path) -> bool:
+    """True when a persisted candidate result records a session that died
+    without performing the intervention (or is unreadable garbage — that can
+    never be a reusable outcome either)."""
+    try:
+        envelope = read_result(result_path)
+        result = decode_candidate_result(envelope.result)
+    except ProtocolError:
+        return True
+    return result.status in NOT_PERFORMED_STATUSES
 
 
 def _record_usage(telemetry, records) -> None:

@@ -42,6 +42,30 @@ class WorkerJobs:
     def clear(self) -> None:
         self.journal.clear()
 
+    def restart(
+        self,
+        *,
+        stage: str,
+        round_id: int,
+        context: Mapping[str, object],
+        request_ids: tuple[str, ...],
+    ) -> None:
+        """Rewrite the current stage's journal with ready jobs.
+
+        A resume that invalidates persisted outcomes (e.g. every experimenter
+        session died before performing the intervention) must genuinely
+        re-run the batch: reset the job entries to ready/attempt 1 so the
+        supervisor resubmits them instead of replaying results or running
+        out of retry attempts against outcomes that were already collected.
+        Only legal for the stage/round already recorded.
+        """
+        self.journal.begin(
+            stage,
+            round_id,
+            context,
+            [_ready(request_id) for request_id in request_ids],
+        )
+
     def run(
         self,
         *,

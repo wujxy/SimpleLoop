@@ -70,6 +70,8 @@ def read_reflection_records(run_dir: Path) -> list[dict]:
 
 
 def _read_reflection_handoffs(run_dir: Path) -> list[str]:
+    """Kept for callers that want the handoff texts only (the reflection
+    pack now consumes the full records directly)."""
     return [
         str(record.get("handoff") or "")
         for record in read_reflection_records(run_dir)
@@ -286,7 +288,12 @@ class MemoryService:
         findings = self.load_findings()
         from ..scientist_session import read_expectations
         expectation_rows = read_expectations(self.run_dir)
-        handoffs = _read_reflection_handoffs(self.run_dir)
+        reflection_records = read_reflection_records(self.run_dir)
+        handoffs = [
+            str(record.get("handoff") or "")
+            for record in reflection_records
+            if record.get("handoff")
+        ]
         return render_reflection_pack(
             current_round=current_round,
             experiments=experiments,
@@ -295,6 +302,7 @@ class MemoryService:
             expectation_rows=expectation_rows,
             previous_handoffs=handoffs,
             metrics_schema=self.metrics_schema,
+            reflection_records=reflection_records,
         )
 
     # --- Write path: target resolution & experiment linking ---------------

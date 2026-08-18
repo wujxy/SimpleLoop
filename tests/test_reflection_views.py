@@ -79,10 +79,33 @@ def test_expectation_ledger_pairs_and_flags_missing():
     paired = ledger[0]
     assert paired["preregistered"] is True
     assert paired["expectation"] == "big gain if lookup dominates"
-    assert paired["outcome"] == "PASSED_GATES_NOT_IMPROVED"
+    # no objective spec → improvement is unknowable → neutral, not NOT_IMPROVED
+    assert paired["outcome"] == "PASSED_GATES_NOT_SELECTED"
     unpaired = ledger[1]
     assert unpaired["preregistered"] is False
     assert unpaired["outcome"] == "FAILED_GATES"
+
+
+def test_expectation_ledger_splits_improved_not_selected():
+    """Regression (tiny-test r2c0): a passing candidate that beat the
+    incumbent but lost to a sibling must NOT read as NOT_IMPROVED — that
+    label matches the Scientist's pre-registered weakening clause on false
+    grounds."""
+    exps = [
+        _Exp(3, 0, selected=True, gate_passed=True,
+             metrics={"SPEED_MS": 0.5919}),
+        _Exp(4, 0, gate_passed=True, metrics={"SPEED_MS": 0.2971}),
+        _Exp(4, 1, selected=True, gate_passed=True,
+             metrics={"SPEED_MS": 0.0754}),
+        _Exp(4, 2, gate_passed=True, metrics={"SPEED_MS": 0.8021}),
+    ]
+    rows = expectation_ledger(
+        exps, {}, current_round=5,
+        objective_key="SPEED_MS", lower_is_better=True)
+    outcomes = {row["experiment_id"]: row["outcome"] for row in rows}
+    assert outcomes["r4c0"] == "PASSED_GATES_IMPROVED_NOT_SELECTED"
+    assert outcomes["r4c1"] == "SELECTED_AS_NEW_INCUMBENT"
+    assert outcomes["r4c2"] == "PASSED_GATES_NOT_IMPROVED"
 
 
 def test_expectation_ledger_capture_failure_stays_visible():
@@ -162,7 +185,7 @@ def test_render_pack_is_deterministic_and_cites_ids(tmp_path):
     pack2 = render_reflection_pack(**kwargs)
     assert pack1 == pack2
     assert "r4c0" in pack1
-    assert "PASSED_GATES_NOT_IMPROVED" in pack1
+    assert "PASSED_GATES_NOT_SELECTED" in pack1
     assert "gain" in pack1 and "neutral" in pack1
     assert "lookup elimination" in pack1
     assert "src/loop" in pack1
@@ -242,7 +265,7 @@ def test_expectation_ledger_marks_not_performed_untested():
     outcomes = [row["outcome"] for row in rows]
     assert "INTERVENTION_NOT_PERFORMED" in outcomes
     assert "FAILED_GATES" in outcomes
-    assert "PASSED_GATES_NOT_IMPROVED" in outcomes
+    assert "PASSED_GATES_NOT_SELECTED" in outcomes
 
 
 def test_execution_outcomes_counts_by_cause():
@@ -276,3 +299,114 @@ def test_execution_outcomes_counts_by_cause():
     assert "## Experimenter session outcomes" in pack
     assert "reached evaluation: 1" in pack
     assert "session_ended_without_report" in pack
+
+
+# ---------------- commitment watchlist / prescriptions --------------------
+
+from proposer.memory.reflection_views import (
+    commitment_watchlist,
+    prescription_followthrough,
+)
+
+
+def test_commitment_watchlist_flags_clause_bearing_non_selected():
+    exps = [
+        # clause-bearing, gates failed -> watched; two later attempts on F-001
+        _Exp(3, 3, gate_passed=False, finding_id="F-001"),
+        _Exp(5, 0, gate_passed=True, metrics={"SPEED_MS": 90.0},
+             finding_id="F-001", selected=True),
+        _Exp(6, 0, gate_passed=False, finding_id="F-001"),
+        # clause-bearing, passed but not improved -> watched
+        _Exp(6, 1, gate_passed=True, metrics={"SPEED_MS": 200.0},
+             finding_id="F-002"),
+        # selected -> never watched even with a clause
+        _Exp(6, 2, gate_passed=True, metrics={"SPEED_MS": 80.0},
+             finding_id="F-003", selected=True),
+        # no clause -> never watched even on failure
+        _Exp(6, 3, gate_passed=False, finding_id="F-004"),
+    ]
+    rows = {3: {"expectations": [
+                {"slot": 3, "expectation": "e",
+                 "would_weaken": "if <5ms the loop is not memory-bound"}]},
+            6: {"expectations": [
+                {"slot": 1, "expectation": "e",
+                 "would_weaken": "gain <10ms weakens gather dominance"},
+                {"slot": 2, "expectation": "e",
+                 "would_weaken": "should not fire (selected)"},
+                {"slot": 3, "expectation": "e"}]}}
+    reflections = [{"round_id": 4, "handoff": "audit"}]
+    watch = commitment_watchlist(
+        exps, rows, reflections, current_round=7,
+        objective_key="SPEED_MS", lower_is_better=True)
+    ids = [row["experiment_id"] for row in watch]
+    assert ids == ["r3c3", "r6c1"]
+    r3 = watch[0]
+    assert r3["outcome"] == "FAILED_GATES"
+    assert r3["attempts_on_finding_since"] == 2
+    assert r3["reflections_since"] == 1
+    assert "memory-bound" in r3["would_weaken"]
+    r6 = watch[1]
+    assert r6["outcome"] == "PASSED_GATES_NOT_IMPROVED"
+    assert r6["attempts_on_finding_since"] == 0
+    assert r6["reflections_since"] == 0
+
+
+def test_commitment_watchlist_marks_not_performed_untested():
+    class _Dead(_Exp):
+        status = "EXECUTOR_FAILED"
+    exps = [_Dead(2, 0, gate_passed=False, finding_id="F-001")]
+    rows = {2: {"expectations": [
+        {"slot": 0, "expectation": "e", "would_weaken": "w"}]}}
+    watch = commitment_watchlist(
+        exps, rows, [], current_round=3)
+    assert [row["outcome"] for row in watch] == ["INTERVENTION_NOT_PERFORMED"]
+
+
+def test_prescription_followthrough_reports_deltas():
+    reflections = [
+        {"round_id": 4, "handoff": "h",
+         "prescriptions": ["test the eval-count family on the harness",
+                          "  ",  # blank entries dropped
+                          "watch RemoveDN attribution"]},
+        {"round_id": 8, "handoff": "h2"},
+    ]
+    exps = [
+        _Exp(5, 0, selected=True),
+        _Exp(6, 0),
+        _Exp(9, 0),
+    ]
+    rows = prescription_followthrough(reflections, exps, current_round=9)
+    assert [row["id"] for row in rows] == ["P-r4-0", "P-r4-2"]
+    p0 = rows[0]
+    assert p0["rounds_elapsed"] == 5
+    assert p0["experiments_since"] == ["r5c0", "r6c0"]
+    assert p0["selections_since"] == ["r5c0"]
+    assert p0["reflections_since"] == 1  # the round-8 reflection intervened
+
+
+def test_render_pack_annotates_clause_bearing_outcomes_in_ledger():
+    exps = [_Exp(3, 0, gate_passed=False, finding_id="F-001")]
+    rows = {3: {"expectations": [
+        {"slot": 0, "expectation": "e", "would_weaken": "w clause"}]}}
+    reflections = [{
+        "round_id": 2, "handoff": "audit",
+        "prescriptions": ["watch the knob family"],
+    }]
+    pack = render_reflection_pack(
+        current_round=4, experiments=exps, findings={}, history_rows=[],
+        expectation_rows=rows, previous_handoffs=["audit"],
+        metrics_schema={}, reflection_records=reflections)
+    # the watchlist is an annotation on the expectation ledger, not a section
+    assert "clause-shaped outcome" in pack
+    assert "r3c0" in pack and "w clause" in pack
+    assert "attempts on F-001 since: 0" in pack
+    assert "past prescriptions" in pack
+    assert "P-r2-0" in pack and "watch the knob family" in pack
+
+
+def test_render_pack_without_reflection_records_stays_safe():
+    pack = render_reflection_pack(
+        current_round=1, experiments=[], findings={}, history_rows=[],
+        expectation_rows={}, previous_handoffs=[], metrics_schema={})
+    assert "clause-shaped outcome" not in pack
+    assert "no structured prescriptions" in pack

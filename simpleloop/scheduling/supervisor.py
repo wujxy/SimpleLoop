@@ -16,11 +16,46 @@ from .contracts import (
     JobState,
     Scheduler,
 )
-from .envelope import read_result, write_request
+from .envelope import (
+    ProtocolError, WorkerResult, WorkerStatus, read_result, write_request,
+)
 
 
 _ACTIVE = {"pending", "running"}
 _TERMINAL = {"succeeded", "failed"}
+
+
+def is_failure_envelope(result: WorkerResult) -> bool:
+    """True when a persisted worker result records a failure.
+
+    Two shapes count: an envelope the worker itself marked FAILED, and a
+    COMPLETED envelope whose handler converted an internal failure (LLM
+    429/quota exhaustion, network error, bad credentials) into the
+    proposer-family ``outcome: "error"`` convention. Both mean the stage
+    failed; neither may be replayed as a final result on resume.
+    """
+    if result.status is not WorkerStatus.COMPLETED:
+        return True
+    return result.result.get("outcome") == "error"
+
+
+def purge_failure_result(path: Path) -> bool:
+    """Delete a persisted failure result so its job re-runs on resume.
+
+    Returns True when the file was purged. An unreadable result file is
+    purged too: it cannot be a valid reusable outcome, and collecting it
+    would raise a protocol error on every future resume of the round.
+    """
+    if not path.exists():
+        return False
+    try:
+        result = read_result(path)
+    except ProtocolError:
+        result = None
+    if result is not None and not is_failure_envelope(result):
+        return False
+    path.unlink()
+    return True
 
 
 @dataclass
@@ -109,6 +144,13 @@ class JobSupervisor:
                 request.context,
                 [runtime.to_dict() for runtime in runtimes.values()],
             )
+            # A fresh batch must never replay a fossil: a failure result
+            # left in a reused result_dir (a journal dropped after a failed
+            # stage) would be collected as final and re-fail the stage with
+            # the previous invocation's error instead of retrying it with
+            # the current configuration.
+            for job in request.jobs:
+                purge_failure_result(job.result_path)
         else:
             if record.stage != request.stage or record.round_id != request.round_id:
                 raise ValueError(

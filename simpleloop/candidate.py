@@ -25,6 +25,30 @@ class CandidateStatus(str, Enum):
     IMPLEMENTATION_INCOMPLETE = "IMPLEMENTATION_INCOMPLETE"
 
 
+# Statuses whose candidates never reached evaluation: the intervention was
+# not performed. Single source for every consumer (loop all-dead streak,
+# Scientist world event / progress pack, Reflection execution-cost views).
+NOT_PERFORMED_STATUSES: frozenset[str] = frozenset({
+    status.value for status in (
+        CandidateStatus.IMPLEMENTATION_INCOMPLETE,
+        CandidateStatus.EXECUTOR_FAILED,
+        CandidateStatus.WORKER_FAILED,
+    )
+})
+
+
+def parse_stop_cause(reason: str | None, default: str = "crashed") -> str:
+    """Extract the ``stop_cause=`` the executor stage prefixes into its
+    failure reasons. Single reader for the wire protocol both the candidate
+    pipeline and the Reflection views parse."""
+    text = str(reason or "")
+    if "stop_cause=" in text:
+        cause = text.split("stop_cause=", 1)[1].split(";", 1)[0].strip()
+        if cause:
+            return cause
+    return default
+
+
 @dataclass(frozen=True)
 class ExecutionResult:
     status: str
@@ -153,19 +177,6 @@ class CandidateTrace(Protocol):
         ...
 
 
-def _agent_stop_cause(reason: str | None) -> str:
-    """Classify an executor session death from its recorded reason.
-
-    The executor prefixes AgentError reasons with ``stop_cause=``; anything
-    else on that path is a crash by elimination."""
-    text = str(reason or "")
-    if "stop_cause=" in text:
-        cause = text.split("stop_cause=", 1)[1].split(";", 1)[0].strip()
-        if cause:
-            return cause
-    return "crashed"
-
-
 def _candidate_result(
     request: CandidateRequest,
     *,
@@ -245,7 +256,7 @@ def run_candidate(
     if execution.status == "EXECUTOR_FAILED" or died_silent:
         stop_cause = (
             "session_ended_without_report" if died_silent
-            else _agent_stop_cause(execution.reason)
+            else parse_stop_cause(execution.reason)
         )
         changed = artifacts.inspect(request.workspace)
         artifact = None

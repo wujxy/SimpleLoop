@@ -50,6 +50,75 @@ def test_parse_response_message_is_optional_and_ignored():
     assert b["cwd"] == "scratch"
 
 
+def test_parse_response_flat_action_is_canonical():
+    """The response IS the action object — the exact shape the Runtime
+    contract's tool schemas show. This is the spelling the prompts now
+    teach (regression: test.log round died because the model emitted this
+    shape and only the envelope was accepted)."""
+    a = parse_response(
+        '{"action":"run_research_command","command":"cat foo.py && ls",'
+        '"cwd":"work"}',
+        3,
+    )
+    assert a == {
+        "action": "run_research_command",
+        "command": "cat foo.py && ls",
+        "cwd": "work",
+    }
+    # optional message rides alongside and is stripped
+    b = parse_response(
+        '{"action":"run_research_command","command":"rg foo",'
+        '"message":"checking"}',
+        3,
+    )
+    assert b["command"] == "rg foo"
+    assert "message" not in b
+    # flat submit_proposals too
+    c = parse_response(
+        '{"action":"submit_proposals","proposals":[]}', 3
+    )
+    assert c["proposals"] == []
+
+
+def test_parse_response_salvages_missing_closing_brace():
+    """Truncation that drops only the trailing delimiter(s) is recovered
+    (run-004 r5: three identical replies ended `"cwd":"work"` with no `}`,
+    exhausting every protocol repair). Salvaged == complete spelling."""
+    a = parse_response(
+        '{"action":"run_research_command","command":"rg foo","cwd":"work"'
+        ',"message":"checking"}',
+        3,
+    )
+    assert a == {
+        "action": "run_research_command",
+        "command": "rg foo",
+        "cwd": "work",
+    }
+
+
+def test_parse_response_salvage_ignores_braces_inside_strings():
+    # a '}' inside the command string must not satisfy the outer object's
+    # missing closer
+    a = parse_response(
+        '{"action":"run_research_command","command":"awk \'{print $1}\'",'
+        '"cwd":"work"',
+        3,
+    )
+    assert a["command"] == "awk '{print $1}'"
+    assert a["cwd"] == "work"
+
+
+def test_parse_response_does_not_salvage_truncated_value():
+    """Cut inside a string value: the command itself is incomplete, and
+    silently executing a truncated command is worse than one repair round —
+    the parse must still fail."""
+    with pytest.raises(ProposerError):
+        parse_response(
+            '{"action":"run_research_command","command":"rm -rf /tmp/xy',
+            3,
+        )
+
+
 def test_parse_response_submit_zero_is_legal_abstention():
     a = parse_response(
         '{"action":{"action":"submit_proposals","proposals":[]}}', 3
@@ -985,8 +1054,38 @@ def test_world_event_honest_categories_and_time_sense(tmp_path):
     # gap rounds 3,4 labeled (no reflection/self logs in tmp_path)
     assert "3=no recorded experiments" in we
     assert "4=no recorded experiments" in we
-    # a performed pass is still reported as gates-run
-    assert "PASSED_GATES_NOT_IMPROVED" in we
+    # a performed pass is still reported as gates-run; with no incumbent
+    # value on record the label is neutral (NOT selected), not NOT_IMPROVED
+    assert "PASSED_GATES_NOT_SELECTED" in we
+
+
+def test_world_event_splits_improved_not_selected(tmp_path):
+    """Regression (tiny-test r2c0): a passing candidate that beat the
+    incumbent but lost to a sibling must not be labeled NOT_IMPROVED — the
+    label would match the Scientist's pre-registered weakening clause on
+    false grounds."""
+    class _StatedExp(_FakeExp):
+        def __init__(self, rnd, cand, sel, gp, metrics=None):
+            super().__init__(rnd, cand, sel, gp, metrics=metrics)
+
+    exps = [
+        _StatedExp(3, 0, True, True, metrics={"SPEED_MS": 0.5919}),
+        _StatedExp(4, 0, False, True, metrics={"SPEED_MS": 0.2971}),
+        _StatedExp(4, 1, True, True, metrics={"SPEED_MS": 0.0754}),
+        _StatedExp(4, 2, False, True, metrics={"SPEED_MS": 0.8021}),
+    ]
+
+    class _Mem:
+        run_dir = tmp_path
+        metrics_schema = {
+            "objective": {"key": "SPEED_MS", "lower_is_better": True}}
+        def load_experiments(self):
+            return exps
+
+    we = _build_world_event(_Mem(), 5, "beefdead")
+    assert "PASSED_GATES_IMPROVED_NOT_SELECTED" in we  # r4c0 beat 0.5919
+    assert "SELECTED_AS_NEW_INCUMBENT" in we           # r4c1 won the round
+    assert "PASSED_GATES_NOT_IMPROVED" in we           # r4c2 regressed
 
 
 def test_protocol_death_carries_last_reply_and_trace(tmp_path, monkeypatch):
@@ -998,6 +1097,9 @@ def test_protocol_death_carries_last_reply_and_trace(tmp_path, monkeypatch):
     bad = [
         "this is not json at all",
         '{"action": {"action": "no_such_action"}}',
+        '{"action": {"action": "bogus_2"}}',
+        '{"action": {"action": "bogus_3"}}',
+        '{"action": {"action": "bogus_4"}}',
         '{"action": {"action": "also_bogus"}}',
     ]
     agent = _make_agent(bad, max_steps=5)
@@ -1022,3 +1124,277 @@ def test_protocol_death_carries_last_reply_and_trace(tmp_path, monkeypatch):
     assert isinstance(trace, dict)
     assert "also_bogus" in trace["last_raw_reply"]
     assert trace["outcome"] == "error"
+
+
+def test_parse_submit_reflection_handoff_structured_fields():
+    a = _parse(json.dumps({"action": {
+        "action": "submit_reflection_handoff",
+        "handoff": "the knob family was never tested on the harness",
+        "prescriptions": ["run the step-size matrix on the harness"],
+        "next_reflection_after_rounds": 2,
+    }}))
+    assert a["prescriptions"] == ["run the step-size matrix on the harness"]
+    assert a["next_reflection_after_rounds"] == 2
+
+
+def test_parse_submit_reflection_handoff_structured_defaults_empty():
+    a = _parse(json.dumps({"action": {
+        "action": "submit_reflection_handoff", "handoff": "warning"}}))
+    assert a["prescriptions"] == []
+    assert a["next_reflection_after_rounds"] is None
+
+
+def test_parse_submit_reflection_handoff_structured_rejects():
+    base = {"action": "submit_reflection_handoff", "handoff": "w"}
+    # prescriptions must be non-empty strings
+    with pytest.raises(ProposerError, match="prescriptions"):
+        _parse(json.dumps({"action": {**base, "prescriptions": ["  "]}}))
+    with pytest.raises(ProposerError, match="prescriptions"):
+        _parse(json.dumps({"action": {**base, "prescriptions": "x"}}))
+    # cadence must be a positive integer (bool excluded)
+    with pytest.raises(ProposerError, match="next_reflection_after_rounds"):
+        _parse(json.dumps({"action": {
+            **base, "next_reflection_after_rounds": 0}}))
+    with pytest.raises(ProposerError, match="next_reflection_after_rounds"):
+        _parse(json.dumps({"action": {
+            **base, "next_reflection_after_rounds": True}}))
+
+
+# ---------------- batch action protocol (scientist-v6) --------------------
+
+def test_parse_batch_envelope_returns_items():
+    a = parse_response(
+        '{"actions":['
+        '{"action":"read_file","path":"/work/a.py"},'
+        '{"action":"grep_files","pattern":"foo","path":"/work"}'
+        '],"message":"looking"}',
+        3,
+    )
+    assert a["action"] == "__batch__"
+    assert [item["action"] for item in a["items"]] == [
+        "read_file", "grep_files",
+    ]
+    assert a["items"][0] == {
+        "action": "read_file", "path": "/work/a.py", "offset": 1,
+        "limit": 400,
+    }
+
+
+def test_parse_batch_rejects_bad_envelopes():
+    with pytest.raises(ProposerError, match="non-empty list"):
+        parse_response('{"actions":[]}', 3)
+    with pytest.raises(ProposerError, match="non-empty list"):
+        parse_response('{"actions":"nope"}', 3)
+    with pytest.raises(ProposerError, match="at most 8"):
+        parse_response(
+            '{"actions":['
+            + ",".join(
+                '{"action":"read_file","path":"/work/a.py"}' for _ in range(9)
+            )
+            + "]}",
+            3,
+        )
+    with pytest.raises(ProposerError, match="must be an object"):
+        parse_response('{"actions":[42]}', 3)
+    with pytest.raises(ProposerError, match="not both"):
+        parse_response(
+            '{"action":"read_file","path":"/work/a.py",'
+            '"actions":[{"action":"read_file","path":"/work/a.py"}]}',
+            3,
+        )
+    with pytest.raises(ProposerError, match="invalid keys"):
+        parse_response(
+            '{"actions":[{"action":"read_file","path":"/work/a.py",'
+            '"bogus":1}]}',
+            3,
+        )
+
+
+@pytest.mark.parametrize("terminal", [
+    {"action": "submit_proposals", "proposals": []},
+    {"action": "submit_self_decision", "decision": "KEEP",
+     "diagnosis": "d", "keep_reason": "k", "next_review_after_rounds": 3},
+    {"action": "submit_reflection_handoff", "handoff": "h"},
+])
+def test_parse_batch_rejects_mixed_terminal(terminal):
+    with pytest.raises(ProposerError, match="sole action"):
+        parse_response(
+            json.dumps({"actions": [
+                {"action": "read_file", "path": "/work/a.py"},
+                terminal,
+            ]}),
+            3,
+        )
+
+
+def test_parse_batch_lone_terminal_is_legal():
+    a = parse_response(
+        '{"actions":[{"action":"submit_proposals","proposals":[]}]}', 3,
+    )
+    assert a["action"] == "__batch__"
+    assert a["items"][0]["action"] == "submit_proposals"
+
+
+def test_parse_batch_salvages_truncated_envelope():
+    a = parse_response(
+        '{"actions":[{"action":"read_file","path":"/work/a.py"}',
+        3,
+    )
+    assert a["action"] == "__batch__"
+    assert a["items"][0]["path"] == "/work/a.py"
+
+
+def test_parse_run_research_command_workdir_passthrough():
+    a = parse_response(
+        '{"action":"run_research_command","command":"make",'
+        '"workdir":"/work/build"}',
+        3,
+    )
+    assert a == {
+        "action": "run_research_command", "command": "make",
+        "workdir": "/work/build",
+    }
+    # cwd omitted now stays omitted (the runner's memory supplies it)
+    b = parse_response(
+        '{"action":"run_research_command","command":"ls"}', 3,
+    )
+    assert b == {"action": "run_research_command", "command": "ls"}
+    with pytest.raises(ProposerError, match="workdir"):
+        parse_response(
+            '{"action":"run_research_command","command":"ls",'
+            '"workdir":42}',
+            3,
+        )
+
+
+class _RecordingTools:
+    """FakeResearchTools that records the actions it was handed."""
+
+    def __init__(self, results=None, **kwargs):
+        self.calls = []
+        self._results = list(results) if results is not None else None
+
+    def execute(self, action, *, deadline):
+        self.calls.append(action)
+        if self._results is not None:
+            return self._results.pop(0)
+        return {"ok": True, "output": "obs", "returncode": 0}
+
+
+def _recording_factory(monkeypatch, results=None):
+    created = []
+
+    def factory(**kwargs):
+        tools = _RecordingTools(results=results, **kwargs)
+        created.append(tools)
+        return tools
+
+    monkeypatch.setattr(proposer_mod, "ResearchTools", factory)
+    return created
+
+
+def _research_once(tmp_path, agent):
+    session = ScientistSession.load_or_create(
+        tmp_path, 0, prompt_version="scientist-v6")
+    return agent.research(
+        goal="g", editable=["src"], world_mount=None,
+        memory_service=_FakeMem([]), base_sha="abc",
+        source_path=tmp_path, repo_path=tmp_path, run_dir=tmp_path,
+        current_round=0, gate_block="g", prompt_dir=None,
+        proposal_slots=3, session=session, max_steps=10,
+    )
+
+
+def test_batch_step_executes_in_order_one_observation_message(
+    tmp_path, monkeypatch,
+):
+    created = _recording_factory(monkeypatch)
+    batch = json.dumps({"actions": [
+        {"action": "read_file", "path": "/work/a.py"},
+        {"action": "grep_files", "pattern": "foo", "path": "/work"},
+    ]})
+    agent = _make_agent([batch, _submit_reply(1), _notebook_reply()])
+
+    result = _research_once(tmp_path, agent)
+
+    assert len(result.proposals) == 1
+    calls = created[0].calls
+    assert [c["action"] for c in calls] == ["read_file", "grep_files"]
+    # one (assistant, user) message pair for the whole batch
+    archived = [
+        json.loads(line)
+        for line in (tmp_path / "proposer" / "session.jsonl").read_text(
+        ).splitlines()
+    ]
+    user_obs = [
+        m for m in archived
+        if m["role"] == "user" and '"tool_results"' in m["content"]
+    ]
+    assert len(user_obs) == 1
+    envelope = json.loads(user_obs[0]["content"])
+    assert list(envelope) == ["tool_results"]
+    assert len(envelope["tool_results"]) == 2
+    # both items logged under the same step
+    assert result.trace["actions"][:2] == [
+        {"action": "read_file", "step": 1},
+        {"action": "grep_files", "step": 1},
+    ]
+
+
+def test_batch_item_failure_does_not_stop_the_batch(tmp_path, monkeypatch):
+    created = _recording_factory(monkeypatch, results=[
+        {"ok": False, "error": "file does not exist: '/work/nope'"},
+        {"ok": True, "output": "hit", "returncode": 0},
+    ])
+    batch = json.dumps({"actions": [
+        {"action": "read_file", "path": "/work/nope"},
+        {"action": "read_file", "path": "/work/a.py", "offset": 2},
+    ]})
+    agent = _make_agent([batch, _submit_reply(1), _notebook_reply()])
+
+    result = _research_once(tmp_path, agent)
+
+    assert len(created[0].calls) == 2
+    archived = (tmp_path / "proposer" / "session.jsonl").read_text()
+    assert "file does not exist" in archived
+    assert result.deliberation_telemetry["tool_calls"] == 2
+
+
+def test_terminal_mixed_in_batch_repairs_then_submits(tmp_path, monkeypatch):
+    _recording_factory(monkeypatch)
+    mixed = json.dumps({"actions": [
+        {"action": "read_file", "path": "/work/a.py"},
+        {"action": "submit_proposals", "proposals": []},
+    ]})
+    agent = _make_agent([mixed, _submit_reply(1), _notebook_reply()])
+
+    result = _research_once(tmp_path, agent)
+
+    assert len(result.proposals) == 1
+    assert result.deliberation_telemetry["protocol_repairs"] == 1
+
+
+def test_repeat_guard_chains_through_batches(tmp_path, monkeypatch):
+    """Adjacent duplicates count across the batch boundary in both
+    directions: the batch's first item against the previous step's last,
+    and adjacent items within one batch."""
+    _recording_factory(monkeypatch)
+    read_a = {"action": "read_file", "path": "/work/a.py"}
+    read_b = {"action": "read_file", "path": "/work/b.py"}
+    # step 2's first item repeats step 1's last item exactly
+    step1 = json.dumps({"actions": [read_a, read_b]})
+    step2 = json.dumps({"actions": [read_b, read_a]})
+    agent = _make_agent([step1, step2, _submit_reply(1), _notebook_reply()])
+    result = _research_once(tmp_path, agent)
+    assert result.deliberation_telemetry["protocol_repairs"] == 1
+
+
+def test_repeat_guard_catches_adjacent_duplicates_within_a_batch(
+    tmp_path, monkeypatch,
+):
+    _recording_factory(monkeypatch)
+    read_a = {"action": "read_file", "path": "/work/a.py"}
+    batch = json.dumps({"actions": [read_a, read_a]})
+    agent = _make_agent([batch, _submit_reply(1), _notebook_reply()])
+    result = _research_once(tmp_path, agent)
+    assert result.deliberation_telemetry["protocol_repairs"] == 1

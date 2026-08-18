@@ -18,6 +18,15 @@ class ModelError(RuntimeError):
     """The configured model transport cannot produce a usable reply."""
 
 
+class EmptyReplyError(ModelError):
+    """The model answered with zero content bytes.
+
+    For streaming reasoning models this is usually self-healing: the model
+    can spend its whole output budget on thinking (content channel stays
+    empty), or a gateway can truncate the stream. It is therefore retried
+    like any other transient failure — see ``_is_transient``."""
+
+
 @dataclass(frozen=True)
 class ModelReply:
     text: str
@@ -52,9 +61,14 @@ def _is_transient(exc: BaseException) -> bool:
 
     ``APIStatusError`` (and ``HAPIStatusError``, which subclasses it) carries a
     clean ``status_code``; connection/timeout errors are detected by class name
-    across the openai SDK, httpx, and the HEPAI wrapper. Non-transient errors
-    (400/401/403/404, parse failures, empty replies) are NOT retried — they
+    across the openai SDK, httpx, and the HEPAI wrapper. An ``EmptyReplyError``
+    is also transient: reasoning models can exhaust their output budget on
+    thinking (empty content channel) and gateways can truncate a stream —
+    both typically succeed on a fresh call. Non-transient errors
+    (400/401/403/404, parse failures) are NOT retried — they
     will not fix themselves."""
+    if isinstance(exc, EmptyReplyError):
+        return True
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and status in _RETRY_STATUS:
         return True
@@ -100,7 +114,6 @@ class _RetryChatModel:
     ) -> ModelReply:
         deadline = time.monotonic() + max(timeout_seconds, 0.0)
         last_exc: Exception | None = None
-        response = None
         for attempt in range(self._max_retries + 1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -109,10 +122,14 @@ class _RetryChatModel:
                     + (f" (last error: {last_exc})" if last_exc else "")
                 )
             try:
+                # Response CONSUMPTION stays inside the retry try: with
+                # streaming, a connection can also die mid-reply (after
+                # _create returned a healthy stream), and that death must
+                # retry like any other transient failure.
                 response = self._create(
                     system=system, messages=messages, remaining=remaining,
                 )
-                break  # success — fall through to response processing
+                return self._to_reply(response)
             except Exception as exc:
                 last_exc = exc
                 transient = _is_transient(exc)
@@ -126,47 +143,129 @@ class _RetryChatModel:
                 if delay <= 0:
                     raise
                 print(
-                    f"[model] transient {type(exc).__name__} "
+                    f"[{time.strftime('%H:%M:%S')}] [model] transient "
+                    f"{type(exc).__name__} "
                     f"(status={getattr(exc, 'status_code', '-')}, "
                     f"attempt {attempt + 1}/{self._max_retries}); "
                     f"retrying in {delay:.1f}s",
                     flush=True,
                 )
-        return self._to_reply(response)
+        raise ModelError("unreachable")  # pragma: no cover
 
 
 class OpenAICompatChatModel(_RetryChatModel):
     """Chat Completions adapter for any OpenAI-compatible endpoint.
 
     Provider details (auth, base_url, SDK choice) stop at ``from_config``;
-    the request/response logic is identical across providers."""
+    the request/response logic is identical across providers.
+
+    Requests are STREAMED. Reasoning models routinely think for minutes
+    before their first output token; with ``stream=False`` the connection
+    carries zero bytes the whole time, so any idle-timeout gateway between
+    us and the model (HEPAI's cuts at ~300s) drops exactly the
+    deepest-thinking calls as 504s — and a blind retry re-pays the whole
+    think. Streaming keeps bytes flowing (reasoning deltas arrive every
+    few seconds), which both survives the gateway and preserves the
+    model's full thinking. Only ``content`` deltas are concatenated;
+    reasoning deltas are skipped — the Scientist protocol expects the JSON
+    action in the content channel."""
 
     def __init__(self, *, client, model: str,
-                 max_retries: int = 4, retry_base_delay: float = 2.0):
+                 max_retries: int = 4, retry_base_delay: float = 2.0,
+                 reasoning_effort: str | None = None):
         super().__init__(
             max_retries=max_retries, retry_base_delay=retry_base_delay,
         )
         self.client = client
         self.model = model
+        # Optional thinking-depth valve (config: roles.researcher.
+        # reasoning_effort: low|medium|high). None = the provider's
+        # server-side default.
+        self.reasoning_effort = reasoning_effort
+        # Dropped permanently if the provider rejects stream_options (some
+        # OpenAI-compatible gateways don't know it).
+        self._stream_usage = True
 
     def _create(self, *, system: str, messages: list[dict],
                 remaining: float):
-        return self.client.chat.completions.create(
+        kwargs: dict = dict(
             model=self.model,
             messages=[{"role": "system", "content": system}, *messages],
-            stream=False,
+            stream=True,
             response_format={"type": "json_object"},
             timeout=remaining,
         )
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        # Provider-native request-body extras (e.g. GLM's thinking switch);
+        # the OpenAI SDK merges extra_body into the JSON body.
+        if getattr(self, "extra_body", None):
+            kwargs["extra_body"] = self.extra_body
+        if self._stream_usage:
+            kwargs["stream_options"] = {"include_usage": True}
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if (self._stream_usage
+                    and getattr(exc, "status_code", None) == 400):
+                self._stream_usage = False
+                kwargs.pop("stream_options")
+                return self.client.chat.completions.create(**kwargs)
+            raise
 
     def _to_reply(self, response) -> ModelReply:
-        text = response.choices[0].message.content
-        if not isinstance(text, str) or not text.strip():
-            raise ModelError("chat model returned an empty assistant message")
-        usage = getattr(response, "usage", None)
-        if hasattr(usage, "model_dump"):
+        parts: list[str] = []
+        usage = None
+        finish_reason = None
+        for chunk in response:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue  # usage-only final chunk
+            finish_reason = getattr(choices[0], "finish_reason", None) \
+                or finish_reason
+            delta = getattr(choices[0], "delta", None)
+            content = getattr(delta, "content", None) if delta else None
+            if content:
+                parts.append(content)
+        text = "".join(parts)
+        if usage is not None and hasattr(usage, "model_dump"):
             usage = usage.model_dump()
+        if not text.strip():
+            # Carry the evidence: finish_reason=length points at the
+            # thinking budget eating the reply (lower reasoning_effort);
+            # a null finish_reason points at a truncated stream.
+            completion_tokens = (
+                usage.get("completion_tokens") if isinstance(usage, dict)
+                else None
+            )
+            raise EmptyReplyError(
+                "chat model returned an empty assistant message "
+                f"(finish_reason={finish_reason}, "
+                f"completion_tokens={completion_tokens})"
+            )
         return ModelReply(text=text, usage=usage)
+
+
+_EFFORT_LEVELS = ("low", "medium", "high")
+
+
+def _validated_effort(config: dict) -> str | None:
+    """The optional thinking-depth valve from the role config
+    (``reasoning_effort: low|medium|high``). None = provider default.
+    Fails fast on a typo so a bad value surfaces at startup, not mid-round."""
+    value = config.get("reasoning_effort")
+    if value is None or str(value).strip() == "":
+        return None
+    value = str(value).strip().lower()
+    if value not in _EFFORT_LEVELS:
+        raise ModelError(
+            f"researcher.reasoning_effort must be one of "
+            f"{list(_EFFORT_LEVELS)}; got {value!r}"
+        )
+    return value
 
 
 class HepAIChatModel(OpenAICompatChatModel):
@@ -186,6 +285,7 @@ class HepAIChatModel(OpenAICompatChatModel):
         return cls(
             client=HepAI(api_key=key, base_url=config["base_url"]),
             model=config["model"],
+            reasoning_effort=_validated_effort(config),
         )
 
 
@@ -197,6 +297,11 @@ class ZhipuChatModel(OpenAICompatChatModel):
     than the Anthropic-compatible ``/api/anthropic`` path (which serves the
     Messages API, not Chat Completions). GLM-4+ models honour
     ``response_format={"type": "json_object"}``.
+
+    GLM's thinking knob is not graded (no low/medium/high) — it is
+    ``thinking: {"type": "enabled"|"disabled"}`` in the request body. The
+    shared ``reasoning_effort`` config is translated here: low → disabled,
+    medium/high → enabled, carried via the SDK's ``extra_body``.
     """
 
     @classmethod
@@ -216,10 +321,17 @@ class ZhipuChatModel(OpenAICompatChatModel):
             raise ModelError(
                 "install the project dependency 'openai'"
             ) from exc
-        return cls(
+        model = cls(
             client=OpenAI(api_key=key, base_url=config["base_url"]),
             model=config["model"],
         )
+        effort = _validated_effort(config)
+        if effort:
+            model.extra_body = {
+                "thinking": {"type": "disabled" if effort == "low"
+                             else "enabled"},
+            }
+        return model
 
 
 class AnthropicChatModel(_RetryChatModel):
@@ -277,11 +389,15 @@ class AnthropicChatModel(_RetryChatModel):
             for block in (response.content or [])
             if getattr(block, "type", None) == "text"
         )
-        if not text.strip():
-            raise ModelError("chat model returned an empty assistant message")
         usage = getattr(response, "usage", None)
         if hasattr(usage, "model_dump"):
             usage = usage.model_dump()
+        if not text.strip():
+            # stop_reason=max_tokens means thinking ate the reply budget.
+            raise EmptyReplyError(
+                "chat model returned an empty assistant message "
+                f"(stop_reason={getattr(response, 'stop_reason', None)})"
+            )
         return ModelReply(text=text, usage=usage)
 
 

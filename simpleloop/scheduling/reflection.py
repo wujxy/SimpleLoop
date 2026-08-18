@@ -77,10 +77,21 @@ class ScheduledReflector:
         if not isinstance(raw, Mapping):
             raise InfrastructureError(
                 "reflection worker returned no handoff")
+        def _str_tuple(key: str) -> tuple:
+            value = raw.get(key)
+            if not isinstance(value, list):
+                return ()
+            return tuple(str(v) for v in value if str(v).strip())
+
+        defer = raw.get("next_reflection_after_rounds")
         return ReflectionRecord(
             int(raw.get("round_id") or round_id),
             str(raw.get("handoff") or ""),
             bool(raw.get("self_limitation_suspected")),
             bool(raw.get("abstained")),
             str(raw.get("note") or ""),
+            _str_tuple("prescriptions"),
+            int(defer)
+            if isinstance(defer, int) and not isinstance(defer, bool)
+            else None,
         )

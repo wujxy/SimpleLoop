@@ -42,7 +42,7 @@ from .scheduling.rsi import (
     ScheduledViabilityChecker,
 )
 from .scheduling.reflection import ScheduledReflector
-from .scheduling.supervisor import JobSupervisor
+from .scheduling.supervisor import JobSupervisor, purge_failure_result
 from .scheduling.task import (
     BaselineRequest, ScheduledBaseline, ScheduledCandidates, ScheduledProposer,
 )
@@ -359,6 +359,15 @@ def _reconcile_inflight(jobs, history: list[dict]) -> None:
     a stale inflight record that would otherwise deadlock the next round with
     a stage/round mismatch. RSI stages are reconciled against terminal self
     events by ``RsiPipeline.prepare`` instead.
+
+    A journal for an uncommitted round whose persisted results are failure
+    envelopes (LLM 429/quota exhaustion, network error, crashed worker) is a
+    poison pill: those jobs' workspaces were already released, and replaying
+    the recorded error would fail every future ``--continue`` of this round
+    with the previous invocation's error — the reason the run was resumed
+    (fresh quota, changed API config) would never take effect. Purge the
+    failed result files and drop the journal so the stage rebuilds its
+    workspaces and payloads from scratch and genuinely retries.
     """
     record = jobs.inflight()
     if record is None:
@@ -367,6 +376,39 @@ def _reconcile_inflight(jobs, history: list[dict]) -> None:
         item.get("round") == record.round_id for item in history
     ):
         jobs.clear()
+        return
+    purged = [
+        path for path in _stage_result_paths(record.context)
+        if purge_failure_result(path)
+    ]
+    if purged:
+        print(
+            f"[{stamp()}] resume: round {record.round_id + 1} {record.stage} "
+            f"stage had failed ({len(purged)} result(s) purged) — "
+            "retrying it with the current config",
+            flush=True,
+        )
+        jobs.clear()
+
+
+def _stage_result_paths(value: object) -> list[Path]:
+    """Every result.json a journal context refers to, any stage shape.
+
+    Single-job stages keep one ``payload`` with a ``result_dir``; the
+    candidates stage keeps a list of them. Scan recursively so both (and
+    future shapes) are covered uniformly.
+    """
+    paths: list[Path] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key == "result_dir" and isinstance(item, str) and item:
+                paths.append(Path(item) / "result.json")
+            else:
+                paths.extend(_stage_result_paths(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            paths.extend(_stage_result_paths(item))
+    return paths
 
 
 def _starting_state(

@@ -4,7 +4,7 @@ Two families of tools:
   - ``ResearchCommandRunner`` runs a bounded shell command in a sandboxed
     Apptainer boundary (the whole worktree mounted ``/work`` read-only, the
     editable paths overlaid read-write — plus repo read-only for git history,
-    scratch writable, no network).
+    scratch writable, networked — measurement duty may need the calib DB).
   - ``ScientificMemoryTools`` dispatches the Proposer's memory operations to
     ``MemoryService``.
 
@@ -22,6 +22,7 @@ from threading import Thread
 
 from .runtime import MountMap
 from .child_processes import CHILD_PROCESSES
+from .research_files import PathBoundary, ResearchFiles
 
 
 @dataclass(frozen=True)
@@ -38,14 +39,74 @@ RESEARCH_TOOL_SPECS = (
         action="run_research_command",
         schema=(
             '{"action":"run_research_command","command":"...",'
-            '"cwd":"work|scratch"}'
+            '"cwd":"work|scratch","workdir":"/work/sub/dir"}'
         ),
         description=(
             "Run a bounded shell command in your writable lab (/work) or "
             "scratch (/scratch). /work is the accepted source tree "
             "materialized read-write: read it, write scratch code, compile, "
             "run toys to understand the code. Git history (any prior "
-            "experiment SHA) is readable via /repo; you cannot commit."
+            "experiment SHA) is readable via /repo; you cannot commit. "
+            "workdir (absolute, under /work or /scratch) sets where the "
+            "command runs and is remembered — later commands land in the "
+            "same directory until you move; cwd is the coarse work|scratch "
+            "spelling of the same choice. Reserve this tool for what the "
+            "dedicated tools cannot do: compiling, running, measuring, git."
+        ),
+    ),
+    ResearchToolSpec(
+        action="read_file",
+        schema=(
+            '{"action":"read_file","path":"/work/...",'
+            '"offset":1,"limit":400}'
+        ),
+        description=(
+            "Read one file with line numbers. path is absolute under "
+            "/work, /repo, or /scratch; offset is the 1-based first line "
+            "(default 1); limit caps the lines returned (default 400, max "
+            "2000) and the result flags when the file continues. Your duty "
+            "for reading code: reach for read_file before shelling out "
+            "cat/sed/head."
+        ),
+    ),
+    ResearchToolSpec(
+        action="grep_files",
+        schema=(
+            '{"action":"grep_files","pattern":"...","path":"/work",'
+            '"glob":"*.cc","context":2,"max_matches":50}'
+        ),
+        description=(
+            "Search file contents for a regex under a directory or in one "
+            "file. glob narrows which files are searched; context adds "
+            "lines around each match (default 0); max_matches caps hits "
+            "(default 50). Returns path:line:text rows. Your duty for "
+            "locating where things live: reach for grep_files before "
+            "shelling out grep/rg."
+        ),
+    ),
+    ResearchToolSpec(
+        action="glob_files",
+        schema=(
+            '{"action":"glob_files","pattern":"**/*.py","path":"/work",'
+            '"limit":200}'
+        ),
+        description=(
+            "List file paths matching a glob under a root (default /work), "
+            "capped at limit (default 200). Your duty for finding files by "
+            "name: reach for glob_files before shelling out find/ls."
+        ),
+    ),
+    ResearchToolSpec(
+        action="write_scratch_file",
+        schema=(
+            '{"action":"write_scratch_file","path":"/scratch/...",'
+            '"content":"..."}'
+        ),
+        description=(
+            "Write a file under /scratch with exactly this content — the "
+            "way to create scratch scripts, since heredoc quoting in a "
+            "shell command corrupts code. Content is size-capped; only "
+            "/scratch is writable through this tool."
         ),
     ),
     ResearchToolSpec(
@@ -165,18 +226,25 @@ class ResearchCommandRunner:
         self.home = Path(home)
         self.timeout_seconds = timeout_seconds
         self.output_cap_chars = output_cap_chars
+        # cwd memory: once the agent sets a workdir (or the coarse cwd
+        # spelling), later commands that omit both land in the same
+        # directory — no repeated `cd` preamble per command.
+        self._last_workdir = "/work"
+        self._workdir_boundary = PathBoundary(
+            work=self.workspace, repo=self.repo, scratch=self.scratch,
+        )
 
     def run(
         self,
         command: str,
         *,
-        cwd: str = "work",
+        cwd: str | None = None,
+        workdir: str | None = None,
         timeout_seconds: float | None = None,
     ) -> dict:
         if not isinstance(command, str) or not command.strip():
             raise ValueError("research command must be non-empty")
-        if cwd not in {"work", "scratch"}:
-            raise ValueError("research cwd must be 'work' or 'scratch'")
+        container_cwd = self._resolve_cwd(cwd, workdir)
         git_dir = self._worktree_git_dir()
         payload = [
             "env",
@@ -205,8 +273,7 @@ class ResearchCommandRunner:
             mounts=self.world_mount,
             home=self.home,
             extra_binds=extra_binds,
-            work_cwd="/scratch" if cwd == "scratch" else "/work",
-            network=False,
+            work_cwd=container_cwd,
         )
         process = subprocess.Popen(
             argv,
@@ -273,6 +340,31 @@ class ResearchCommandRunner:
             "truncated": truncated,
             "output": output,
         }
+
+    def _resolve_cwd(self, cwd: str | None, workdir: str | None) -> str:
+        """Pick the container cwd for one command, updating the memory.
+
+        ``workdir`` (absolute, under /work or /scratch) wins when both are
+        given; ``cwd`` is the coarse work|scratch spelling; with neither,
+        the last choice persists.
+        """
+        if workdir is not None:
+            if workdir == "/repo" or workdir.startswith("/repo/"):
+                raise ValueError(
+                    "workdir must be under /work or /scratch, not /repo"
+                )
+            host = self._workdir_boundary.resolve(workdir)
+            if not host.is_dir():
+                raise ValueError(f"workdir does not exist: {workdir!r}")
+            self._last_workdir = workdir
+            return workdir
+        if cwd is not None:
+            if cwd not in {"work", "scratch"}:
+                raise ValueError(
+                    "research cwd must be 'work' or 'scratch'"
+                )
+            self._last_workdir = "/scratch" if cwd == "scratch" else "/work"
+        return self._last_workdir
 
     def _worktree_git_dir(self) -> str:
         git_file = self.workspace / ".git"
@@ -349,6 +441,12 @@ class ResearchTools:
         self.memory = memory_service
         self.current_round = int(current_round)
         self.command_timeout_seconds = command_timeout_seconds
+        self.files = ResearchFiles(
+            work=workspace,
+            repo=repo,
+            scratch=scratch,
+            cap_chars=command_output_cap_chars,
+        )
         self.command_runner = ResearchCommandRunner(
             runtime=runtime,
             workspace=workspace,
@@ -362,6 +460,9 @@ class ResearchTools:
         )
 
     def execute(self, action: dict, *, deadline: float) -> dict:
+        """Execute one action; never raises — usage and I/O failures come
+        back as ``{"ok": False, "error": ...}`` observations so a batch
+        continues past a bad item."""
         name = action["action"]
         try:
             if name == "run_research_command":
@@ -370,10 +471,36 @@ class ResearchTools:
                     return {"ok": False, "error": "proposer deadline exceeded"}
                 return self.command_runner.run(
                     action["command"],
-                    cwd=action["cwd"],
+                    cwd=action.get("cwd"),
+                    workdir=action.get("workdir"),
                     timeout_seconds=min(
                         self.command_timeout_seconds, remaining,
                     ),
+                )
+            if name == "read_file":
+                return self.files.read_file(
+                    action["path"],
+                    offset=action.get("offset", 1),
+                    limit=action.get("limit", 400),
+                )
+            if name == "grep_files":
+                return self.files.grep_files(
+                    action["pattern"],
+                    path=action.get("path", "/work"),
+                    glob=action.get("glob"),
+                    context=action.get("context", 0),
+                    max_matches=action.get("max_matches", 50),
+                )
+            if name == "glob_files":
+                return self.files.glob_files(
+                    action["pattern"],
+                    path=action.get("path", "/work"),
+                    limit=action.get("limit", 200),
+                )
+            if name == "write_scratch_file":
+                return self.files.write_scratch_file(
+                    action["path"],
+                    content=action["content"],
                 )
             if name == "inspect_episode":
                 return {
@@ -414,6 +541,6 @@ class ResearchTools:
                         buckets=bool(action.get("buckets", True)),
                     ),
                 }
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
-        raise ValueError(f"unsupported research action: {name}")
+        return {"ok": False, "error": f"unsupported research action: {name}"}

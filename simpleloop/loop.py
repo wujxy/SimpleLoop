@@ -4,14 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
+from .candidate import NOT_PERFORMED_STATUSES
 from .round import RoundRequest, RoundResult, SelectionPolicy
 from .scheduling.contracts import InfrastructureError
-
-# Candidate statuses that never reached evaluation: the intervention was not
-# performed (experimenter session death, worker failure).
-_NOT_PERFORMED = frozenset({
-    "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED", "WORKER_FAILED",
-})
 
 
 @dataclass(frozen=True)
@@ -181,7 +176,7 @@ def run_loop(
         # is a systemic executor/provider failure, not research noise.
         performed = [
             c for c in result.candidates
-            if str(getattr(c.status, "value", c.status)) not in _NOT_PERFORMED
+            if str(getattr(c.status, "value", c.status)) not in NOT_PERFORMED_STATUSES
         ]
         if result.candidates and not performed:
             all_dead_streak += 1

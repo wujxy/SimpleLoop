@@ -37,6 +37,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .model import ChatModel
+
+from .memory.reflection_views import (
+    NOT_PERFORMED_STATUSES,
+    classify_improvement,
+    commitment_watchlist,
+    prescription_followthrough,
+)
 from .research_tools import (
     MEMORY_TOOL_ACTIONS,
     ResearchTools,
@@ -144,12 +151,20 @@ class ReflectionResult:
 
     ``abstained`` reflects a reflection that exhausted its budget before
     producing a handoff.
+
+    The remaining fields are the reflector's optional structured byproducts:
+    watch-item ``prescriptions`` (the Host stores them and replays them with
+    follow-up evidence at later reflections) and
+    ``next_reflection_after_rounds`` (agent-owned cadence within the Host's
+    interval cap). All are advisory to the Host — it records, never judges.
     """
 
     handoff: str
     self_limitation_suspected: bool = False
     note: str | None = None
     abstained: bool = False
+    prescriptions: tuple = ()
+    next_reflection_after_rounds: int | None = None
     usage: object = None
     deliberation_telemetry: dict = field(default_factory=dict)
     trace: dict = field(default_factory=dict)
@@ -158,7 +173,25 @@ class ReflectionResult:
 # --- Tunables --------------------------------------------------------------
 
 # Research / memory tools never terminate the loop.
-_RESEARCH_TOOL_ACTIONS = frozenset({"run_research_command"} | MEMORY_TOOL_ACTIONS)
+_RESEARCH_TOOL_ACTIONS = frozenset({
+    "run_research_command", "read_file", "grep_files", "glob_files",
+    "write_scratch_file",
+} | MEMORY_TOOL_ACTIONS)
+
+# Terminal actions end the deliberation; they are always sent alone, never
+# inside an {"actions": [...]} batch.
+_TERMINAL_ACTIONS = frozenset({
+    "submit_proposals", "submit_self_decision", "submit_reflection_handoff",
+})
+
+# Cap on actions per {"actions": [...]} batch envelope.
+_MAX_BATCH_ACTIONS = 8
+
+# Tool actions whose success means the Scientist has looked at the actual
+# source (drives the located flag / source_read telemetry).
+_SOURCE_READ_ACTIONS = frozenset({
+    "run_research_command", "read_file", "grep_files", "glob_files",
+})
 
 # How many complete (assistant→observation) turn-blocks to carry from the prior
 # trajectory into the resume context. The notebook carries the long-term; this
@@ -168,7 +201,7 @@ _TAIL_TURNS = 8
 
 # Prompt-version stamp recorded in meta.json so a prompt change is observable
 # per Scientist across rounds.
-SCIENTIST_PROMPT_VERSION = "scientist-v5"
+SCIENTIST_PROMPT_VERSION = "scientist-v6"
 
 
 # --- Live-context compaction (Option A: deterministic shedding) -----------
@@ -376,9 +409,19 @@ _TOOL_BLOCK = (
 )
 
 _PROTOCOL_BLOCK = """Output protocol (immutable): every response is exactly one \
-JSON object. It carries one required field and one optional field.
+JSON object, in one of two shapes. A single action object — its "action" field \
+names the action and the action's own fields sit alongside it, exactly as the \
+tool schemas above show. Or a batch envelope of up to 8 tool actions:
 
-  {"message": "...optional...", "action": {"action": "...", ...fields...}}
+  {"action": "...", ...the action's fields..., "message": "...optional..."}
+  {"actions": [<action object>, ...], "message": "...optional..."}
+
+A batch's actions run sequentially in one step and all their results return \
+together as one {"tool_results": [...]} message — reach for it when you have \
+several independent lookups (reads, greps, globs) so each costs no turn of \
+its own. A single action's result arrives in the same {"tool_results": [...]} \
+shape with one entry. submit_proposals is always sent ALONE as a single \
+action object, never inside a batch.
 
 - "action" (required): one research tool call, OR submit_proposals.
 - "message" (optional): natural text you choose to leave in your own research
@@ -417,6 +460,10 @@ _RUNTIME_BOUNDARIES = """Runtime boundaries:
   You CANNOT commit, branch, or reset — creating artifacts is the executor's
   job, and the read-only /repo structurally prevents it.
 - /scratch is temporary writable space.
+- read_file, grep_files, and glob_files see the same /work, /repo, and
+  /scratch paths as your shell but answer without entering the container —
+  your navigation duty routes through them first. write_scratch_file writes
+  only under /scratch; building and running stay with run_research_command.
 - Anything you measure in your lab (a toy build, a probe) is for YOUR
   understanding only. It is never a merit fact: whether a change is faster or
   correct is the Harness's verdict, not yours. You may predict, judge, and bet
@@ -505,9 +552,19 @@ def _valid_expectations(raw: object) -> list[dict]:
 # --- Self-review prompt scaffolding (RSI S3c) ------------------------------
 
 _SELF_REVIEW_PROTOCOL_BLOCK = """Output protocol (immutable): every response is exactly one \
-JSON object.
+JSON object, in one of two shapes. A single action object — its "action" field \
+names the action and the action's own fields sit alongside it, exactly as the \
+tool schemas above show. Or a batch envelope of up to 8 tool actions:
 
-  {"message": "...optional...", "action": {"action": "...", ...fields...}}
+  {"action": "...", ...the action's fields..., "message": "...optional..."}
+  {"actions": [<action object>, ...], "message": "...optional..."}
+
+A batch's actions run sequentially in one step and all their results return \
+together as one {"tool_results": [...]} message — reach for it when you have \
+several independent lookups (reads, greps, globs) so each costs no turn of \
+its own. A single action's result arrives in the same {"tool_results": [...]} \
+shape with one entry. submit_self_decision is always sent ALONE as a single \
+action object, never inside a batch.
 
 - "action" (required): one research tool call, OR submit_self_decision.
 - "message" (optional): natural text for your own trajectory; not required and
@@ -560,9 +617,19 @@ _SELF_REVIEW_DEFAULT_DEFER = 3
 # --- Reflection prompt scaffolding (continuity design §9-§16) -------------
 
 _REFLECTION_PROTOCOL_BLOCK = """Output protocol (immutable): every response is exactly one \
-JSON object.
+JSON object, in one of two shapes. A single action object — its "action" field \
+names the action and the action's own fields sit alongside it, exactly as the \
+tool schemas above show. Or a batch envelope of up to 8 tool actions:
 
-  {"message": "...optional...", "action": {"action": "...", ...fields...}}
+  {"action": "...", ...the action's fields..., "message": "...optional..."}
+  {"actions": [<action object>, ...], "message": "...optional..."}
+
+A batch's actions run sequentially in one step and all their results return \
+together as one {"tool_results": [...]} message — reach for it when you have \
+several independent lookups (reads, greps, globs) so each costs no turn of \
+its own. A single action's result arrives in the same {"tool_results": [...]} \
+shape with one entry. submit_reflection_handoff is always sent ALONE as a \
+single action object, never inside a batch.
 
 - "action" (required): one research tool call, OR submit_reflection_handoff.
 - "message" (optional): natural text for your own trajectory; not required and
@@ -570,11 +637,14 @@ JSON object.
 
 Control action (the only non-tool action):
 - {"action":"submit_reflection_handoff",
-   "handoff":"<note to your next self — a cognitive warning about how the
-              recent you may have failed, grounded in cited evidence; NOT an
-              instruction, NOT a next direction, NOT a proposal>",
+   "handoff":"<note to your next self about how the recent you may have
+              failed and what its trajectory never touched, grounded in
+              cited evidence; NOT an instruction, NOT a next direction,
+              NOT a proposal>",
    "self_limitation_suspected": true|false,   # advisory RSI evidence only
-   "note":"...optional context..."}
+   "note":"...optional context...",
+   "prescriptions":["...optional watch items...", ...],
+   "next_reflection_after_rounds": 3}  # optional
   handoff is required and must be a non-empty string. self_limitation_suspected
   defaults to false and true is a strong claim you must earn: set it true only
   when you can cite the SAME named limitation evidenced in the ledger on at
@@ -584,15 +654,32 @@ Control action (the only non-tool action):
   later self-review — reflection itself never modifies you).
   Do NOT submit proposals, do NOT submit a self_decision, do NOT choose the
   next research direction. Reveal the inertia; the next self re-decides.
+
+  The optional structured fields are how you leave the ledger something it can
+  carry for you:
+  - prescriptions: the specific watch items inside your handoff ("check whether
+    the eval-count family was ever tested on the harness"). The ledger replays
+    each of them at your next reflection together with what the trajectory did
+    since you wrote it down — so a prescription cannot decay silently.
+  - next_reflection_after_rounds: you own the reflection cadence within the
+    host's interval cap. If the trajectory is mid-turn or commitments are
+    piling up unadjudicated, ask for the next reflection sooner; the interval
+    remains the upper bound either way.
 """
 
 _REFLECTION_COLD_START = (
     "You are beginning a reflection. The Goal, the current work, the "
     "deterministic reflection evidence pack, and your own notebook are in "
     "your standing context. Your job is not to advance the research — it is "
-    "to doubt it: find where the recent version of you may have failed to "
-    "advance the Goal effectively, cite the evidence, and leave your next "
-    "self a warning. Then submit your handoff."
+    "to audit it, on two fronts. First, doubt it: find where the recent "
+    "version of you may have failed to advance the Goal effectively, cite "
+    "the evidence, and leave your next self a warning. Second, map it: your "
+    "trajectory has a shape — where attention concentrated, and what it "
+    "never touched. Doubt interrogates decisions; the map interrogates the "
+    "option set those decisions chose from. An absence of coverage is "
+    "itself a finding, and only the world (readable via your tools) can "
+    "settle whether an absence is real. Then submit your handoff. You do "
+    "not choose what comes next; your next self re-decides."
 )
 
 _REFLECTION_BUDGET_NUDGE = (
@@ -636,7 +723,8 @@ def _build_reflection_prompt(
 
 
 def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
-                              current_round: int, n: int = 12) -> str:
+                              current_round: int, n: int = 12,
+                              memory_service=None) -> str:
     """A compact, factual summary of recent Goal progress from history.jsonl —
     the authoritative 'am I progressing fast enough?' evidence (semantics §5.2).
     Reports outcomes only (objective trajectory, selection, gates), never
@@ -651,9 +739,6 @@ def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
     recent = rows[-n:]
     obj_label = objective_key or "(objective)"
     lines = [f"Recent task progress (last {len(recent)} of {len(rows)} task round(s)):"]
-    _not_performed = {
-        "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED", "WORKER_FAILED",
-    }
     for row in recent:
         rnd = row.get("round")
         cands = row.get("candidates") or []
@@ -661,7 +746,7 @@ def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
                      if isinstance(c, dict) and c.get("gate_passed"))
         dead = [c for c in cands
                 if isinstance(c, dict)
-                and str(c.get("status") or "") in _not_performed]
+                and str(c.get("status") or "") in NOT_PERFORMED_STATUSES]
         dead_note = ""
         if dead:
             causes = "; ".join(
@@ -717,6 +802,53 @@ def _build_self_progress_pack(run_dir: Path, objective_key: str | None,
                 "A recent reflection flagged a suspected self-limitation "
                 "(advisory evidence, one judgment — verify it against this "
                 "progress record yourself).")
+    except Exception:
+        pass
+    # Commitment/prescription dimensions: the same ledger bookkeeping
+    # the reflection pack carries, folded into counts so a self-review sees
+    # the 'knowledge changed but behavior did not' pattern without digging.
+    # Best-effort — a missing store degrades to absence, never an error.
+    try:
+        records = read_reflection_records(run_dir)
+        if memory_service is not None:
+            experiments = memory_service.load_experiments()
+            from .scientist_session import read_expectations
+            # Outcome classification is direction-sensitive — take it from
+            # the metrics schema, not from the caller's objective_key alone.
+            objective = (memory_service.metrics_schema or {}).get(
+                "objective") or {}
+            watchlist = commitment_watchlist(
+                experiments, read_expectations(run_dir), records,
+                current_round=current_round,
+                objective_key=objective.get("key") or objective_key,
+                lower_is_better=bool(objective.get("lower_is_better")))
+            unadjudicated = [
+                row for row in watchlist
+                if row["attempts_on_finding_since"] == 0
+                and row["reflections_since"] == 0]
+            followthrough = prescription_followthrough(
+                records, experiments, current_round=current_round)
+        else:
+            unadjudicated = []
+            followthrough = []
+        if unadjudicated or followthrough:
+            lines.append(
+                "Commitment bookkeeping (facts only; what they mean for "
+                "your design is your judgment):")
+            if unadjudicated:
+                ids = ", ".join(row["experiment_id"]
+                                for row in unadjudicated)
+                lines.append(
+                    f"  - {len(unadjudicated)} clause-bearing commitment(s) "
+                    "with no recorded follow-up attempt or reflection since: "
+                    + ids)
+            for row in followthrough:
+                lines.append(
+                    f"  - prescription {row['id']} "
+                    f"(+{row['rounds_elapsed']} rounds, "
+                    f"{len(row['experiments_since'])} experiment(s), "
+                    f"{len(row['selections_since'])} selection(s) since): "
+                    f"{row['text'][:160]}")
     except Exception:
         pass
     return "\n".join(lines)
@@ -942,6 +1074,28 @@ def _build_world_event(
     last = [e for e in experiments if e.round == replay_round]
     last.sort(key=lambda e: (e.round, e.candidate))
 
+    # Objective spec + the incumbent the replayed candidates were measured
+    # against, so a passing sibling that lost to a better sibling is not
+    # reported as "not improved" (tiny-test r2c0: 0.5919→0.2971 labeled
+    # NOT_IMPROVED — the label literally matched the Scientist's own
+    # pre-registered weakening clause on false grounds).
+    obj = (getattr(memory_service, "metrics_schema", None) or {}).get(
+        "objective") or {}
+    obj_key = obj.get("key")
+    lower_is_better = bool(obj.get("lower_is_better"))
+    incumbent_value = None
+    best_round = None
+    if obj_key:
+        for e in experiments:
+            if not e.selected or e.round >= replay_round:
+                continue
+            value = (e.metrics or {}).get(obj_key)
+            if (isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and (best_round is None or e.round > best_round)):
+                incumbent_value = value
+                best_round = e.round
+
     # The parent these candidates were built on is the world the Scientist was
     # studying that round (single-lane: all share one parent).
     prev_sha = last[0].parent_sha or "—"
@@ -990,15 +1144,27 @@ def _build_world_event(
         elif status == "EVAL_FAILED":
             outcome = "EVALUATION_FAILED — the evaluation itself failed"
         elif e.gate_passed:
-            outcome = "PASSED_GATES_NOT_IMPROVED"
+            improved = classify_improvement(
+                e.metrics, incumbent_value, obj_key, lower_is_better)
+            if improved is True:
+                outcome = (
+                    "PASSED_GATES_IMPROVED_NOT_SELECTED — beat the incumbent "
+                    "objective, but a sibling candidate was selected instead"
+                )
+            elif improved is False:
+                outcome = "PASSED_GATES_NOT_IMPROVED"
+            else:
+                outcome = "PASSED_GATES_NOT_SELECTED"
         else:
             outcome = "FAILED_GATES"
         candidate = e.candidate_sha[:10] if e.candidate_sha else "—"
         paths = ", ".join(e.changed_paths) if e.changed_paths else "—"
-        not_performed = status in {
-            "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED", "WORKER_FAILED",
-            "NO_CHANGE", "EVAL_FAILED",
-        }
+        # Wider than NOT_PERFORMED_STATUSES: these all have no metrics to
+        # show, but NO_CHANGE/EVAL_FAILED are real outcomes the expectation
+        # ledger still judges (only the three not-performed ones are UNTESTED).
+        no_metrics = status in (
+            NOT_PERFORMED_STATUSES | {"NO_CHANGE", "EVAL_FAILED"}
+        )
         lines.append(f"  {e.experiment_id}")
         lines.append(
             f"    parent revision: {e.parent_sha[:10]}   "
@@ -1007,12 +1173,11 @@ def _build_world_event(
         lines.append(f"    changed paths: {paths}")
         lines.append(
             "    gate: NOT RUN"
-            if not_performed else
+            if no_metrics else
             f"    gate: {'PASSED' if e.gate_passed else 'FAILED'}   "
             f"{_fmt_metrics(e.metrics)}"
         )
-        if status in {"IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED",
-                      "WORKER_FAILED"} and e.eval_block:
+        if status in NOT_PERFORMED_STATUSES and e.eval_block:
             lines.append(
                 "    harness record of what happened: "
                 f"{e.eval_block[:300]}"
@@ -1040,9 +1205,7 @@ def _build_world_event(
             )
         row = exp_by_slot.get(e.candidate)
         if row is not None:
-            if not_performed and status in {
-                    "IMPLEMENTATION_INCOMPLETE", "EXECUTOR_FAILED",
-                    "WORKER_FAILED"}:
+            if status in NOT_PERFORMED_STATUSES:
                 lines.append(
                     "    pre-registered expectation (your own words at "
                     "suspension, before this result existed): "
@@ -1112,26 +1275,6 @@ def _build_world_event(
     return "\n".join(lines)
 
 
-# --- Guard repair messages -------------------------------------------------
-
-_GUARD_REASONS = {
-    "repeated_tool": (
-        "That tool call is identical to the previous one and would add no new "
-        "information. Change the query, inspect a different region, or move on "
-        "via submit_proposals."
-    ),
-}
-
-
-def _guard_repair_message(reason: str) -> str:
-    base = _GUARD_REASONS.get(reason, "")
-    return (
-        f"Protocol correction required ({reason}). {base} Return exactly one "
-        "JSON object with an 'action', with no prose or additional JSON "
-        "outside it."
-    )
-
-
 # --- Action parsing -------------------------------------------------------
 
 def _require_keys(
@@ -1144,6 +1287,22 @@ def _require_keys(
         raise ProposerError(
             f"invalid keys for {value.get('action')}: {sorted(value)}"
         )
+
+
+def _optional_positive_int(action: dict, key: str, default: int) -> int:
+    value = action.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ProposerError(f"{action['action']}.{key} must be a positive integer")
+    return value
+
+
+def _optional_nonnegative_int(action: dict, key: str, default: int) -> int:
+    value = action.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ProposerError(
+            f"{action['action']}.{key} must be a non-negative integer"
+        )
+    return value
 
 
 def _require_string_list(value, *, name: str, allow_empty: bool = False) -> list[str]:
@@ -1280,14 +1439,75 @@ def _dispatch(action: dict, proposal_slots: int) -> dict:
 
     # --- research / memory tools (never terminate) ---
     if name == "run_research_command":
-        _require_keys(action, {"action", "command"}, {"cwd"})
+        _require_keys(action, {"action", "command"}, {"cwd", "workdir"})
         command = action["command"]
-        cwd = action.get("cwd", "work")
+        cwd = action.get("cwd")
+        workdir = action.get("workdir")
         if not isinstance(command, str) or not command.strip():
             raise ProposerError("research command must be non-empty")
-        if cwd not in {"work", "scratch"}:
+        if cwd is not None and cwd not in {"work", "scratch"}:
             raise ProposerError("research cwd must be work or scratch")
-        return {"action": name, "command": command, "cwd": cwd}
+        if workdir is not None and not isinstance(workdir, str):
+            raise ProposerError("research workdir must be a string")
+        parsed = {"action": name, "command": command}
+        if cwd is not None:
+            parsed["cwd"] = cwd
+        if workdir is not None:
+            parsed["workdir"] = workdir
+        return parsed
+    if name == "read_file":
+        _require_keys(action, {"action", "path"}, {"offset", "limit"})
+        path = action["path"]
+        if not isinstance(path, str) or not path.strip():
+            raise ProposerError("read_file.path must be non-empty")
+        return {
+            "action": name, "path": path,
+            "offset": _optional_positive_int(action, "offset", 1),
+            "limit": _optional_positive_int(action, "limit", 400),
+        }
+    if name == "grep_files":
+        _require_keys(
+            action, {"action", "pattern"},
+            {"path", "glob", "context", "max_matches"},
+        )
+        pattern = action["pattern"]
+        if not isinstance(pattern, str) or not pattern:
+            raise ProposerError("grep_files.pattern must be non-empty")
+        path = action.get("path", "/work")
+        if not isinstance(path, str) or not path.strip():
+            raise ProposerError("grep_files.path must be non-empty")
+        glob = action.get("glob")
+        if glob is not None and not isinstance(glob, str):
+            raise ProposerError("grep_files.glob must be a string")
+        return {
+            "action": name, "pattern": pattern, "path": path, "glob": glob,
+            "context": _optional_nonnegative_int(action, "context", 0),
+            "max_matches": _optional_positive_int(
+                action, "max_matches", 50,
+            ),
+        }
+    if name == "glob_files":
+        _require_keys(action, {"action", "pattern"}, {"path", "limit"})
+        pattern = action["pattern"]
+        if not isinstance(pattern, str) or not pattern:
+            raise ProposerError("glob_files.pattern must be non-empty")
+        path = action.get("path", "/work")
+        if not isinstance(path, str) or not path.strip():
+            raise ProposerError("glob_files.path must be non-empty")
+        return {
+            "action": name, "pattern": pattern, "path": path,
+            "limit": _optional_positive_int(action, "limit", 200),
+        }
+    if name == "write_scratch_file":
+        _require_keys(action, {"action", "path", "content"})
+        path = action["path"]
+        if not isinstance(path, str) or not path.strip():
+            raise ProposerError("write_scratch_file.path must be non-empty")
+        if not isinstance(action["content"], str):
+            raise ProposerError("write_scratch_file.content must be a string")
+        return {
+            "action": name, "path": path, "content": action["content"],
+        }
     if name == "inspect_episode":
         _require_keys(action, {"action", "ref"})
         ref = action["ref"]
@@ -1424,7 +1644,8 @@ def _dispatch(action: dict, proposal_slots: int) -> dict:
     if name == "submit_reflection_handoff":
         _require_keys(
             action, {"action", "handoff"},
-            {"self_limitation_suspected", "note"})
+            {"self_limitation_suspected", "note", "prescriptions",
+             "next_reflection_after_rounds"})
         handoff = action["handoff"]
         if not isinstance(handoff, str) or not handoff.strip():
             raise ProposerError(
@@ -1439,51 +1660,186 @@ def _dispatch(action: dict, proposal_slots: int) -> dict:
                 not isinstance(note, str) or not note.strip()):
             raise ProposerError(
                 "reflection_handoff.note must be a non-empty string if given")
+
+        def _str_list(key: str, cap: int) -> list:
+            value = action.get(key)
+            if value is None:
+                return []
+            if not isinstance(value, list) or len(value) > cap:
+                raise ProposerError(
+                    f"reflection_handoff.{key} must be a list of at most "
+                    f"{cap} entries")
+            out = []
+            for item in value:
+                if not isinstance(item, str) or not item.strip():
+                    raise ProposerError(
+                        f"reflection_handoff.{key} entries must be "
+                        "non-empty strings")
+                out.append(item.strip())
+            return out
+
+        prescriptions = _str_list("prescriptions", 10)
+
+        next_reflection = action.get("next_reflection_after_rounds")
+        if next_reflection is not None:
+            if (not isinstance(next_reflection, int)
+                    or isinstance(next_reflection, bool)
+                    or next_reflection <= 0):
+                raise ProposerError(
+                    "reflection_handoff.next_reflection_after_rounds must "
+                    "be a positive integer if given")
         return {
             "action": name,
             "handoff": handoff.strip(),
             "self_limitation_suspected": suspected,
             "note": note.strip() if isinstance(note, str) else None,
+            "prescriptions": prescriptions,
+            "next_reflection_after_rounds": next_reflection,
         }
 
     raise ProposerError(f"unknown action: {name}")
 
 
+def _salvage_truncated_json(text: str) -> object | None:
+    """Recover JSON whose only defect is missing trailing ``}``/``]`` closers.
+
+    A truncating model can drop the final delimiter(s) while emitting an
+    otherwise complete action object (observed in run-004 r5: three identical
+    replies ended ``"cwd":"work"`` with no closing brace, burning every
+    protocol repair). Scan with string-literal awareness — command bodies
+    legitimately contain quotes, escapes and unbalanced braces — and if the
+    scan ends outside any string with a stack of unclosed containers, append
+    exactly those closers and parse. A truncated *value* (scan ends inside a
+    string) returns None: silently executing a cut-off command is worse than
+    one repair round, and the salvaged object still passes the full _dispatch
+    schema check either way.
+    """
+    if not isinstance(text, str):
+        return None
+    closers: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            closers.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not closers or closers[-1] != ch:
+                return None  # unbalanced in a way appending cannot fix
+            closers.pop()
+    if in_string or not closers:
+        return None
+    try:
+        salvaged = json.loads(text + "".join(reversed(closers)))
+    except (TypeError, json.JSONDecodeError):
+        return None
+    print(
+        f"[proposer] salvaged truncated JSON reply "
+        f"(appended {len(closers)} closer(s))",
+        flush=True,
+    )
+    return salvaged
+
+
+def _parse_batch(items, proposal_slots: int) -> dict:
+    """Validate an ``{"actions": [...]}`` batch envelope.
+
+    Every item is dispatched like a flat action. A terminal action
+    (submit_*) must be the sole action of its reply — mixing it with tool
+    actions would silently drop work or terminate mid-batch, so the whole
+    reply is rejected into the repair path.
+    """
+    if not isinstance(items, list) or not items:
+        raise ProposerError('"actions" must be a non-empty list')
+    if len(items) > _MAX_BATCH_ACTIONS:
+        raise ProposerError(
+            f"at most {_MAX_BATCH_ACTIONS} actions per batch; "
+            f"got {len(items)}"
+        )
+    parsed = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ProposerError("each batch action must be an object")
+        if not isinstance(item.get("action"), str):
+            raise ProposerError(
+                'each batch action needs an "action" field naming the action'
+            )
+        item = {k: v for k, v in item.items() if k != "message"}
+        parsed.append(_dispatch(item, proposal_slots))
+    names = {item["action"] for item in parsed}
+    if names & _TERMINAL_ACTIONS and len(parsed) > 1:
+        raise ProposerError(
+            "a terminal action (submit_*) must be the sole action in its "
+            "reply — never inside an actions batch"
+        )
+    return {"action": "__batch__", "items": parsed}
+
+
 def parse_response(text: str, proposal_slots: int) -> dict:
     """Parse one Scientist response.
 
-    Top level is ``{"message"?: str, "action": {...}}``. ``message`` is
-    optional natural text (left in the trajectory via the raw reply; not read
-    here). Only the inner ``action`` is validated and returned.
+    The response IS the action object — one flat JSON object whose
+    ``"action"`` key names the action, exactly the shape the tool schemas in
+    the Runtime contract show — or a batch envelope
+    ``{"actions": [<action>, ...]}`` of up to ``_MAX_BATCH_ACTIONS`` tool
+    actions, parsed to the pseudo-action ``{"action": "__batch__",
+    "items": [...]}``. ``"message"`` may appear alongside as optional
+    natural text (left in the trajectory via the raw reply; not read here).
+    The historical envelope ``{"message"?, "action": {...}}`` is still
+    unwrapped when seen, so both spellings parse.
     """
     try:
         obj = json.loads(text)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise ProposerError("response must be one JSON object") from exc
+        obj = _salvage_truncated_json(text)
+        if obj is None:
+            raise ProposerError("response must be one JSON object") from exc
     if not isinstance(obj, dict):
         raise ProposerError("response must be one JSON object")
-    action = obj.get("action")
-    if not isinstance(action, dict) or not isinstance(action.get("action"), str):
+    if isinstance(obj.get("action"), dict):
+        # Legacy envelope spelling: {"message"?, "action": {...}}.
+        obj = obj["action"]
+    if "actions" in obj:
+        if "action" in obj:
+            raise ProposerError('use either "action" or "actions", not both')
+        return _parse_batch(obj["actions"], proposal_slots)
+    if not isinstance(obj.get("action"), str):
         raise ProposerError(
-            "response must be a JSON object with an 'action' object"
+            'response must be one JSON object whose "action" field names '
+            "the action, with that action's fields alongside it"
         )
-    return _dispatch(action, proposal_slots)
+    obj = {k: v for k, v in obj.items() if k != "message"}
+    return _dispatch(obj, proposal_slots)
 
 
 # --- Guard ----------------------------------------------------------------
 
 def _validate_action_guard(
-    state: WorkingState, action: dict, source_root: Path,
+    state: WorkingState, actions: list[dict], source_root: Path,
 ) -> str | None:
     """Only remaining guard: an exact-repeat tool call back-to-back adds
-    nothing and risks a loop. Every cognitive guard (block evidence, quota
-    consistency, select-before-submit) was removed with the pipeline."""
-    name = action["action"]
-    if name in _RESEARCH_TOOL_ACTIONS:
-        fp = _fingerprint(action)
-        if (state.last_tool_fingerprint is not None
-                and fp == state.last_tool_fingerprint):
+    nothing and risks a loop. The check chains through a batch — the first
+    item is compared against the previous step's last fingerprint, each
+    later item against its in-batch predecessor. Every cognitive guard
+    (block evidence, quota consistency, select-before-submit) was removed
+    with the pipeline."""
+    previous = state.last_tool_fingerprint
+    for action in actions:
+        if action["action"] not in _RESEARCH_TOOL_ACTIONS:
+            continue
+        fingerprint = _fingerprint(action)
+        if previous is not None and fingerprint == previous:
             return "repeated_tool"
+        previous = fingerprint
     return None
 
 
@@ -1549,13 +1905,16 @@ class ScientistAgent(ResearchAgent):
             flush=True,
         )
 
-    def _parse_action(self, text: str) -> dict:
-        return parse_response(text, self._proposal_slots)
+    def _parse_action(self, text: str) -> list[dict]:
+        result = parse_response(text, self._proposal_slots)
+        if result["action"] == "__batch__":
+            return result["items"]
+        return [result]
 
     def _validate_guard(
-        self, state: WorkingState, action: dict, source_root: Path,
+        self, state: WorkingState, actions: list[dict], source_root: Path,
     ) -> str | None:
-        return _validate_action_guard(state, action, source_root)
+        return _validate_action_guard(state, actions, source_root)
 
     def research(
         self,
@@ -1656,7 +2015,7 @@ class ScientistAgent(ResearchAgent):
                 handoff_msg = (
                     f"Reflection handoff from round {record['round_id']} — "
                     "one judgment your past self made after deliberately "
-                    "doubting its own trajectory. It is not a fact and not an "
+                    "auditing its own trajectory. It is not a fact and not an "
                     "instruction; weigh it against the current evidence, then "
                     "decide for yourself:\n\n" + str(record["handoff"])
                 )
@@ -1760,7 +2119,8 @@ class ScientistAgent(ResearchAgent):
         """
         charter = load_semantic("self_review", prompt_dir)
         progress_pack = _build_self_progress_pack(
-            run_dir, objective_key, current_round)
+            run_dir, objective_key, current_round,
+            memory_service=memory_service)
         self_history = _read_self_review_history_text(reviews_path)
         system_prompt = _build_self_review_prompt(
             charter=charter, goal=goal,
@@ -1924,6 +2284,9 @@ class ScientistAgent(ResearchAgent):
                     self_limitation_suspected=action.get(
                         "self_limitation_suspected", False),
                     note=action.get("note"),
+                    prescriptions=tuple(action.get("prescriptions") or ()),
+                    next_reflection_after_rounds=action.get(
+                        "next_reflection_after_rounds"),
                     usage=usages,
                     deliberation_telemetry=_build_telemetry(
                         state, steps=step, outcome="submit"),
@@ -2043,14 +2406,15 @@ class ScientistAgent(ResearchAgent):
                     messages.append({"role": "user", "content": budget_nudge})
                     reminded = True
 
-                action, reply_text = self._step(
+                actions, reply_text = self._step(
                     state, messages, system_prompt, deadline, usages, step,
                     source_root=source_root, steps_budget=steps_budget,
                 )
-                name = action["action"]
-                state.action_log.append({"action": name, "step": step})
 
-                if name == terminal_name:
+                if len(actions) == 1 and actions[0]["action"] == terminal_name:
+                    action = actions[0]
+                    name = action["action"]
+                    state.action_log.append({"action": name, "step": step})
                     _bump(state, name)
                     # The terminal reply enters BOTH the live context and the
                     # archive, so the suspension checkpoint sees what the
@@ -2071,16 +2435,29 @@ class ScientistAgent(ResearchAgent):
                     )
                     return make_result(action, state, usages, step, "submit")
 
-                # tool call
-                observation = tools.execute(action, deadline=deadline)
-                _bump(state, "tool")
-                _register_evidence(state, action, observation)
-                state.last_tool_fingerprint = _fingerprint(action)
-                if observation.get("ok") and name == "run_research_command":
-                    _bump(state, "source_read")
-                    state.located = True
+                # tool calls: one step runs the reply's action(s) in order —
+                # a lone flat action or an {"actions": [...]} batch — and all
+                # observations return together as one user message.
+                results = []
+                for action in actions:
+                    name = action["action"]
+                    state.action_log.append({"action": name, "step": step})
+                    observation = tools.execute(action, deadline=deadline)
+                    _bump(state, "tool")
+                    _register_evidence(state, action, observation)
+                    state.last_tool_fingerprint = _fingerprint(action)
+                    if (observation.get("ok")
+                            and name in _SOURCE_READ_ACTIONS):
+                        _bump(state, "source_read")
+                        state.located = True
+                    results.append(observation)
+                    print(
+                        f"[{_stamp()}] [scientist step {step}/{steps_budget}] "
+                        f"{name} ok={observation.get('ok')}",
+                        flush=True,
+                    )
                 obs_envelope = json.dumps(
-                    {"tool_result": observation}, ensure_ascii=False,
+                    {"tool_results": results}, ensure_ascii=False,
                 )
                 messages.extend([
                     {"role": "assistant", "content": reply_text},
@@ -2090,11 +2467,6 @@ class ScientistAgent(ResearchAgent):
                                        round_id=current_round)
                 session.append_message("user", obs_envelope,
                                        round_id=current_round)
-                print(
-                    f"[{_stamp()}] [scientist step {step}/{steps_budget}] "
-                    f"{name} ok={observation.get('ok')}",
-                    flush=True,
-                )
                 # The live context grows by one (assistant, observation) pair
                 # per step. On source-heavy tasks this fills the window long
                 # before the step budget — shed oldest pairs when it does. The
